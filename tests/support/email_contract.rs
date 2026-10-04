@@ -165,6 +165,19 @@ impl LocalEmailClient {
                 None,
             ));
         }
+        if matches!(self.provider, Provider::SendGrid)
+            && (idempotency_key.is_empty()
+                || idempotency_key.len() > 128
+                || !idempotency_key
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_'))
+        {
+            return Err(failure(
+                FailureKind::InvalidRequest,
+                Acceptance::Rejected,
+                None,
+            ));
+        }
         let mut request = self
             .client
             .post(self.endpoint.clone())
@@ -172,7 +185,7 @@ impl LocalEmailClient {
             .json(&match self.provider {
                 Provider::SendGrid => serde_json::json!({
                     "from":mailbox(&email.from)?, "reply_to":mailbox(&email.reply_to)?,
-                    "personalizations":[{"to":[mailbox(&email.to)?]}], "subject":email.subject,
+                    "personalizations":[{"to":[mailbox(&email.to)?],"custom_args":{"puxiri_attempt":idempotency_key}}], "subject":email.subject,
                     "content":[{"type":"text/plain","value":email.text},{"type":"text/html","value":email.html}],
                     "tracking_settings":{"click_tracking":{"enable":false,"enable_text":false},"open_tracking":{"enable":false}}
                 }),

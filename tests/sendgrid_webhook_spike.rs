@@ -336,3 +336,171 @@ async fn bounded_batches_quarantine_unknown_and_uncorrelatable_events_without_su
     // This fixture has no suppression/users/send-state tables or effects.
     fixture.db().close().await;
 }
+
+const ATTEMPT: &str = "0190d0c4-7e9a-7b3c-9f12-1a2b3c4d5e6f";
+async fn registered(fixture: &Fixture, config: &str, recipient: &str) {
+    sqlx::query("INSERT INTO sg_feedback_sends(config,attempt,recipient) VALUES(?,?,?)")
+        .bind(config)
+        .bind(ATTEMPT)
+        .bind(recipient)
+        .execute(fixture.db().pool())
+        .await
+        .unwrap();
+}
+fn correlated(id: &str, kind: &str) -> Value {
+    let mut value = event(id, kind);
+    value["puxiri_attempt"] = json!(ATTEMPT);
+    value
+}
+async fn effects(fixture: &Fixture) -> (i64, i64) {
+    (
+        sqlx::query_scalar("SELECT count(*) FROM sg_feedback_suppression")
+            .fetch_one(fixture.db().pool())
+            .await
+            .unwrap(),
+        sqlx::query_scalar("SELECT count(*) FROM sg_feedback_audit")
+            .fetch_one(fixture.db().pool())
+            .await
+            .unwrap(),
+    )
+}
+
+#[tokio::test]
+async fn signed_correlated_complaint_is_deduplicated_persistent_and_never_bans_users_or_clears_on_delivery()
+ {
+    let mut fixture = Fixture::new().await;
+    registered(&fixture, "sendgrid-fixture-v1", "recipient@example.invalid").await;
+    sqlx::raw_sql("CREATE TABLE fixture_users(id TEXT PRIMARY KEY,banned INTEGER); INSERT INTO fixture_users VALUES('user',0);
+        CREATE TABLE fixture_bell(id TEXT PRIMARY KEY); INSERT INTO fixture_bell VALUES('notification');")
+        .execute(fixture.db().pool()).await.unwrap();
+    let batch = json!([correlated("complaint", "spamreport")]);
+    let (a, b) = tokio::join!(fixture.send(batch.clone()), fixture.send(batch.clone()));
+    assert_eq!((a, b), (204, 204));
+    assert_eq!(effects(&fixture).await, (1, 1));
+    fixture.restart("sendgrid-fixture-v1").await;
+    assert_eq!(fixture.send(batch).await, 204);
+    assert_eq!(
+        fixture
+            .send(json!([correlated("late-delivery", "delivered")]))
+            .await,
+        204
+    );
+    assert_eq!(effects(&fixture).await, (1, 1));
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT banned FROM fixture_users")
+            .fetch_one(fixture.db().pool())
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM fixture_bell")
+            .fetch_one(fixture.db().pool())
+            .await
+            .unwrap(),
+        1
+    );
+    let audit: Vec<(String, String, String)> =
+        sqlx::query_as("SELECT config,attempt,reason FROM sg_feedback_audit")
+            .fetch_all(fixture.db().pool())
+            .await
+            .unwrap();
+    assert!(!format!("{audit:?}").contains("recipient@example.invalid"));
+    fixture.db().close().await;
+}
+
+#[tokio::test]
+async fn blocked_content_reputation_or_missing_classification_cannot_become_permanent_invalid() {
+    let fixture = Fixture::new().await;
+    registered(&fixture, &fixture.config, "recipient@example.invalid").await;
+    for (index, (bounce_type, classification)) in [
+        ("blocked", "Invalid Address"),
+        ("bounce", "Content"),
+        ("bounce", "Reputation"),
+        ("bounce", ""),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut value = correlated(&format!("not-invalid-{index}"), "bounce");
+        value["type"] = json!(bounce_type);
+        value["bounce_classification"] = json!(classification);
+        assert_eq!(fixture.send(json!([value])).await, 204);
+    }
+    assert_eq!(effects(&fixture).await, (0, 0));
+    let mut value = correlated("invalid", "bounce");
+    value["type"] = json!("bounce");
+    value["bounce_classification"] = json!("Invalid Address");
+    assert_eq!(fixture.send(json!([value])).await, 204);
+    assert_eq!(effects(&fixture).await, (1, 1));
+    fixture.db().close().await;
+}
+
+#[tokio::test]
+async fn missing_attempt_wrong_config_or_address_never_uses_message_prefix_as_correlation() {
+    let fixture = Fixture::new().await;
+    registered(&fixture, "another-config", "recipient@example.invalid").await;
+    assert_eq!(
+        fixture
+            .send(json!([correlated("wrong-config", "spamreport")]))
+            .await,
+        204
+    );
+    registered(&fixture, &fixture.config, "expected@example.invalid").await;
+    assert_eq!(
+        fixture
+            .send(json!([
+                correlated("wrong-recipient", "spamreport"),
+                event("no-token", "spamreport")
+            ]))
+            .await,
+        204
+    );
+    assert_eq!(effects(&fixture).await, (0, 0));
+    let body = serde_json::to_vec(&json!([correlated("bad-signature", "spamreport")])).unwrap();
+    let other = SigningKey::from_slice(&[43; 32]).unwrap();
+    assert_eq!(
+        fixture.post(body.clone(), signed(&other, &body, NOW)).await,
+        401
+    );
+    assert_eq!(effects(&fixture).await, (0, 0));
+    fixture.db().close().await;
+}
+
+#[tokio::test]
+async fn early_event_can_reconcile_by_authenticated_replay_without_inventing_sendgrid_message_mapping()
+ {
+    let fixture = Fixture::new().await;
+    let mut early = correlated("early", "spamreport");
+    early.as_object_mut().unwrap().remove("sg_message_id");
+    assert_eq!(fixture.send(json!([early.clone()])).await, 204);
+    assert_eq!(effects(&fixture).await, (0, 0));
+    registered(&fixture, &fixture.config, "recipient@example.invalid").await;
+    assert_eq!(fixture.send(json!([early.clone()])).await, 204);
+    assert_eq!(fixture.send(json!([early])).await, 204);
+    assert_eq!(effects(&fixture).await, (1, 1));
+    fixture.db().close().await;
+}
+
+#[tokio::test]
+async fn audit_failure_rolls_back_all_batch_effects_and_inbox_before_http_ack() {
+    let fixture = Fixture::new().await;
+    registered(&fixture, &fixture.config, "recipient@example.invalid").await;
+    sqlx::raw_sql("CREATE TRIGGER fail_feedback BEFORE INSERT ON sg_feedback_audit BEGIN SELECT RAISE(ABORT,'fixture audit failure'); END")
+        .execute(fixture.db().pool()).await.unwrap();
+    let batch = json!([
+        correlated("first", "delivered"),
+        correlated("second", "spamreport")
+    ]);
+    assert_eq!(fixture.send(batch.clone()).await, 503);
+    assert_eq!(fixture.count().await, 0);
+    assert_eq!(effects(&fixture).await, (0, 0));
+    sqlx::query("DROP TRIGGER fail_feedback")
+        .execute(fixture.db().pool())
+        .await
+        .unwrap();
+    assert_eq!(fixture.send(batch).await, 204);
+    assert_eq!(fixture.count().await, 2);
+    assert_eq!(effects(&fixture).await, (1, 1));
+    fixture.db().close().await;
+}

@@ -456,6 +456,11 @@ async fn sendgrid_202_uses_structured_mailboxes_and_optional_header_id_not_json_
         assert_eq!(calls[0].path, "/v3/mail/send");
         assert_eq!(calls[0].headers["authorization"], format!("Bearer {TOKEN}"));
         assert!(calls[0].headers.get("idempotency-key").is_none());
+        let payload_for_correlation: Value = serde_json::from_slice(&calls[0].body).unwrap();
+        assert_eq!(
+            payload_for_correlation["personalizations"][0]["custom_args"]["puxiri_attempt"],
+            "not-an-idempotency-key"
+        );
         let payload: Value = serde_json::from_slice(&calls[0].body).unwrap();
         assert_eq!(
             payload["from"],

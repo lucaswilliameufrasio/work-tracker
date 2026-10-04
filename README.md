@@ -59,6 +59,8 @@ O spike agora cobre também SendGrid v3 (202/headers/mailboxes) e SES v2 pelo SD
 
 O spike Resend agora testa correlação config/message/destinatário e projeção atômica de supressão por endereço/auditoria/pendências. Callback precoce espera receipt/reconcile; mismatch não gera efeito; reclamação não bane conta nem remove sino. Envio já autorizado pode estar em trânsito e não é desfeito. Esses efeitos existem somente nas fixtures SQLite/HTTP locais, não no produto; demais providers, sender/outbox e contas reais continuam pendentes.
 
+O ingester SendGrid experimental também projeta supressão/audit na mesma transação autenticada: tentativa opaca em custom_args + config/recipient registrados, sem inferir prefixos de IDs do provider. Blocked/Content/Reputation não suprimem endereço; reclamação ou bounce permanente Invalid Address correlacionados sim. Replay/reopen e rollback de todo lote são testados. Unificação entre providers e enforcement no sender do produto continuam pendentes.
+
 Endpoints públicos deste spike: `/health/live` e `/health/ready`. Readiness retorna apenas `ready`/`not_ready`; não expõe caminhos, versão, usuários ou conteúdo.
 
 ## Plano e distribuição

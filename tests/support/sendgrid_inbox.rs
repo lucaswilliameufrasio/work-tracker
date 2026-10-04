@@ -1,4 +1,6 @@
 //! Experimental SendGrid ingress only. No product route, suppression or key fetch.
+#[path = "sendgrid_feedback.rs"]
+mod feedback;
 use axum::{
     Router,
     body::Bytes,
@@ -56,6 +58,7 @@ struct Endpoint {
 }
 
 pub async fn schema(database: &Database) {
+    feedback::schema(database).await;
     sqlx::query("CREATE TABLE IF NOT EXISTS sendgrid_inbox (config TEXT NOT NULL, event_id TEXT NOT NULL, event_json BLOB NOT NULL, PRIMARY KEY(config,event_id))")
         .execute(database.pool()).await.unwrap();
 }
@@ -156,6 +159,12 @@ async fn receive(
         };
         if stored != json {
             return StatusCode::CONFLICT;
+        }
+        if feedback::apply(&mut transaction, &endpoint.config, &id, &json)
+            .await
+            .is_err()
+        {
+            return StatusCode::SERVICE_UNAVAILABLE;
         }
     }
     if transaction.commit().await.is_err() {
