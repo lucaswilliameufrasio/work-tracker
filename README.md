@@ -57,6 +57,8 @@ O spike agora cobre também SendGrid v3 (202/headers/mailboxes) e SES v2 pelo SD
 
 `tests/cloudflare_queue_spike.rs` valida HTTP pull/ack com fake loopback: Base64/json e text, scope de eventos, inbox SQLite antes do ack, conflito/rollback e reentrega após reopen. Falha/timeout/ack parcial conserva evento persistido e retorna resultado desconhecido, sem retry oculto. Nenhum Worker/token/queue real foi criado; jobs internos continuam SQLite. Consumer de produto, TLS/permissões/conta real, poison/DLQ, scheduler e supressão seguem pendentes.
 
+O spike Resend agora testa correlação config/message/destinatário e projeção atômica de supressão por endereço/auditoria/pendências. Callback precoce espera receipt/reconcile; mismatch não gera efeito; reclamação não bane conta nem remove sino. Envio já autorizado pode estar em trânsito e não é desfeito. Esses efeitos existem somente nas fixtures SQLite/HTTP locais, não no produto; demais providers, sender/outbox e contas reais continuam pendentes.
+
 Endpoints públicos deste spike: `/health/live` e `/health/ready`. Readiness retorna apenas `ready`/`not_ready`; não expõe caminhos, versão, usuários ou conteúdo.
 
 ## Plano e distribuição
