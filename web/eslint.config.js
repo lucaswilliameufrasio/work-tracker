@@ -24,6 +24,7 @@ export default ts.config(
         process: 'readonly',
         console: 'readonly',
         URL: 'readonly',
+        Buffer: 'readonly',
       },
     },
   },

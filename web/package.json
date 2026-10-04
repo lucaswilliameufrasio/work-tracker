@@ -15,13 +15,16 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "test": "vitest run",
-    "test:e2e": "playwright test"
+    "test:e2e": "playwright test",
+    "test:s3": "node --test --test-timeout=120000 scripts/s3-spike.test.mjs"
   },
   "dependencies": {
     "@fontsource/inter": "5.3.0",
     "svelte": "5.57.1"
   },
   "devDependencies": {
+    "@aws-sdk/client-s3": "3.1146.0",
+    "@aws-sdk/s3-request-presigner": "3.1146.0",
     "@eslint/js": "10.0.1",
     "@playwright/test": "1.63.0",
     "@sveltejs/vite-plugin-svelte": "7.3.1",

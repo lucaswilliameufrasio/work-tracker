@@ -1,4 +1,4 @@
-.PHONY: install web build serve check format
+.PHONY: install web build serve check format test-s3
 
 install:
 	pnpm --dir web install --frozen-lockfile
@@ -26,3 +26,7 @@ check: web
 	cargo test --all-targets --locked
 	cargo build --locked
 	pnpm --dir web test:e2e
+	pnpm --dir web test:s3
+
+test-s3:
+	pnpm --dir web test:s3
