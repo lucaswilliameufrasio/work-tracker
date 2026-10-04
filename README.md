@@ -53,6 +53,8 @@ O spike agora cobre também SendGrid v3 (202/headers/mailboxes) e SES v2 pelo SD
 
 `tests/sendgrid_webhook_spike.rs` adiciona retorno SendGrid ECDSA P-256/SPKI DER, vetor oficial e inbox SQLite por evento/config, com lotes atômicos, replay concorrente/rebatched e reopen. Ainda não correlaciona envios nem aplica supressões. Limites/freshness são experimentais; validação com conta real, rotação, SNS/SES e Queues Cloudflare seguem pendentes. Nenhuma rota de produto ou serviço remoto foi criado.
 
+`tests/ses_sns_spike.rs` valida canonicalização SNS/RSA, trust chain/validade/hostname com certificados artificiais, TopicArn/origem estritos e inbox SQLite. Resolver mapeia origem AWS validada para HTTP loopback fixo: não prova fetch TLS/certificados AWS reais. Confirmações não seguem URLs nem ativam subscriptions. OpenSSL nativo/headers/pkg-config são necessários nos testes; supressão, conta real e Queues Cloudflare continuam pendentes.
+
 Endpoints públicos deste spike: `/health/live` e `/health/ready`. Readiness retorna apenas `ready`/`not_ready`; não expõe caminhos, versão, usuários ou conteúdo.
 
 ## Plano e distribuição
