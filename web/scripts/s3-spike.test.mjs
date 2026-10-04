@@ -9,6 +9,7 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { chromium } from '@playwright/test';
 import {
+  CopyObjectCommand,
   CreateBucketCommand,
   DeleteObjectCommand,
   GetObjectCommand,
@@ -18,6 +19,7 @@ import {
   S3Client,
 } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+import { inspectStaging, promoteValidated } from './s3-confirmation-spike.mjs';
 
 const image =
   'cgr.dev/chainguard/minio@sha256:dc8b7ba9bdd982d28af533121e5438239624460432e090a52f81b36e7bd5f7dd';
@@ -421,4 +423,263 @@ test('server can inventory only the selected prefix for cleanup', async () => {
   );
   assert.equal(listed.Contents.length, 1);
   assert.equal(listed.Contents[0].Key, `${selected}file`);
+});
+
+test('staging promotion protects final bytes even when the old upload URL recreates staging', async () => {
+  const id = randomUUID();
+  const stagingKey = `images/_uploads/${id}`;
+  const finalKey = `images/objects/${id}`;
+  const body = Buffer.from('validated private image fixture');
+  const put = await signedPut(stagingKey, body);
+  assert.equal(
+    (await http(put.url, { method: 'PUT', headers: put.headers, body })).status,
+    200,
+  );
+  const validated = await inspectStaging(client, bucket, stagingKey, {
+    maxBytes: body.length,
+    sha256: createHash('sha256').update(body).digest('base64'),
+  });
+  const final = await promoteValidated(client, bucket, validated, finalKey);
+  assert.equal(final.bytes, body.length);
+  assert.equal(final.sha256, validated.sha256);
+  assert.equal((await http(`${endpoint}/${bucket}/${finalKey}`)).status, 403);
+  assert.deepEqual((await http(await signedGet(finalKey))).body, body);
+
+  const forged = new URL(put.url);
+  forged.pathname = `/${bucket}/${finalKey}`;
+  assert.equal(
+    (await http(forged, { method: 'PUT', headers: put.headers, body })).status,
+    403,
+  );
+  await client.send(
+    new DeleteObjectCommand({ Bucket: bucket, Key: stagingKey }),
+  );
+  assert.equal(
+    (await http(put.url, { method: 'PUT', headers: put.headers, body })).status,
+    200,
+  );
+  // Physical recreation of temporary bytes is possible before expiry. It must
+  // not authorize republishing a terminal upload or overwriting its final key.
+  await assert.rejects(
+    promoteValidated(client, bucket, validated, finalKey),
+    (error) => error.$metadata?.httpStatusCode === 412,
+  );
+  assert.deepEqual((await http(await signedGet(finalKey))).body, body);
+});
+
+test('this MinIO ignores a transmitted destination create-only condition on CopyObject', async () => {
+  const source = `images/_uploads/${randomUUID()}`;
+  const destination = `images/objects/${randomUUID()}`;
+  await client.send(
+    new PutObjectCommand({ Bucket: bucket, Key: source, Body: 'replacement' }),
+  );
+  await client.send(
+    new PutObjectCommand({
+      Bucket: bucket,
+      Key: destination,
+      Body: 'existing',
+    }),
+  );
+  const head = await client.send(
+    new HeadObjectCommand({ Bucket: bucket, Key: source }),
+  );
+  const command = new CopyObjectCommand({
+    Bucket: bucket,
+    Key: destination,
+    CopySource: `${bucket}/${source}`,
+    CopySourceIfMatch: head.ETag,
+    IfNoneMatch: '*',
+  });
+  command.middlewareStack.add(
+    (next) => async (args) => {
+      assert.equal(args.request.headers['if-none-match'], '*');
+      return next(args);
+    },
+    { step: 'build', name: 'assertDestinationConditionTransmitted' },
+  );
+  const result = await client.send(command);
+  assert.ok(result.CopyObjectResult.ETag);
+  assert.equal(
+    (await http(await signedGet(destination))).body.toString(),
+    'replacement',
+  );
+  // This is a compatibility finding, NOT the desired storage contract. The
+  // promotion tests use PutObject and fail if destination overwrites are allowed.
+});
+
+test('source changed after byte validation is rejected before a final object exists', async () => {
+  const id = randomUUID();
+  const stagingKey = `avatars/_uploads/${id}`;
+  const finalKey = `avatars/objects/${id}`;
+  const body = Buffer.from('validated avatar fixture');
+  const put = await signedPut(stagingKey, body);
+  assert.equal(
+    (await http(put.url, { method: 'PUT', headers: put.headers, body })).status,
+    200,
+  );
+  const validated = await inspectStaging(client, bucket, stagingKey, {
+    maxBytes: body.length,
+    sha256: createHash('sha256').update(body).digest('base64'),
+  });
+  // Deliberately mutate through server credentials to exercise the TOCTOU guard,
+  // not through a browser URL (which cannot overwrite the existing staging key).
+  await client.send(
+    new PutObjectCommand({
+      Bucket: bucket,
+      Key: stagingKey,
+      Body: 'replaced by storage operator',
+    }),
+  );
+  await assert.rejects(
+    promoteValidated(client, bucket, validated, finalKey),
+    (error) => error.$metadata?.httpStatusCode === 412,
+  );
+  await assert.rejects(
+    client.send(new HeadObjectCommand({ Bucket: bucket, Key: finalKey })),
+    (error) => error.$metadata?.httpStatusCode === 404,
+  );
+});
+
+test('concurrent confirmations cannot overwrite a final key or accept a different existing object', async () => {
+  const id = randomUUID();
+  const stagingKey = `images/_uploads/${id}`;
+  const finalKey = `images/objects/${id}`;
+  const body = Buffer.from('concurrent confirmation fixture');
+  const put = await signedPut(stagingKey, body);
+  assert.equal(
+    (await http(put.url, { method: 'PUT', headers: put.headers, body })).status,
+    200,
+  );
+  const validated = await inspectStaging(client, bucket, stagingKey, {
+    maxBytes: body.length,
+    sha256: createHash('sha256').update(body).digest('base64'),
+  });
+  const outcomes = await Promise.allSettled(
+    [0, 1].map(() => promoteValidated(client, bucket, validated, finalKey)),
+  );
+  assert.equal(
+    outcomes.filter((result) => result.status === 'fulfilled').length,
+    1,
+  );
+  const rejected = outcomes.find((result) => result.status === 'rejected');
+  assert.equal(rejected.reason.$metadata?.httpStatusCode, 412);
+  assert.deepEqual((await http(await signedGet(finalKey))).body, body);
+  const collisionKey = `images/objects/${randomUUID()}`;
+  await client.send(
+    new PutObjectCommand({
+      Bucket: bucket,
+      Key: collisionKey,
+      Body: 'unrelated immutable object',
+    }),
+  );
+  await assert.rejects(
+    promoteValidated(client, bucket, validated, collisionKey),
+    (error) => error.$metadata?.httpStatusCode === 412,
+  );
+  assert.equal(
+    (await http(await signedGet(collisionKey))).body.toString(),
+    'unrelated immutable object',
+  );
+});
+
+test('invalid staging is not validated; cleanup after expiry cannot recreate it by old URL', async () => {
+  const stagingKey = `images/_uploads/${randomUUID()}`;
+  const body = Buffer.from('staging bytes fixture');
+  const sha256 = createHash('sha256').update(body).digest('base64');
+  const put = await signedPut(stagingKey, body);
+  assert.equal(
+    (await http(put.url, { method: 'PUT', headers: put.headers, body })).status,
+    200,
+  );
+  await assert.rejects(
+    inspectStaging(client, bucket, stagingKey, {
+      maxBytes: body.length - 1,
+      sha256,
+    }),
+    /exceeds the reserved limit/,
+  );
+  await assert.rejects(
+    inspectStaging(client, bucket, stagingKey, {
+      maxBytes: body.length,
+      sha256: 'incorrect digest',
+    }),
+    /SHA-256 does not match/,
+  );
+  const validated = await inspectStaging(client, bucket, stagingKey, {
+    maxBytes: body.length,
+    sha256,
+  });
+  await assert.rejects(
+    promoteValidated(client, bucket, validated, stagingKey),
+    /must differ/,
+  );
+  // Accelerated real expiry: issue a 1-second capability and wait past its
+  // deadline. The fixture waits rather than pretending to revoke the bearer.
+  // Separate key: the earlier 300-second capability must not be ignored when
+  // deciding cleanup. Production must track the latest expiry of *all* URLs.
+  const expiredKey = `images/_uploads/${randomUUID()}`;
+  const short = await signedPut(expiredKey, body, { expiresIn: 1 });
+  assert.equal(
+    (await http(short.url, { method: 'PUT', headers: short.headers, body }))
+      .status,
+    200,
+  );
+  const expiresAt = Date.now() + 2100;
+  await delay(Math.max(0, expiresAt - Date.now()));
+  await client.send(
+    new DeleteObjectCommand({ Bucket: bucket, Key: expiredKey }),
+  );
+  assert.equal(
+    (await http(short.url, { method: 'PUT', headers: short.headers, body }))
+      .status,
+    403,
+  );
+  await assert.rejects(
+    client.send(new HeadObjectCommand({ Bucket: bucket, Key: expiredKey })),
+    (error) => error.$metadata?.httpStatusCode === 404,
+  );
+});
+
+test('promotion rejects wrong digest, size overflow and missing source without publishing', async () => {
+  const stagingKey = `images/_uploads/${randomUUID()}`;
+  const body = Buffer.from('stream validation fixture');
+  const put = await signedPut(stagingKey, body);
+  assert.equal(
+    (await http(put.url, { method: 'PUT', headers: put.headers, body })).status,
+    200,
+  );
+  const validated = await inspectStaging(client, bucket, stagingKey, {
+    maxBytes: body.length,
+    sha256: createHash('sha256').update(body).digest('base64'),
+  });
+  for (const [candidate, message] of [
+    [
+      { ...validated, sha256: 'wrong expected digest' },
+      /SHA-256 does not match/,
+    ],
+    [{ ...validated, bytes: body.length - 1 }, /exceed validated size/],
+    [{ ...validated, bytes: body.length + 1 }, /byte count/],
+  ]) {
+    const finalKey = `images/objects/${randomUUID()}`;
+    await assert.rejects(
+      promoteValidated(client, bucket, candidate, finalKey),
+      message,
+    );
+    await assert.rejects(
+      client.send(new HeadObjectCommand({ Bucket: bucket, Key: finalKey })),
+      (error) => error.$metadata?.httpStatusCode === 404,
+    );
+  }
+  await client.send(
+    new DeleteObjectCommand({ Bucket: bucket, Key: stagingKey }),
+  );
+  const finalKey = `images/objects/${randomUUID()}`;
+  await assert.rejects(
+    promoteValidated(client, bucket, validated, finalKey),
+    (error) => error.$metadata?.httpStatusCode === 404,
+  );
+  await assert.rejects(
+    client.send(new HeadObjectCommand({ Bucket: bucket, Key: finalKey })),
+    (error) => error.$metadata?.httpStatusCode === 404,
+  );
 });

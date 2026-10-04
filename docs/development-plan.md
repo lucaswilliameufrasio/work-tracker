@@ -674,6 +674,19 @@ Mantêm-se pendentes bundle criptografado/autossuficiente, checksums/imutabilida
 
 Sete contratos S3 reais adicionados, sem integração de produção liberada. A checkbox S3 da Fase 0 permanece aberta: falta validar pós-confirmação/imutabilidade/limpeza sem janela de reupload, migração e proteção de pins com armazenamento remoto. Backup bundle/restore isolado, providers e MCP continuam pendentes.
 
+#### Evidências da quarta fatia — staging/validação/promoção
+
+- `web/scripts/s3-confirmation-spike.mjs` contém primitivas experimentais usadas apenas nos testes MinIO, fora do produto. Upload do usuário usa chave temporária; chave final é diferente e não recebe URL de PUT do usuário. Jobs internos podem ler/publicar com credenciais do servidor sem transformar upload/download do usuário em proxy.
+- Inspeção usa HEAD e GET condicionado ao ETag observado, calcula tamanho e SHA-256 dos bytes efetivamente lidos, com limite de streaming. ETag é condição de concorrência, não checksum criptográfico nem validador de imagem. A confirmação reabre GET condicionado, grava staging local limitado e verifica novamente tamanho/SHA-256 antes de publicar. PUT interno com `If-None-Match: *`, ContentLength e SHA-256 cria a chave final; readback valida os bytes finais antes de expô-los. Temporários locais exclusivos são removidos em sucesso/falha.
+- A tentativa inicial com `CopyObject` falhou nos testes de replay/concorrência: o MinIO testado **ignora `If-None-Match` no destino da cópia**, apesar de respeitar condição na origem. Um contrato de compatibilidade comprova que o SDK transmite esse header e que objeto já existente é sobrescrito por COPY. Não usar esse COPY para a garantia de imutabilidade. A alternativa PUT create-only passou, sem modificar a stack do produto ou alegar compatibilidade de outros providers.
+- URL de staging não pode alterar a chave final (path adulterado dá 403). Remover staging cedo e recriá-lo via URL ainda válida não modifica os bytes confirmados nem autoriza sobrescrever a chave final: promoção repetida rejeita 412. Duas promoções simultâneas têm um vencedor; objeto final preexistente e diferente permanece intacto. Troca da origem entre inspeção/promoção rejeita 412 e deixa destino ausente.
+- Digest incorreto, tamanho excedente/contagem diferente e origem ausente falham antes da publicação, confirmada por HEAD 404. Fixtures são bytes de teste, não validação de PNG/JPEG/GIF/WebP nem implementação da cota transacional do produto.
+- Cleanup após expiração real de uma URL curta impede **novas** requisições pela URL antiga; a chave desse teste tem somente essa URL. No produto, considerar maior expiração de todas as URLs emitidas, margem de clock e uploads iniciados antes do vencimento que ainda podem terminar. Limpeza repetida de staging terminal e tombstones/CAS no banco continuam necessários; expirar URL não cancela requisição já aceita. Objetos finais coletados não devem reutilizar a chave em novos uploads.
+- A garantia de separação de chaves é local ao spike: ainda faltam registro durável/estado terminal no SQLite, autorização/claim/idempotência da confirmação, leases/fencing, recuperação do crash entre PUT/commit e coleta/pins remotos. Não tratar recriação física de staging como autorização para confirmar upload cancelado/rejeitado.
+- Referência adicional: https://docs.aws.amazon.com/AmazonS3/latest/API/API_CopyObject.html, incluindo condições da origem/destino e possibilidade de erro no corpo de resposta HTTP 200. Compatibilidade demonstrada somente na mesma imagem MinIO da fatia anterior.
+
+Treze testes S3 reais no total, sem declarar confirmação/limpeza de produto concluída. A checkbox S3 segue aberta; o próximo passo é persistência/recuperação do protocolo e sua conexão com pins, antes de bundle/restauração completa.
+
 ### Fase 1 — Fundação e identidade
 
 - [ ] Migrations, usuários/organização/settings e infraestrutura básica de outbox/jobs/leases necessária aos próximos fluxos.
