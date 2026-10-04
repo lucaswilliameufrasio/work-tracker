@@ -1,0 +1,34 @@
+[package]
+name = "puxiri"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94"
+publish = false
+
+[dependencies]
+axum = "0.8.9"
+clap = { version = "4.6.7", features = ["derive", "env"] }
+mime_guess = "2.0.5"
+rust-embed = { version = "8.12.0", features = ["debug-embed"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "sqlite", "migrate", "macros"] }
+thiserror = "2.0"
+tokio = { version = "1.53.2", features = ["macros", "rt-multi-thread", "net", "signal", "time"] }
+tower-http = { version = "0.7.1", features = ["set-header"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
+uuid = { version = "1.0", features = ["v7"] }
+
+[dev-dependencies]
+http-body-util = "0.1"
+rusqlite = { version = "=0.39.0", features = ["backup", "bundled"] }
+tempfile = "3.27.0"
+tower = { version = "0.5", features = ["util"] }
+
+[profile.release]
+lto = "thin"
+strip = true
+
+[lints.rust]
+unsafe_code = "forbid"

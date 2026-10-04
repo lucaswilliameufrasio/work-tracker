@@ -629,7 +629,7 @@ Não tratar cada fase como um produto final seguro. A v1 completa inclui todos o
 
 ### Fase 0 — Spikes e contratos
 
-- [ ] Rust/Axum/SQLite + SPA embutida funcionando em binário.
+- [x] Rust/Axum/SQLite + SPA embutida funcionando em binário.
 - [ ] Backup online concorrente e compatibilidade SQLx/binding; protocolo snapshot/pins e bundle completo com streaming/restauração isolada.
 - [ ] MCP HTTP/OAuth com biblioteca mantida e OpenCode, Claude Code, Claude Desktop e Codex; validar discovery/registro necessário por cliente e revogação.
 - [ ] Contratos SES/Resend/SendGrid/Cloudflare, autenticação de retornos e requisitos Apple/GitLab validados.
@@ -638,6 +638,17 @@ Não tratar cada fase como um produto final seguro. A v1 completa inclui todos o
 - [ ] Registrar versões, decisões e limitações em ADRs.
 
 Saída: esqueleto executável, contratos comprovados e relatório de compatibilidade/limitações, sem UI fictícia de integrações. Não remover requisitos silenciosamente se spike falhar: documentar bloqueio e discutir alternativa.
+
+#### Evidências da primeira fatia da Fase 0
+
+- Esqueleto executável em `src/` e `web/`: Axum 0.8.9, Tokio 1.53.2, SQLx 0.9.0, Svelte 5.57.1 e Vite 8.3.2; dependências resolvidas em `Cargo.lock` e `web/pnpm-lock.yaml`. TypeScript 6.0.3 por compatibilidade com Svelte Check/lint. Sem funcionalidades de login, setup seguro ou Kanban anunciadas como prontas.
+- SQLite real: WAL, synchronous FULL, foreign keys e busy timeout conferidos nas quatro conexões; migrations/checksum, persistência, FTS5 e lock entre processos testados. A SPA e as fontes são locais/embutidas; API inexistente não retorna HTML com sucesso.
+- `tests/sqlite_backup_spike.rs`: SQLx e rusqlite 0.39.0 compartilham `libsqlite3-sys` 0.37.0. Read transaction fixa snapshot antes dos passos da Online Backup API; 32 transações SQLx confirmam enquanto o snapshot está aberto, e o destino mantém o estado anterior consistente. rusqlite fica apenas em dependências de teste até decisão sobre a integração de produto.
+- Backup interrompido pode passar `integrity_check` e ainda estar vazio: publicação exige conclusão da API, inventário/schema/checksums e validações adicionais. Esses testes não comprovam pins, bundle completo, criptografia, retenção ou restauração de produto; a checkbox de backup continua pendente.
+- E2E inicia o executável sem Vite, em diretório isolado, no desktop/claro e mobile/escuro; verifica ausência de requisições externas, recuperação de interrupção real de rede e erro de API. `make check` executa format, lint, tipos, testes unitários/integração/E2E e build debug; `make build` gera release.
+- Observação local do release fora do repositório, sem Node no PATH: 6.813.632 bytes, RSS 9.052 kB em repouso, 26 threads; assets embutidos, SIGTERM gracioso e integridade após encerramento conferidos. Não é benchmark de capacidade nem validação em 1 vCPU/1 GB; hardware-alvo, Argon2 e custo do bundle continuam pendentes.
+
+Fase 0 continua em andamento: próximos spikes são proteção snapshot/pins/bundle, S3 privado real, contratos dos providers e OAuth/MCP nos quatro clientes. Não expor o esqueleto na internet nem armazenar dados reais.
 
 ### Fase 1 — Fundação e identidade
 
@@ -722,7 +733,7 @@ Saída: automações sobrevivem a restart e não bypassam permissões.
 
 Não fixar prazo antes dos spikes: OAuth MCP, Apple e restauração concentram risco técnico. Kanban sozinho é significativamente menor que o escopo completo acordado.
 
-Dependências: jobs/outbox mínimos começam na Fase 1; sino na Fase 2; email/alertas na Fase 3; arquivos/exports na Fase 4; backup completo/restore na Fase 5. MCP é comprovado cedo na Fase 0 e integrado ao produto na Fase 6. Automações de produto ficam na Fase 7, sem adiar a infraestrutura necessária às filas anteriores. Nenhuma checkbox foi concluída pela consolidação deste documento.
+Dependências: jobs/outbox mínimos começam na Fase 1; sino na Fase 2; email/alertas na Fase 3; arquivos/exports na Fase 4; backup completo/restore na Fase 5. MCP é comprovado cedo na Fase 0 e integrado ao produto na Fase 6. Automações de produto ficam na Fase 7, sem adiar a infraestrutura necessária às filas anteriores. Checkboxes concluídas exigem evidência de execução, não apenas consolidação de requisitos.
 
 ## 18. Instruções para o Codex iniciar
 

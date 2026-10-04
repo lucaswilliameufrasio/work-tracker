@@ -1,0 +1,137 @@
+:root {
+  font-family: 'Inter', sans-serif;
+  color: #17231c;
+  background: #f7f8f5;
+  font-synthesis: none;
+  --background: #f7f8f5;
+  --surface: #ffffff;
+  --text: #17231c;
+  --muted: #506357;
+  --border: #d4ded5;
+  --primary: #245c3a;
+  --on-primary: #ffffff;
+}
+
+* {
+  box-sizing: border-box;
+}
+body {
+  margin: 0;
+  min-width: 280px;
+}
+.shell {
+  max-width: 960px;
+  margin: 0 auto;
+  padding: 32px 24px;
+}
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  color: var(--primary);
+  font-size: 24px;
+  font-weight: 600;
+}
+main {
+  max-width: 640px;
+  margin: 80px 0 64px;
+}
+h1 {
+  font-size: clamp(30px, 5vw, 48px);
+  font-weight: 600;
+  letter-spacing: -0.04em;
+  line-height: 1.15;
+  margin: 0 0 20px;
+}
+p {
+  line-height: 1.65;
+}
+.intro {
+  color: var(--muted);
+  font-size: 18px;
+  max-width: 48ch;
+}
+.connection {
+  margin-top: 40px;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  padding: 24px 0;
+}
+h2 {
+  font-size: 16px;
+  font-weight: 600;
+  margin: 0 0 20px;
+}
+.status {
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.healthy {
+  color: var(--primary);
+}
+.hint {
+  color: var(--muted);
+  font-size: 14px;
+}
+button {
+  font: inherit;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--on-primary);
+  background: var(--primary);
+  border: 0;
+  border-radius: 6px;
+  padding: 12px 16px;
+  cursor: pointer;
+  min-height: 44px;
+  margin-top: 8px;
+}
+button:disabled {
+  opacity: 0.6;
+  cursor: wait;
+}
+button:focus-visible {
+  outline: 3px solid var(--primary);
+  outline-offset: 4px;
+}
+.notice {
+  margin-top: 32px;
+  padding: 20px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 14px;
+}
+.notice p {
+  margin-bottom: 0;
+  color: var(--muted);
+}
+footer {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    color: #edf4ee;
+    background: #101714;
+    --background: #101714;
+    --surface: #18221d;
+    --text: #edf4ee;
+    --muted: #b1c1b5;
+    --border: #354b3d;
+    --primary: #9bd0a8;
+    --on-primary: #102718;
+  }
+}
+
+@media (max-width: 480px) {
+  .shell {
+    padding: 24px 20px;
+  }
+  main {
+    margin-top: 48px;
+  }
+}
