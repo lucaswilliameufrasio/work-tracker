@@ -1,5 +1,7 @@
 //! Local-only SNS verification experiment. Certificate TLS transport is NOT
 //! proven: a fixed loopback resolver stands in for the validated AWS origin.
+#[path = "ses_feedback.rs"]
+mod feedback;
 use axum::{
     Router,
     body::Bytes,
@@ -240,6 +242,7 @@ impl Endpoint {
     }
 }
 pub async fn schema(database: &Database) {
+    feedback::schema(database).await;
     sqlx::query("CREATE TABLE IF NOT EXISTS sns_inbox(topic TEXT NOT NULL,message_id TEXT NOT NULL,canonical BLOB NOT NULL,PRIMARY KEY(topic,message_id))")
         .execute(database.pool()).await.unwrap();
 }
@@ -288,6 +291,17 @@ async fn receive(State(endpoint): State<Arc<Endpoint>>, body: Bytes) -> StatusCo
     };
     if stored != canonical {
         return StatusCode::CONFLICT;
+    }
+    if feedback::apply(
+        &mut transaction,
+        &endpoint.topic,
+        &envelope.message_id,
+        &envelope.message,
+    )
+    .await
+    .is_err()
+    {
+        return StatusCode::SERVICE_UNAVAILABLE;
     }
     if transaction.commit().await.is_err() {
         return StatusCode::SERVICE_UNAVAILABLE;

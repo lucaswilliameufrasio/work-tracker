@@ -61,6 +61,8 @@ O spike Resend agora testa correlação config/message/destinatário e projeçã
 
 O ingester SendGrid experimental também projeta supressão/audit na mesma transação autenticada: tentativa opaca em custom_args + config/recipient registrados, sem inferir prefixos de IDs do provider. Blocked/Content/Reputation não suprimem endereço; reclamação ou bounce permanente Invalid Address correlacionados sim. Replay/reopen e rollback de todo lote são testados. Unificação entre providers e enforcement no sender do produto continuam pendentes.
 
+O spike SES/SNS correlaciona topic/conta/SES messageId/destinatário antes de supressão atômica e audit. Candidatos múltiplos a reclamante, falhas temporárias e bounces sem evidência explícita de endereço inválido ficam sem efeito. Replay/reopen, colisão de feedbackId e rollback são testados; política conservadora ainda não cobre todo hard bounce SES. Certificados continuam artificiais; TLS AWS, contas reais, Cloudflare e unificação/enforcement no produto seguem pendentes.
+
 Endpoints públicos deste spike: `/health/live` e `/health/ready`. Readiness retorna apenas `ready`/`not_ready`; não expõe caminhos, versão, usuários ou conteúdo.
 
 ## Plano e distribuição

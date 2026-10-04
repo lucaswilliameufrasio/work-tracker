@@ -223,6 +223,345 @@ fn envelope() -> Value {
     "Timestamp":"2027-01-15T08:00:00Z","TopicArn":TOPIC,"SignatureVersion":"2","Signature":"","SigningCertURL":format!("https://{HOST}{PATH}")})
 }
 
+const RECIPIENT: &str = "recipient@example.invalid";
+async fn registered(fixture: &Fixture, topic: &str, id: &str, recipient: &str) {
+    sqlx::query("INSERT INTO ses_feedback_sends(topic,ses_id,recipient) VALUES(?,?,?)")
+        .bind(topic)
+        .bind(id)
+        .bind(recipient)
+        .execute(fixture.database.pool())
+        .await
+        .unwrap();
+}
+fn feedback_event(kind: &str) -> Value {
+    let mut value = json!({"notificationType":kind,"mail":{"sendingAccountId":"123456789012","messageId":"fixture-ses-id","destination":[RECIPIENT]},
+        "complaint":{"complainedRecipients":[{"emailAddress":RECIPIENT}],"complaintFeedbackType":"abuse","feedbackId":"complaint-feedback"},
+        "bounce":{"bounceType":"Permanent","bounceSubType":"General","feedbackId":"bounce-feedback","bouncedRecipients":[{"emailAddress":RECIPIENT,"action":"failed","status":"5.1.1","diagnosticCode":"PRIVATE"}]}});
+    if kind != "Complaint" {
+        value.as_object_mut().unwrap().remove("complaint");
+    }
+    if kind != "Bounce" {
+        value.as_object_mut().unwrap().remove("bounce");
+    }
+    value
+}
+async fn post_feedback(fixture: &Fixture, id: &str, event: Value) -> u16 {
+    let mut value = envelope();
+    value["MessageId"] = json!(id);
+    value["Message"] = json!(event.to_string());
+    fixture.post(&fixture.signed(value, "2")).await
+}
+async fn effects(fixture: &Fixture) -> (i64, i64) {
+    (
+        sqlx::query_scalar("SELECT count(*) FROM ses_feedback_suppression")
+            .fetch_one(fixture.database.pool())
+            .await
+            .unwrap(),
+        sqlx::query_scalar("SELECT count(*) FROM ses_feedback_audit")
+            .fetch_one(fixture.database.pool())
+            .await
+            .unwrap(),
+    )
+}
+
+#[tokio::test]
+async fn correlated_complaint_is_atomic_deduplicated_and_never_bans_or_clears_on_delivery() {
+    let mut fixture = Fixture::new(certificates(HOST, false), None, 200, None).await;
+    registered(&fixture, TOPIC, "fixture-ses-id", RECIPIENT).await;
+    sqlx::raw_sql("CREATE TABLE fixture_users(id TEXT PRIMARY KEY,banned INTEGER); INSERT INTO fixture_users VALUES('user',0);
+        CREATE TABLE fixture_bell(id TEXT PRIMARY KEY); INSERT INTO fixture_bell VALUES('notification');")
+        .execute(fixture.database.pool()).await.unwrap();
+    let event = feedback_event("Complaint");
+    let (a, b) = tokio::join!(
+        post_feedback(&fixture, "complaint", event.clone()),
+        post_feedback(&fixture, "complaint", event.clone())
+    );
+    assert_eq!((a, b), (204, 204));
+    assert_eq!(effects(&fixture).await, (1, 1));
+    assert_eq!(post_feedback(&fixture, "republished", event).await, 204);
+    assert_eq!(
+        post_feedback(&fixture, "late-delivery", feedback_event("Delivery")).await,
+        204
+    );
+    assert_eq!(effects(&fixture).await, (1, 1));
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT banned FROM fixture_users")
+            .fetch_one(fixture.database.pool())
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM fixture_bell")
+            .fetch_one(fixture.database.pool())
+            .await
+            .unwrap(),
+        1
+    );
+    let audit: Vec<(String, String, String)> =
+        sqlx::query_as("SELECT feedback_id,ses_id,reason FROM ses_feedback_audit")
+            .fetch_all(fixture.database.pool())
+            .await
+            .unwrap();
+    assert!(!format!("{audit:?}").contains(RECIPIENT));
+    assert!(!format!("{audit:?}").contains("PRIVATE"));
+    fixture.server_task.abort();
+    let _ = (&mut fixture.server_task).await;
+    fixture.database.close().await;
+    let directory = std::mem::replace(&mut fixture._directory, TempDir::new().unwrap());
+    drop(fixture); // Release application state and its directory ownership lock.
+    let reopened = Database::open(directory.path()).await.unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM ses_feedback_suppression")
+            .fetch_one(reopened.pool())
+            .await
+            .unwrap(),
+        1
+    );
+    reopened.close().await;
+}
+
+#[tokio::test]
+async fn only_explicit_permanent_invalid_status_suppresses_bounce_and_complaint_takes_precedence() {
+    let fixture = Fixture::new(certificates(HOST, false), None, 200, None).await;
+    registered(&fixture, TOPIC, "fixture-ses-id", RECIPIENT).await;
+    for (index, (kind, subtype, status, action)) in [
+        ("Transient", "MailboxFull", "4.2.2", "delayed"),
+        ("Transient", "General", "5.1.1", "failed"),
+        ("Permanent", "General", "5.7.1", "failed"),
+        ("Permanent", "Suppressed", "5.1.1", "failed"),
+        ("Undetermined", "Undetermined", "5.1.1", "failed"),
+        ("Permanent", "General", "5.1.1", "delayed"),
+        ("Permanent", "General", "", "failed"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut event = feedback_event("Bounce");
+        event["bounce"]["bounceType"] = json!(kind);
+        event["bounce"]["bounceSubType"] = json!(subtype);
+        event["bounce"]["bouncedRecipients"][0]["status"] = json!(status);
+        event["bounce"]["bouncedRecipients"][0]["action"] = json!(action);
+        assert_eq!(
+            post_feedback(&fixture, &format!("non-invalid-{index}"), event).await,
+            204
+        );
+    }
+    assert_eq!(effects(&fixture).await, (0, 0));
+    for (index,recipients) in [json!([{ "emailAddress":"other@example.invalid","action":"failed","status":"5.1.1"}]),
+        json!([{ "emailAddress":RECIPIENT,"action":"failed","status":"5.1.1"},{"emailAddress":"other@example.invalid"}])].into_iter().enumerate() {
+        let mut event=feedback_event("Bounce");event["bounce"]["bouncedRecipients"]=recipients;
+        assert_eq!(post_feedback(&fixture,&format!("bounce-recipient-{index}"),event).await,204);
+    }
+    assert_eq!(effects(&fixture).await, (0, 0));
+    assert_eq!(
+        post_feedback(&fixture, "invalid", feedback_event("Bounce")).await,
+        204
+    );
+    assert_eq!(effects(&fixture).await, (1, 1));
+    assert_eq!(
+        post_feedback(&fixture, "complaint", feedback_event("Complaint")).await,
+        204
+    );
+    let mut bounce = feedback_event("Bounce");
+    bounce["bounce"]["feedbackId"] = json!("another-bounce");
+    assert_eq!(
+        post_feedback(&fixture, "after-complaint", bounce).await,
+        204
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT reason FROM ses_feedback_suppression")
+            .fetch_one(fixture.database.pool())
+            .await
+            .unwrap(),
+        "complaint"
+    );
+    fixture.database.close().await;
+}
+
+#[tokio::test]
+async fn ambiguous_complaint_candidates_and_non_abuse_feedback_have_no_effect() {
+    let fixture = Fixture::new(certificates(HOST, false), None, 200, None).await;
+    registered(&fixture, TOPIC, "fixture-ses-id", RECIPIENT).await;
+    for (index, kind) in ["not-spam", "auth-failure", "virus", "other", ""]
+        .into_iter()
+        .enumerate()
+    {
+        let mut event = feedback_event("Complaint");
+        event["complaint"]["complaintFeedbackType"] = json!(kind);
+        assert_eq!(
+            post_feedback(&fixture, &format!("not-abuse-{index}"), event).await,
+            204
+        );
+    }
+    let mut multiple = feedback_event("Complaint");
+    multiple["complaint"]["complainedRecipients"] =
+        json!([{"emailAddress":RECIPIENT},{"emailAddress":"other@example.invalid"}]);
+    assert_eq!(
+        post_feedback(&fixture, "multiple-candidates", multiple).await,
+        204
+    );
+    let mut destination = feedback_event("Complaint");
+    destination["mail"]["destination"] = json!([RECIPIENT, "other@example.invalid"]);
+    assert_eq!(
+        post_feedback(&fixture, "multiple-destination", destination).await,
+        204
+    );
+    let mut missing = feedback_event("Complaint");
+    missing["complaint"]
+        .as_object_mut()
+        .unwrap()
+        .remove("complaintFeedbackType");
+    assert_eq!(
+        post_feedback(&fixture, "missing-feedback-type", missing).await,
+        204
+    );
+    let mut missing = feedback_event("Complaint");
+    missing["complaint"]
+        .as_object_mut()
+        .unwrap()
+        .remove("feedbackId");
+    assert_eq!(
+        post_feedback(&fixture, "missing-feedback-id", missing).await,
+        204
+    );
+    let mut oversized = feedback_event("Complaint");
+    oversized["complaint"]["feedbackId"] = json!("x".repeat(257));
+    assert_eq!(
+        post_feedback(&fixture, "oversized-feedback-id", oversized).await,
+        204
+    );
+    assert_eq!(effects(&fixture).await, (0, 0));
+    let mut fraud = feedback_event("Complaint");
+    fraud["complaint"]["complaintFeedbackType"] = json!("fraud");
+    assert_eq!(post_feedback(&fixture, "fraud", fraud).await, 204);
+    assert_eq!(effects(&fixture).await, (1, 1));
+    fixture.database.close().await;
+}
+
+#[tokio::test]
+async fn account_topic_message_and_recipient_must_match_before_projection_and_early_callback_can_replay()
+ {
+    let fixture = Fixture::new(certificates(HOST, false), None, 200, None).await;
+    registered(&fixture, "another-topic", "fixture-ses-id", RECIPIENT).await;
+    assert_eq!(
+        post_feedback(&fixture, "early", feedback_event("Complaint")).await,
+        204
+    );
+    assert_eq!(effects(&fixture).await, (0, 0));
+    registered(&fixture, TOPIC, "fixture-ses-id", RECIPIENT).await;
+    let mut account = feedback_event("Complaint");
+    account["mail"]["sendingAccountId"] = json!("999999999999");
+    assert_eq!(post_feedback(&fixture, "wrong-account", account).await, 204);
+    let mut recipient = feedback_event("Complaint");
+    recipient["complaint"]["complainedRecipients"][0]["emailAddress"] =
+        json!("other@example.invalid");
+    assert_eq!(
+        post_feedback(&fixture, "wrong-recipient", recipient).await,
+        204
+    );
+    let mut id = feedback_event("Complaint");
+    id["mail"]["messageId"] = json!("unknown");
+    assert_eq!(post_feedback(&fixture, "unknown-id", id).await, 204);
+    let mut missing = feedback_event("Complaint");
+    missing["mail"].as_object_mut().unwrap().remove("messageId");
+    assert_eq!(post_feedback(&fixture, "missing-id", missing).await, 204);
+    let mut destination = feedback_event("Complaint");
+    destination["mail"]["destination"] = json!(["other@example.invalid"]);
+    assert_eq!(
+        post_feedback(&fixture, "wrong-destination", destination).await,
+        204
+    );
+    let mut ambiguous = feedback_event("Complaint");
+    ambiguous["eventType"] = json!("Bounce");
+    assert_eq!(post_feedback(&fixture, "ambiguous", ambiguous).await, 204);
+    assert_eq!(effects(&fixture).await, (0, 0));
+    assert_eq!(
+        post_feedback(&fixture, "early", feedback_event("Complaint")).await,
+        204
+    );
+    assert_eq!(effects(&fixture).await, (1, 1));
+    fixture.database.close().await;
+}
+
+#[tokio::test]
+async fn tampered_or_malformed_message_never_authorizes_address_effects() {
+    let fixture = Fixture::new(certificates(HOST, false), None, 200, None).await;
+    registered(&fixture, TOPIC, "fixture-ses-id", RECIPIENT).await;
+    let mut value = envelope();
+    value["Message"] = json!(feedback_event("Complaint").to_string());
+    let mut signed = fixture.signed(value, "2");
+    signed["Message"] = json!(feedback_event("Bounce").to_string());
+    assert_eq!(fixture.post(&signed).await, 401);
+    let mut malformed = envelope();
+    malformed["Message"] = json!("not-json");
+    assert_eq!(fixture.post(&fixture.signed(malformed, "2")).await, 204);
+    let mut publishing = feedback_event("Bounce");
+    publishing
+        .as_object_mut()
+        .unwrap()
+        .remove("notificationType");
+    publishing["eventType"] = json!("Bounce");
+    assert_eq!(
+        post_feedback(&fixture, "event-publishing", publishing).await,
+        204
+    );
+    assert_eq!(effects(&fixture).await, (1, 1));
+    assert_eq!(fixture.count().await, 2);
+    fixture.database.close().await;
+}
+
+#[tokio::test]
+async fn audit_failure_rolls_back_inbox_suppression_and_projection_before_ack() {
+    let fixture = Fixture::new(certificates(HOST, false), None, 200, None).await;
+    registered(&fixture, TOPIC, "fixture-ses-id", RECIPIENT).await;
+    sqlx::raw_sql("CREATE TRIGGER fail_feedback BEFORE INSERT ON ses_feedback_audit BEGIN SELECT RAISE(ABORT,'fixture audit failure'); END")
+        .execute(fixture.database.pool()).await.unwrap();
+    assert_eq!(
+        post_feedback(&fixture, "atomic", feedback_event("Complaint")).await,
+        503
+    );
+    assert_eq!(fixture.count().await, 0);
+    assert_eq!(effects(&fixture).await, (0, 0));
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM ses_feedback_projection")
+            .fetch_one(fixture.database.pool())
+            .await
+            .unwrap(),
+        0
+    );
+    sqlx::query("DROP TRIGGER fail_feedback")
+        .execute(fixture.database.pool())
+        .await
+        .unwrap();
+    assert_eq!(
+        post_feedback(&fixture, "atomic", feedback_event("Complaint")).await,
+        204
+    );
+    assert_eq!(effects(&fixture).await, (1, 1));
+    fixture.database.close().await;
+}
+
+#[tokio::test]
+async fn conflicting_feedback_identity_cannot_mutate_a_second_address_without_audit() {
+    let fixture = Fixture::new(certificates(HOST, false), None, 200, None).await;
+    registered(&fixture, TOPIC, "fixture-ses-id", RECIPIENT).await;
+    registered(&fixture, TOPIC, "second-ses-id", "other@example.invalid").await;
+    assert_eq!(
+        post_feedback(&fixture, "first", feedback_event("Complaint")).await,
+        204
+    );
+    let mut conflict = feedback_event("Complaint");
+    conflict["mail"]["messageId"] = json!("second-ses-id");
+    conflict["mail"]["destination"] = json!(["other@example.invalid"]);
+    conflict["complaint"]["complainedRecipients"][0]["emailAddress"] =
+        json!("other@example.invalid");
+    assert_eq!(post_feedback(&fixture, "second", conflict).await, 503);
+    assert_eq!(effects(&fixture).await, (1, 1));
+    assert_eq!(fixture.count().await, 1);
+    fixture.database.close().await;
+}
+
 #[test]
 fn canonical_fields_match_aws_order_and_unescape_json_with_one_final_newline() {
     let mut value = envelope();
