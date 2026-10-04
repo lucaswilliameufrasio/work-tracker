@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 pub enum Provider {
     Cloudflare,
     Resend,
+    SendGrid,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -73,6 +74,22 @@ fn failure(kind: FailureKind, acceptance: Acceptance, status: Option<u16>) -> Fa
     }
 }
 
+fn mailbox(value: &str) -> Result<serde_json::Value, Failure> {
+    let invalid = || failure(FailureKind::InvalidRequest, Acceptance::Rejected, None);
+    if let Some((name, address)) = value.split_once('<') {
+        let address = address.strip_suffix('>').ok_or_else(invalid)?;
+        if address.is_empty() || address.contains(['<', '>', ' ']) || name.trim().is_empty() {
+            return Err(invalid());
+        }
+        Ok(serde_json::json!({"email":address,"name":name.trim()}))
+    } else {
+        if value.contains(['>', ' ']) {
+            return Err(invalid());
+        }
+        Ok(serde_json::json!({"email":value}))
+    }
+}
+
 pub struct LocalEmailClient {
     client: Client,
     provider: Provider,
@@ -116,6 +133,7 @@ impl LocalEmailClient {
                 format!("/client/v4/accounts/{account}/email/sending/send")
             }
             Provider::Resend => "/emails".into(),
+            Provider::SendGrid => "/v3/mail/send".into(),
         };
         endpoint.set_path(&path);
         let client = Client::builder()
@@ -151,7 +169,15 @@ impl LocalEmailClient {
             .client
             .post(self.endpoint.clone())
             .bearer_auth(&self.token)
-            .json(email);
+            .json(&match self.provider {
+                Provider::SendGrid => serde_json::json!({
+                    "from":mailbox(&email.from)?, "reply_to":mailbox(&email.reply_to)?,
+                    "personalizations":[{"to":[mailbox(&email.to)?]}], "subject":email.subject,
+                    "content":[{"type":"text/plain","value":email.text},{"type":"text/html","value":email.html}],
+                    "tracking_settings":{"click_tracking":{"enable":false,"enable_text":false},"open_tracking":{"enable":false}}
+                }),
+                _ => serde_json::to_value(email).expect("fixture serialization"),
+            });
         if matches!(self.provider, Provider::Resend) {
             if idempotency_key.is_empty()
                 || idempotency_key.len() > 256
@@ -177,6 +203,11 @@ impl LocalEmailClient {
             .get("retry-after")
             .and_then(|header| header.to_str().ok())
             .and_then(|value| value.parse::<u64>().ok());
+        let sendgrid_id = response
+            .headers()
+            .get("x-message-id")
+            .and_then(|header| header.to_str().ok())
+            .map(str::to_owned);
         let mut body = Vec::new();
         while let Some(chunk) = response
             .chunk()
@@ -230,6 +261,20 @@ impl LocalEmailClient {
         }
         let protocol = || failure(FailureKind::Protocol, Acceptance::Unknown, Some(status));
         match self.provider {
+            Provider::SendGrid => {
+                if status != 202
+                    || !body.is_empty()
+                    || sendgrid_id
+                        .as_ref()
+                        .is_some_and(|id| id.is_empty() || id.len() > 256)
+                {
+                    return Err(protocol());
+                }
+                Ok(Receipt {
+                    message_id: sendgrid_id,
+                    delivery: Delivery::Accepted,
+                })
+            }
             Provider::Resend => {
                 #[derive(Deserialize)]
                 struct Response {

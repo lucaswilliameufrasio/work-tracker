@@ -47,7 +47,9 @@ Jobs experimentais de bundle persistem estado/leases e pins. Testes interrompem 
 
 `make check` também exige a imagem Node fixada em `web/scripts/s3-spool-budget-contracts.mjs` para testar preflight de disco em tmpfs real de 4 MiB. Bundle experimental recusa excesso de inventário/bytes ou espaço insuficiente antes de copiar banco/inserir pins. Preflight não é reserva global de espaço e não elimina ENOSPC durante execução. Pull/arquiteturas das imagens fixadas ainda precisam de validação em CI.
 
-`tests/email_provider_spike.rs` valida Cloudflare/Resend REST com client Rust de teste e fakes SaaS em HTTP loopback: paths/payload/auth, resultados por destinatário, erros e resultado ambíguo após timeout. Sem retry/fallback automático ou envio externo. Não prova TLS, entrega real, domínio/entitlement, webhooks ou fila de produto; reqwest é somente dev-dependency. Eventos Cloudflare via Queues/HTTP pull e assinatura Svix Resend seguem pendentes, assim como SES/SendGrid.
+`tests/email_provider_spike.rs` valida Cloudflare/Resend REST com client Rust de teste e fakes SaaS em HTTP loopback: paths/payload/auth, resultados por destinatário, erros e resultado ambíguo após timeout. Sem retry/fallback automático ou envio externo. Não prova TLS, entrega real, domínio/entitlement ou fila de produto; reqwest é somente dev-dependency. Eventos Cloudflare via Queues/HTTP pull seguem pendentes.
+
+O spike agora cobre também SendGrid v3 (202/headers/mailboxes) e SES v2 pelo SDK oficial, com credenciais artificiais explícitas e retries desabilitados. `tests/email_webhook_spike.rs` valida assinatura compatível Svix/Standard Webhooks sobre raw body e inbox SQLite deduplicada; ainda não aplica supressão nem expõe callback no servidor do produto. Retornos SES/SendGrid/Cloudflare, rotação e smoke real continuam pendentes. Dependências novas são só de desenvolvimento; testes do SDK AWS exigem CMake/toolchain C. Não subir o mínimo Rust para usar o SDK mais recente: versão SES compatível foi fixada.
 
 Endpoints públicos deste spike: `/health/live` e `/health/ready`. Readiness retorna apenas `ready`/`not_ready`; não expõe caminhos, versão, usuários ou conteúdo.
 

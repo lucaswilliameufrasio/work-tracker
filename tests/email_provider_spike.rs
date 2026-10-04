@@ -220,7 +220,7 @@ async fn ambiguous_or_malformed_success_never_becomes_delivered_or_safe_to_fallb
 
 #[tokio::test]
 async fn http_errors_classify_acceptance_and_retry_after_without_leaking_bodies_or_retrying() {
-    for provider in [Provider::Cloudflare, Provider::Resend] {
+    for provider in [Provider::Cloudflare, Provider::Resend, Provider::SendGrid] {
         for (status, kind, acceptance) in [
             (400, FailureKind::InvalidRequest, Acceptance::Rejected),
             (401, FailureKind::Authentication, Acceptance::Rejected),
@@ -434,4 +434,205 @@ async fn interrupted_response_body_is_unknown_even_after_http_200() {
     assert_eq!(failure.status, Some(200));
     assert!(!format!("{failure:?}").contains(&base));
     server.await.unwrap();
+}
+
+#[tokio::test]
+async fn sendgrid_202_uses_structured_mailboxes_and_optional_header_id_not_json_delivery() {
+    for id in [Some("fixture-sg-id"), None] {
+        let mut headers = HeaderMap::new();
+        if let Some(id) = id {
+            headers.insert("x-message-id", id.parse().unwrap());
+        }
+        let fake = Fake::start(202, String::new(), headers, Duration::ZERO).await;
+        let receipt = fake
+            .client(Provider::SendGrid)
+            .send(&email(), "not-an-idempotency-key")
+            .await
+            .unwrap();
+        assert_eq!(receipt.delivery, Delivery::Accepted);
+        assert_eq!(receipt.message_id.as_deref(), id);
+        let calls = fake.script.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].path, "/v3/mail/send");
+        assert_eq!(calls[0].headers["authorization"], format!("Bearer {TOKEN}"));
+        assert!(calls[0].headers.get("idempotency-key").is_none());
+        let payload: Value = serde_json::from_slice(&calls[0].body).unwrap();
+        assert_eq!(
+            payload["from"],
+            json!({"email":"sender@example.invalid","name":"Puxiri"})
+        );
+        assert_eq!(
+            payload["personalizations"][0]["to"],
+            json!([{"email":RECIPIENT}])
+        );
+        assert_eq!(
+            payload["reply_to"],
+            json!({"email":"replies@example.invalid"})
+        );
+        assert_eq!(payload["content"][0]["type"], "text/plain");
+        assert_eq!(payload["content"][1]["type"], "text/html");
+        assert_eq!(
+            payload["tracking_settings"]["open_tracking"]["enable"],
+            false
+        );
+        assert_eq!(
+            payload["tracking_settings"]["click_tracking"]["enable"],
+            false
+        );
+        assert!(payload.get("attachments").is_none());
+    }
+    for (status, body) in [(200, "{}"), (202, "{\"id\":\"not-the-contract\"}")] {
+        let fake = Fake::start(status, body.into(), HeaderMap::new(), Duration::ZERO).await;
+        assert_eq!(
+            fake.client(Provider::SendGrid)
+                .send(&email(), "unused")
+                .await
+                .unwrap_err()
+                .acceptance,
+            Acceptance::Unknown
+        );
+    }
+}
+
+fn ses_client(base: &str) -> aws_sdk_sesv2::Client {
+    use aws_sdk_sesv2::config::{
+        BehaviorVersion, Credentials, Region, retry::RetryConfig, timeout::TimeoutConfig,
+    };
+    let url = reqwest::Url::parse(base).unwrap();
+    assert_eq!(url.host_str(), Some("127.0.0.1"));
+    assert_eq!(url.scheme(), "http");
+    let config = aws_sdk_sesv2::Config::builder()
+        .behavior_version(BehaviorVersion::latest())
+        .region(Region::new("us-east-1"))
+        .credentials_provider(Credentials::new(
+            "AKIDFAKEONLY",
+            "fake-secret-never-real",
+            Some("fake-session-token".into()),
+            None,
+            "fixture",
+        ))
+        .endpoint_url(base)
+        .retry_config(RetryConfig::disabled())
+        .timeout_config(
+            TimeoutConfig::builder()
+                .operation_timeout(Duration::from_secs(2))
+                .build(),
+        )
+        .build();
+    aws_sdk_sesv2::Client::from_conf(config)
+}
+
+async fn ses_send(
+    client: &aws_sdk_sesv2::Client,
+) -> Result<
+    aws_sdk_sesv2::operation::send_email::SendEmailOutput,
+    Box<aws_sdk_sesv2::error::SdkError<aws_sdk_sesv2::operation::send_email::SendEmailError>>,
+> {
+    use aws_sdk_sesv2::types::{Body, Content, Destination, EmailContent, Message};
+    let message = email();
+    client
+        .send_email()
+        .from_email_address(message.from)
+        .reply_to_addresses(message.reply_to)
+        .destination(Destination::builder().to_addresses(message.to).build())
+        .content(
+            EmailContent::builder()
+                .simple(
+                    Message::builder()
+                        .subject(
+                            Content::builder()
+                                .data(message.subject)
+                                .charset("UTF-8")
+                                .build()
+                                .unwrap(),
+                        )
+                        .body(
+                            Body::builder()
+                                .text(
+                                    Content::builder()
+                                        .data(message.text)
+                                        .charset("UTF-8")
+                                        .build()
+                                        .unwrap(),
+                                )
+                                .html(
+                                    Content::builder()
+                                        .data(message.html)
+                                        .charset("UTF-8")
+                                        .build()
+                                        .unwrap(),
+                                )
+                                .build(),
+                        )
+                        .build(),
+                )
+                .build(),
+        )
+        .send()
+        .await
+        .map_err(Box::new)
+}
+
+#[tokio::test]
+async fn ses_official_sdk_signs_region_scoped_simple_send_without_loading_real_credentials() {
+    let fake = Fake::start(
+        200,
+        json!({"MessageId":"fixture-ses-id"}).to_string(),
+        HeaderMap::new(),
+        Duration::ZERO,
+    )
+    .await;
+    let output = ses_send(&ses_client(&fake.base)).await.unwrap();
+    assert_eq!(output.message_id(), Some("fixture-ses-id")); // accepted, not delivered.
+    let calls = fake.script.calls.lock().unwrap();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].path, "/v2/email/outbound-emails");
+    let auth = calls[0].headers["authorization"].to_str().unwrap();
+    assert!(auth.starts_with("AWS4-HMAC-SHA256 "));
+    assert!(auth.contains("/us-east-1/ses/aws4_request"));
+    assert!(auth.contains("Credential=AKIDFAKEONLY/"));
+    assert!(auth.contains("Signature="));
+    assert_eq!(
+        calls[0].headers["x-amz-security-token"],
+        "fake-session-token"
+    );
+    assert!(calls[0].headers.get("x-amz-date").is_some());
+    let payload: Value = serde_json::from_slice(&calls[0].body).unwrap();
+    assert_eq!(payload["Destination"]["ToAddresses"], json!([RECIPIENT]));
+    assert_eq!(payload["Content"]["Simple"]["Subject"]["Charset"], "UTF-8");
+    assert_eq!(
+        payload["Content"]["Simple"]["Body"]["Text"]["Data"],
+        email().text
+    );
+    assert_eq!(
+        payload["ReplyToAddresses"],
+        json!(["replies@example.invalid"])
+    );
+}
+
+#[tokio::test]
+async fn ses_errors_are_modeled_without_hidden_throttle_or_service_retries() {
+    for (status, code) in [
+        (400, "MessageRejected"),
+        (400, "MailFromDomainNotVerifiedException"),
+        (400, "AccountSuspendedException"),
+        (429, "TooManyRequestsException"),
+        (500, "InternalFailure"),
+    ] {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-amzn-errortype", code.parse().unwrap());
+        let fake = Fake::start(
+            status,
+            json!({"message":"fake failure"}).to_string(),
+            headers,
+            Duration::ZERO,
+        )
+        .await;
+        let error = ses_send(&ses_client(&fake.base)).await.unwrap_err();
+        use aws_sdk_sesv2::error::ProvideErrorMetadata;
+        assert_eq!(error.raw_response().unwrap().status().as_u16(), status);
+        assert_eq!(error.as_service_error().unwrap().code(), Some(code));
+        assert_eq!(fake.script.calls.lock().unwrap().len(), 1);
+        // SDK errors are intentionally not logged: they may embed bodies/metadata.
+    }
 }
