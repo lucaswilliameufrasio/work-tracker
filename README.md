@@ -41,6 +41,8 @@ O mesmo spike usa SQLite em arquivo temporário via `node:sqlite` somente no har
 
 O harness também valida bundle TAR/AES-GCM experimental (limite de fixture: 8 MiB), snapshot com pins, inventário/checksums e restore local isolado após apagar o bucket de origem. Usa chave efêmera de teste, sem gestão de chaves, retenção ou ativação de instalação restaurada. Spools plaintext ficam em diretórios privados de teste; não é formato público nem backup/restore de produção.
 
+Jobs experimentais de bundle persistem estado/leases e pins. Testes interrompem um filho por SIGKILL em quatro fronteiras; recuperação só libera pins depois de o supervisor confirmar que o worker parou, nunca apenas por expiração de lease. Limpeza de spool/partial é recuperável e preserva bundles completos e diagnósticos incompletos. Ainda não há supervisor Rust, retomada automática nem política de retenção de diagnósticos.
+
 Endpoints públicos deste spike: `/health/live` e `/health/ready`. Readiness retorna apenas `ready`/`not_ready`; não expõe caminhos, versão, usuários ou conteúdo.
 
 ## Plano e distribuição

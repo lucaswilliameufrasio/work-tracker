@@ -55,12 +55,14 @@ export async function freezeSnapshot(
   job,
   directory,
   afterPinned = async () => {},
+  guardFreeze = () => {},
 ) {
   await mkdir(directory, { recursive: true, mode: 0o700 });
   const reader = new DatabaseSync(sourcePath, { readOnly: true });
   let inventory;
   store.db.exec('BEGIN IMMEDIATE');
   try {
+    guardFreeze();
     reader.exec('BEGIN');
     inventory = reader
       .prepare(
@@ -93,7 +95,13 @@ export async function freezeSnapshot(
   }
 }
 
-export async function sealArchive(stream, output, key, keyId) {
+export async function sealArchive(
+  stream,
+  output,
+  key,
+  keyId,
+  afterPartial = async () => {},
+) {
   if (key.length !== 32) throw new Error('AES-256 key must contain 32 bytes');
   const iv = randomBytes(12);
   const header = Buffer.from(
@@ -109,6 +117,7 @@ export async function sealArchive(stream, output, key, keyId) {
   const partial = `${output}.partial`;
   await writeFile(partial, aad, { flag: 'wx', mode: 0o600 });
   try {
+    await afterPartial();
     await pipeline(
       stream,
       bounded(LIMIT),
@@ -140,6 +149,10 @@ export async function buildBundle({
   key,
   keyId,
   afterPinned,
+  guardFreeze,
+  afterSnapshot = async () => {},
+  afterPartial,
+  releasePins = true,
 }) {
   try {
     const snapshot = await freezeSnapshot(
@@ -148,7 +161,9 @@ export async function buildBundle({
       job,
       directory,
       afterPinned,
+      guardFreeze,
     );
+    await afterSnapshot(snapshot);
     const reservedBytes = snapshot.inventory.reduce(
       (total, object) => total + object.bytes,
       0,
@@ -216,6 +231,7 @@ export async function buildBundle({
       output,
       key,
       keyId,
+      afterPartial,
     );
     return {
       status: 'complete',
@@ -224,7 +240,7 @@ export async function buildBundle({
       bytes: (await stat(output)).size,
     };
   } finally {
-    store.release(job);
+    if (releasePins) store.release(job);
   }
 }
 
