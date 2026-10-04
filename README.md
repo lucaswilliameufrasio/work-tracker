@@ -55,6 +55,8 @@ O spike agora cobre também SendGrid v3 (202/headers/mailboxes) e SES v2 pelo SD
 
 `tests/ses_sns_spike.rs` valida canonicalização SNS/RSA, trust chain/validade/hostname com certificados artificiais, TopicArn/origem estritos e inbox SQLite. Resolver mapeia origem AWS validada para HTTP loopback fixo: não prova fetch TLS/certificados AWS reais. Confirmações não seguem URLs nem ativam subscriptions. OpenSSL nativo/headers/pkg-config são necessários nos testes; supressão, conta real e Queues Cloudflare continuam pendentes.
 
+`tests/cloudflare_queue_spike.rs` valida HTTP pull/ack com fake loopback: Base64/json e text, scope de eventos, inbox SQLite antes do ack, conflito/rollback e reentrega após reopen. Falha/timeout/ack parcial conserva evento persistido e retorna resultado desconhecido, sem retry oculto. Nenhum Worker/token/queue real foi criado; jobs internos continuam SQLite. Consumer de produto, TLS/permissões/conta real, poison/DLQ, scheduler e supressão seguem pendentes.
+
 Endpoints públicos deste spike: `/health/live` e `/health/ready`. Readiness retorna apenas `ready`/`not_ready`; não expõe caminhos, versão, usuários ou conteúdo.
 
 ## Plano e distribuição
