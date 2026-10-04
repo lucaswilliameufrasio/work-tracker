@@ -25,6 +25,7 @@ import {
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { inspectStaging, promoteValidated } from './s3-confirmation-spike.mjs';
 import { LifecycleStore, prepareRemote } from './s3-lifecycle-spike.mjs';
+import { registerBundleTests } from './s3-bundle-contracts.mjs';
 
 const image =
   'cgr.dev/chainguard/minio@sha256:dc8b7ba9bdd982d28af533121e5438239624460432e090a52f81b36e7bd5f7dd';
@@ -93,10 +94,12 @@ before(async () => {
       },
       timeout: 60000,
     },
-  ).catch(() => {
-    throw new Error(
-      'Could not start pinned disposable MinIO; ensure Docker and the pinned image are available',
-    );
+  ).catch((error) => {
+    const detail = String(error.stderr || error.code || 'unknown error')
+      .replaceAll(credentials.accessKeyId, '[redacted]')
+      .replaceAll(credentials.secretAccessKey, '[redacted]')
+      .slice(0, 1000);
+    throw new Error(`Could not start pinned disposable MinIO: ${detail}`);
   });
   container = created.stdout.trim();
   const published = await run('docker', ['port', container, '9000/tcp']);
@@ -938,4 +941,10 @@ test('actual SIGKILL after remote PUT recovers without a graceful SQLite commit'
     (await http(await signedGet(fixture.finalKey))).body,
     fixture.body,
   );
+});
+
+registerBundleTests({
+  test,
+  lifecycleFixture,
+  context: () => ({ client, bucket, signedPut, signedGet, http }),
 });

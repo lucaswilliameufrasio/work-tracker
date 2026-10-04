@@ -699,6 +699,18 @@ Treze testes S3 reais no total, sem declarar confirmação/limpeza de produto co
 
 Fase 0 e checkbox S3 continuam abertas. Próximo risco: snapshot/bundle autossuficiente com bytes remotos protegidos e restauração isolada; sem declarar backup completo, restore, providers ou MCP implementados.
 
+#### Evidências da sexta fatia — bundle criptografado e restauração isolada
+
+- `web/scripts/s3-bundle-spike.mjs` permanece um harness Node de Fase 0, não formato público nem implementação Rust de backup/restore. TAR usa `tar` 7.5.22 como dependência de desenvolvimento; envelope experimental AES-256-GCM autentica header/key id como AAD e usa nonce aleatório de 12 bytes, com chave efêmera de 32 bytes fornecida pelo teste, nunca guardada no bundle.
+- Freeze obtém `BEGIN IMMEDIATE` no writer, estabelece snapshot de leitura em conexão separada e inventaria referências de imagens/avatares. Pins são persistidos antes de liberar o writer; Online Backup mantém a mesma leitura. O teste remove referências atuais enquanto os pins bloqueiam GC; banco restaurado ainda contém as referências originais. Exports não entram no inventário.
+- GET remoto faz streaming para spool privado, valida tamanho e SHA-256 contra o snapshot. Ausência ou bytes divergentes produzem estado incompleto com banco e relatório preservados, sem publicação nem substituição do último bundle válido. Pins são liberados ao terminar a execução; SIGKILL de bundle/job e recuperação de pins ainda não foram ensaiados nesta fatia.
+- TAR e cifra são transmitidos por streams, com orçamento experimental de 8 MiB, arquivo parcial 0600, sync e publicação exclusiva por hard link no mesmo filesystem; interrupção/limite/colisão não sobrescrevem o destino e removem partial em encerramento normal. Isso não prova durabilidade após perda de energia, sync de diretório, crash/SIGKILL no empacotamento nem limites de recursos de backup real. Snapshot/objetos em plaintext continuam em diretório privado de teste; política de limpeza/recovery de spools do produto é pendente.
+- Bundle completo é enviado a MinIO e baixado por URL presigned. Depois, arquivos e bucket de origem são removidos. Restore recebe apenas arquivo local, chave/key id e diretório isolado: nenhum client, endpoint ou credencial de S3. Valida GCM antes de extrair, inventário, checksums, `integrity_check`, foreign keys e referências do banco. Imagem/avatar restaurados correspondem aos bytes originais sem fallback para o bucket apagado.
+- Testes rejeitam chave/key id incorretos, ciphertext modificado/truncado, manifest/checksum/inventário inconsistentes, traversal relativo/absoluto e links simbólicos/hard links autenticados. Extração restringe tipos/caminhos, duplicatas e soma de bytes. O retorno contém banco e arquivos isolados; não ativa instalação nem reescreve credenciais/chaves de destino no produto.
+- Vinte e sete contratos reais S3/lifecycle/bundle no total. Retenção/alertas/custos, gestão/rotação/recuperação de chaves, migração de destino, adoção de instalação restaurada, compatibilidade S3 além do MinIO, falhas de rede/disco e medições em escala continuam pendentes. Fase 0 e checkboxes de S3/backup completo seguem abertas.
+
+Próxima fatia: recuperação durável do job de bundle e pins após interrupção, limpeza segura de spools e recursos/limites antes de transpor o protocolo para Rust e validar providers/MCP.
+
 ### Fase 1 — Fundação e identidade
 
 - [ ] Migrations, usuários/organização/settings e infraestrutura básica de outbox/jobs/leases necessária aos próximos fluxos.
