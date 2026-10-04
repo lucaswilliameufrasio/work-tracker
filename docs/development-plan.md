@@ -650,6 +650,17 @@ Saída: esqueleto executável, contratos comprovados e relatório de compatibili
 
 Fase 0 continua em andamento: próximos spikes são proteção snapshot/pins/bundle, S3 privado real, contratos dos providers e OAuth/MCP nos quatro clientes. Não expor o esqueleto na internet nem armazenar dados reais.
 
+#### Evidências da segunda fatia — protocolo snapshot/pins
+
+- `tests/snapshot_pins_spike.rs` usa SQLite e arquivos locais reais, em diretórios temporários; schema experimental fora das migrations de produto. Não é mock de S3 nem implementação de backup do produto.
+- Protocolo demonstrado: adquirir writer transaction `BEGIN IMMEDIATE`; fixar snapshot por leitura em conexão separada; registrar inventário/pins duráveis antes de liberar o writer; manter a mesma read transaction até terminar Online Backup. A cópia de arquivos usa streaming local após o snapshot do banco, ainda sob proteção dos pins. Não reabrir outra conexão para copiar um snapshot mais novo que o inventário.
+- Coleta reivindica o objeto como `deleting` em transação, somente sem referências e sem pins; novas referências rejeitam objetos reivindicados. Bytes são apagados depois do commit. O intervalo entre fixar snapshot e registrar pins foi forçado: conexão SQLx concorrente recebe SQLITE_BUSY, não atravessa o writer lock.
+- Após commit dos pins, apagar referências atuais não altera o inventário congelado nem permite coleta dos arquivos protegidos. Dois backups simultâneos mantêm proteção até ambos serem terminais; cancelamento antes de selar faz rollback sem pins/lock residual. Worker interrompido após selar deixa pins duráveis, verificados após reabrir o banco, até recuperação explícita marcar incompleto/liberar pins. Isto não é ainda teste de SIGKILL, fencing/leases ou recuperação automática de jobs de produto.
+- Exclusão externa de arquivo protegido gera resultado incompleto/lista de ausentes e mantém snapshot de staging para diagnóstico; nunca vira sucesso por haver um SQLite íntegro. Liberação dos pins e transição terminal são atômicas no experimento; não há retenção/publicação implementadas.
+- Referências revalidadas: https://www.sqlite.org/isolation.html e https://www.sqlite.org/backup.html. Read transaction longa pode reter WAL; duração, limites de disco/cancelamento e custo da breve writer transaction para inventários grandes ainda precisam de medição.
+
+Mantêm-se pendentes bundle criptografado/autossuficiente, checksums/imutabilidade real, restauração isolada sem origem, S3 privado, falhas de disco/rede e crash de processo. A checkbox conjunta de backup/pins/bundle continua aberta; esta fatia comprova somente o protocolo concorrente em SQLite/arquivos locais.
+
 ### Fase 1 — Fundação e identidade
 
 - [ ] Migrations, usuários/organização/settings e infraestrutura básica de outbox/jobs/leases necessária aos próximos fluxos.
