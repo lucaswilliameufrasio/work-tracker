@@ -29,13 +29,15 @@ Opções de bootstrap implementadas: `--bind`/`PUXIRI_BIND` e `--data-dir`/`PUXI
 ## Validação
 
 ```sh
-pnpm --dir web exec playwright install chromium
+(cd web && pnpm exec playwright install chromium)
 make check
 ```
 
 Integrações usam SQLite em arquivos temporários reais. E2E inicia o executável em um diretório isolado e verifica a SPA embutida no desktop e mobile escuro, sem servidor Node/Vite de produção. O gate também exige Docker para o spike S3: inicia MinIO descartável com dados em tmpfs e porta aleatória só no loopback, e remove apenas seu próprio container ao terminar. Nenhum endpoint, bucket ou credencial de outro ambiente é utilizado. O registry pode ser acessado para obter a imagem fixada.
 
 `make test-s3` roda apenas os contratos de armazenamento/URLs/CORS em MinIO real e Chromium, com SDK S3 oficial usado só no harness Node de desenvolvimento. Não existe adaptador S3 do produto ainda. A imagem `cgr.dev/chainguard/minio` está fixada por digest em `web/scripts/s3-spike.test.mjs`; disponibilidade para pull precisa ser verificada no ambiente de CI. O teste falha, não pula a integração, se Docker/imagem/Chromium não estiverem disponíveis.
+
+O mesmo spike usa SQLite em arquivo temporário via `node:sqlite` somente no harness para exercitar claims, fencing, rollback e pins remotos. Um processo filho exclusivo é interrompido por SIGKILL após PUT e antes do commit, verificando recuperação por readback sem staging. Isso não muda SQLx/Rust do servidor nem implementa o fluxo autenticado de uploads. Estado temporário fica em `.test-data` e é removido pelo teste.
 
 Endpoints públicos deste spike: `/health/live` e `/health/ready`. Readiness retorna apenas `ready`/`not_ready`; não expõe caminhos, versão, usuários ou conteúdo.
 

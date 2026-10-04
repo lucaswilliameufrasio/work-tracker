@@ -687,6 +687,18 @@ Sete contratos S3 reais adicionados, sem integração de produção liberada. A 
 
 Treze testes S3 reais no total, sem declarar confirmação/limpeza de produto concluída. A checkbox S3 segue aberta; o próximo passo é persistência/recuperação do protocolo e sua conexão com pins, antes de bundle/restauração completa.
 
+#### Evidências da quinta fatia — confirmação durável/recuperação/pins remotos
+
+- `web/scripts/s3-lifecycle-spike.mjs` usa `node:sqlite` em arquivos temporários reais (WAL/FULL/FK), somente no harness de desenvolvimento, com schema experimental fora das migrations de produto. Isso não substitui SQLx/Rust no servidor nem certifica o fluxo de autorização de uploads.
+- Reserva persiste chave de staging/final, tamanho/digest esperados e estado. Claim atômico incrementa epoch e tem lease com clock injetado. Lease ativo impede segundo claim; vencimento permite recuperação. Disponibilidade, objeto e referência são registrados na mesma transação condicionada ao epoch/lease atuais e à evidência de bytes esperados; metadados canônicos vêm da linha persistida. Evidência divergente causa rollback sem registro parcial. Claim antigo/expirado não finaliza; repetição não duplica objeto/referência.
+- Recuperação primeiro lê/verifica tamanho/SHA-256 do objeto final determinístico já existente. Apenas 404 leva à promoção a partir de staging; conflito create-only exige readback, nunca overwrite. Objeto final diferente não é adotado nem exposto. Workers antigo/renovado em paralelo convergem para uma chave verificada, mas só o claim atual registra disponibilidade.
+- `web/scripts/s3-interruption-worker.mjs` exercita **SIGKILL real** de processo filho exclusivo após PUT e antes do commit SQLite. Reabertura e claim novo recuperam o objeto final mesmo depois de remover staging; epoch morto é rejeitado e só um registro existe. Configuração/credenciais efêmeras vão por IPC privado, não argumentos/logs. O teste anterior de reabertura também permanece; isto não é ainda ensaio de crash do servidor Rust inteiro, perda de energia, corrupção ou indisponibilidade de storage.
+- Cancelamento persiste estado terminal/incrementa epoch; nenhum claim revive após reabertura. Um worker já em execução pode terminar PUT remoto, mas não registrar disponibilidade. Fencing protege commit no SQLite, não promete rollback/revogação de efeito S3 em andamento. Reconciliar objetos órfãos de workers atrasados continua necessário.
+- Pins e referências duráveis impedem claim de GC. Dois pins independentes exigem liberar ambos; após reivindicar `deleting`, pin tardio é rejeitado e acesso pelo catálogo de disponibilidade cessa. DELETE remoto ocorre fora da transação; interrupção após DELETE e antes do commit deixa `deleting` persistido. Reabertura/retry idempotente do DELETE conclui tombstone `deleted`; confirmação terminal/chave não são reutilizadas.
+- Vinte testes S3/lifecycle reais no total. Permanecem pendentes origem/destino com migração, snapshot do banco coordenado com esses pins remotos, reserva/cota de 1 GB, validação de imagens, workers atrasados que recriam objeto fisicamente após GC, reconciliação/orphan cleanup, falhas de rede/permissão/disco e transposição do protocolo ao código Rust. Tombstone precisa continuar bloqueando exposição mesmo se aparecer arquivo físico tardio.
+
+Fase 0 e checkbox S3 continuam abertas. Próximo risco: snapshot/bundle autossuficiente com bytes remotos protegidos e restauração isolada; sem declarar backup completo, restore, providers ou MCP implementados.
+
 ### Fase 1 — Fundação e identidade
 
 - [ ] Migrations, usuários/organização/settings e infraestrutura básica de outbox/jobs/leases necessária aos próximos fluxos.

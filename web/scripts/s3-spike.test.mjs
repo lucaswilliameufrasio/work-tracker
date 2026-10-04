@@ -2,10 +2,14 @@
 // No operator credentials/endpoints: all configuration is generated locally.
 import assert from 'node:assert/strict';
 import { after, before, test } from 'node:test';
-import { execFile } from 'node:child_process';
+import { execFile, fork } from 'node:child_process';
+import { once } from 'node:events';
 import { promisify } from 'node:util';
 import { createServer } from 'node:http';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import { mkdir, mkdtemp, rm } from 'node:fs/promises';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import { chromium } from '@playwright/test';
 import {
@@ -20,6 +24,7 @@ import {
 } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { inspectStaging, promoteValidated } from './s3-confirmation-spike.mjs';
+import { LifecycleStore, prepareRemote } from './s3-lifecycle-spike.mjs';
 
 const image =
   'cgr.dev/chainguard/minio@sha256:dc8b7ba9bdd982d28af533121e5438239624460432e090a52f81b36e7bd5f7dd';
@@ -681,5 +686,256 @@ test('promotion rejects wrong digest, size overflow and missing source without p
   await assert.rejects(
     client.send(new HeadObjectCommand({ Bucket: bucket, Key: finalKey })),
     (error) => error.$metadata?.httpStatusCode === 404,
+  );
+});
+
+async function lifecycleFixture(t) {
+  const root = fileURLToPath(new URL('../../.test-data/', import.meta.url));
+  await mkdir(root, { recursive: true });
+  const directory = await mkdtemp(join(root, 's3-lifecycle-'));
+  const path = join(directory, 'state.sqlite3');
+  let store = new LifecycleStore(path);
+  t.after(async () => {
+    store.close();
+    await rm(directory, { recursive: true, force: true });
+  });
+  const id = randomUUID();
+  const body = Buffer.from('durable confirmation fixture');
+  const stagingKey = `images/_uploads/${id}`;
+  const finalKey = `images/objects/${id}`;
+  store.reserve({
+    id,
+    stagingKey,
+    finalKey,
+    bytes: body.length,
+    sha256: createHash('sha256').update(body).digest('base64'),
+  });
+  const put = await signedPut(stagingKey, body);
+  assert.equal(
+    (await http(put.url, { method: 'PUT', headers: put.headers, body })).status,
+    200,
+  );
+  return {
+    id,
+    body,
+    stagingKey,
+    finalKey,
+    put,
+    path,
+    get store() {
+      return store;
+    },
+    reopen() {
+      store.close();
+      store = new LifecycleStore(path);
+    },
+    otherConnection() {
+      return new LifecycleStore(path);
+    },
+  };
+}
+
+test('confirmation recovers remote PUT before SQLite commit and fences the old claim', async (t) => {
+  const fixture = await lifecycleFixture(t);
+  const first = fixture.store.claim(fixture.id, 100, 10);
+  const other = fixture.otherConnection();
+  try {
+    assert.equal(other.claim(fixture.id, 105, 10), undefined);
+  } finally {
+    other.close();
+  }
+  await prepareRemote(client, bucket, first);
+  assert.equal(fixture.store.available(fixture.id), undefined);
+  assert.equal(fixture.store.objectCount(), 0);
+  // Stop/reopen the store at the crash boundary: final object exists but no
+  // local availability commit. Recovery must not depend on staging still existing.
+  fixture.reopen();
+  await client.send(
+    new DeleteObjectCommand({ Bucket: bucket, Key: fixture.stagingKey }),
+  );
+  const recovered = fixture.store.claim(fixture.id, 111, 10);
+  assert.ok(recovered.epoch > first.epoch);
+  const verified = await prepareRemote(client, bucket, recovered);
+  assert.equal(fixture.store.complete(first, verified, 112), false);
+  assert.equal(fixture.store.complete(recovered, verified, 112), true);
+  assert.equal(fixture.store.complete(recovered, verified, 112), false);
+  assert.equal(fixture.store.objectCount(), 1);
+  assert.equal(fixture.store.available(fixture.id).key, fixture.finalKey);
+  assert.deepEqual(
+    (await http(await signedGet(fixture.finalKey))).body,
+    fixture.body,
+  );
+});
+
+test('recovery refuses an unrelated existing final object without exposing or overwriting it', async (t) => {
+  const fixture = await lifecycleFixture(t);
+  const claim = fixture.store.claim(fixture.id, 100, 10);
+  await client.send(
+    new PutObjectCommand({
+      Bucket: bucket,
+      Key: fixture.finalKey,
+      Body: 'unrelated object',
+    }),
+  );
+  fixture.reopen();
+  const recovered = fixture.store.claim(fixture.id, 111, 10);
+  await assert.rejects(
+    prepareRemote(client, bucket, recovered),
+    /byte count or SHA-256 does not match/,
+  );
+  assert.equal(fixture.store.available(fixture.id), undefined);
+  assert.equal(fixture.store.objectCount(), 0);
+  assert.equal(fixture.store.complete(claim, {}, 112), false);
+  assert.equal(
+    (await http(await signedGet(fixture.finalKey))).body.toString(),
+    'unrelated object',
+  );
+});
+
+test('cancelled upload stays terminal after reopen and a late remote write cannot expose it', async (t) => {
+  const fixture = await lifecycleFixture(t);
+  const claim = fixture.store.claim(fixture.id, 100, 10);
+  assert.equal(fixture.store.cancel(fixture.id), true);
+  fixture.reopen();
+  assert.equal(fixture.store.claim(fixture.id, 111, 10), undefined);
+  // A worker already holding credentials may still finish its remote effect.
+  // Fencing protects SQLite availability, not an imaginary rollback of S3 PUT.
+  const verified = await prepareRemote(client, bucket, claim);
+  assert.equal(fixture.store.complete(claim, verified, 112), false);
+  assert.equal(fixture.store.available(fixture.id), undefined);
+  assert.equal(fixture.store.objectCount(), 0);
+  assert.equal(fixture.store.cancel(fixture.id), false);
+});
+
+test('durable remote pins block GC and deletion can resume after remote success before SQLite commit', async (t) => {
+  const fixture = await lifecycleFixture(t);
+  const claim = fixture.store.claim(fixture.id, 100, 10);
+  const verified = await prepareRemote(client, bucket, claim);
+  assert.equal(fixture.store.complete(claim, verified, 101), true);
+  assert.equal(fixture.store.claimGc(fixture.finalKey), undefined); // Still referenced.
+  fixture.store.pin('backup-a', fixture.finalKey);
+  fixture.store.pin('backup-b', fixture.finalKey);
+  fixture.store.unreference(fixture.finalKey);
+  fixture.reopen();
+  assert.equal(fixture.store.claimGc(fixture.finalKey), undefined);
+  assert.deepEqual(
+    (await http(await signedGet(fixture.finalKey))).body,
+    fixture.body,
+  );
+  fixture.store.release('backup-a');
+  assert.equal(fixture.store.claimGc(fixture.finalKey), undefined);
+  fixture.store.release('backup-b');
+  assert.equal(fixture.store.claimGc(fixture.finalKey).key, fixture.finalKey);
+  assert.equal(fixture.store.pin('too-late', fixture.finalKey), false);
+  assert.equal(fixture.store.available(fixture.id), undefined);
+  await client.send(
+    new DeleteObjectCommand({ Bucket: bucket, Key: fixture.finalKey }),
+  );
+  fixture.reopen();
+  assert.equal(fixture.store.deleting()[0].key, fixture.finalKey);
+  // Idempotent remote retry after local interruption, then terminal tombstone.
+  await client.send(
+    new DeleteObjectCommand({ Bucket: bucket, Key: fixture.finalKey }),
+  );
+  assert.equal(fixture.store.deleted(fixture.finalKey), true);
+  assert.equal(fixture.store.deleting().length, 0);
+  assert.equal(fixture.store.claim(fixture.id, 200, 10), undefined);
+  assert.equal(fixture.store.pin('resurrect', fixture.finalKey), false);
+  await assert.rejects(
+    client.send(
+      new HeadObjectCommand({ Bucket: bucket, Key: fixture.finalKey }),
+    ),
+    (error) => error.$metadata?.httpStatusCode === 404,
+  );
+});
+
+test('mismatched completion evidence rolls back all state and expired leases cannot commit', async (t) => {
+  const fixture = await lifecycleFixture(t);
+  const claim = fixture.store.claim(fixture.id, 100, 10);
+  const verified = await prepareRemote(client, bucket, claim);
+  for (const receipt of [
+    { ...verified, key: 'images/objects/wrong-key' },
+    { ...verified, bytes: verified.bytes + 1 },
+    { ...verified, sha256: 'incorrect digest' },
+  ]) {
+    assert.throws(
+      () => fixture.store.complete(claim, receipt, 101),
+      /does not match the reserved object/,
+    );
+    assert.equal(fixture.store.available(fixture.id), undefined);
+    assert.equal(fixture.store.objectCount(), 0);
+  }
+  assert.equal(fixture.store.complete(claim, verified, 110), false);
+  const recovered = fixture.store.claim(fixture.id, 110, 10);
+  assert.equal(fixture.store.complete(recovered, verified, 111), true);
+  assert.equal(fixture.store.objectCount(), 1);
+});
+
+test('overlapping old and renewed workers converge on one verified final key and one registration', async (t) => {
+  const fixture = await lifecycleFixture(t);
+  const old = fixture.store.claim(fixture.id, 100, 10);
+  const renewed = fixture.store.claim(fixture.id, 111, 10);
+  const [first, second] = await Promise.all([
+    prepareRemote(client, bucket, old),
+    prepareRemote(client, bucket, renewed),
+  ]);
+  assert.equal(first.key, second.key);
+  assert.equal(first.sha256, second.sha256);
+  assert.equal(fixture.store.complete(old, first, 112), false);
+  assert.equal(fixture.store.complete(renewed, second, 112), true);
+  assert.equal(fixture.store.objectCount(), 1);
+  assert.deepEqual(
+    (await http(await signedGet(fixture.finalKey))).body,
+    fixture.body,
+  );
+});
+
+test('actual SIGKILL after remote PUT recovers without a graceful SQLite commit', async (t) => {
+  const fixture = await lifecycleFixture(t);
+  const worker = fork(
+    fileURLToPath(new URL('./s3-interruption-worker.mjs', import.meta.url)),
+    [],
+    {
+      execArgv: [],
+      stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
+    },
+  );
+  const exited = once(worker, 'exit');
+  let interrupted;
+  try {
+    worker.send({
+      path: fixture.path,
+      id: fixture.id,
+      config: { endpoint, region: 'us-east-1', credentials, bucket },
+    });
+    const [message] = await once(worker, 'message', {
+      signal: AbortSignal.timeout(15000),
+    });
+    assert.equal(message.kind, 'remote-ready');
+    interrupted = message.claim;
+    assert.equal(fixture.store.available(fixture.id), undefined);
+    assert.equal(fixture.store.objectCount(), 0);
+    worker.kill('SIGKILL');
+    const [code, signal] = await exited;
+    assert.equal(code, null);
+    assert.equal(signal, 'SIGKILL');
+  } finally {
+    if (worker.exitCode === null && worker.signalCode === null) {
+      worker.kill('SIGKILL');
+      await exited;
+    }
+  }
+  fixture.reopen();
+  await client.send(
+    new DeleteObjectCommand({ Bucket: bucket, Key: fixture.stagingKey }),
+  );
+  const recovered = fixture.store.claim(fixture.id, 111, 10);
+  const verified = await prepareRemote(client, bucket, recovered);
+  assert.equal(fixture.store.complete(interrupted, verified, 112), false);
+  assert.equal(fixture.store.complete(recovered, verified, 112), true);
+  assert.equal(fixture.store.objectCount(), 1);
+  assert.deepEqual(
+    (await http(await signedGet(fixture.finalKey))).body,
+    fixture.body,
   );
 });
