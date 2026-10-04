@@ -1,0 +1,10 @@
+#[path = "support/resource_probe.rs"]
+mod resource_probe;
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn held_snapshot_retains_real_wal_until_reader_release_then_truncates() {
+    let report = resource_probe::measure(2_000, 200, 32).await;
+    assert_eq!(report["held_checkpoint"]["busy"], 1);
+    assert_eq!(report["wal_after_reader_release_bytes"], 0);
+    assert_eq!(report["commits_while_reader_held"], 32);
+}

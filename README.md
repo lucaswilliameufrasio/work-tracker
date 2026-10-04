@@ -43,6 +43,10 @@ O harness também valida bundle TAR/AES-GCM experimental (limite de fixture: 8 M
 
 Jobs experimentais de bundle persistem estado/leases e pins. Testes interrompem um filho por SIGKILL em quatro fronteiras; recuperação só libera pins depois de o supervisor confirmar que o worker parou, nunca apenas por expiração de lease. Limpeza de spool/partial é recuperável e preserva bundles completos e diagnósticos incompletos. Ainda não há supervisor Rust, retomada automática nem política de retenção de diagnósticos.
 
+`make measure-snapshot` mede localmente uma fixture Rust de 100 mil registros/10 mil objetos. `make measure-resources` repete em containers limitados a 1 CPU/1 GiB e 2 CPU/2 GiB, verifica cotas efetivas e guarda JSON em `.test-data/reports`. Mede freeze, Online Backup com espera de escritas, WAL/checkpoint, transações sintéticas, RSS e pico do cgroup; não mede HTTP/Argon2/capacidade real. Usa runtime Rust fixado por digest em `web/scripts/measure-resources.mjs` e bind volume privado (não tmpfs). Docker rootless mantém volume 0700 com UID mapeado do host.
+
+`make check` também exige a imagem Node fixada em `web/scripts/s3-spool-budget-contracts.mjs` para testar preflight de disco em tmpfs real de 4 MiB. Bundle experimental recusa excesso de inventário/bytes ou espaço insuficiente antes de copiar banco/inserir pins. Preflight não é reserva global de espaço e não elimina ENOSPC durante execução. Pull/arquiteturas das imagens fixadas ainda precisam de validação em CI.
+
 Endpoints públicos deste spike: `/health/live` e `/health/ready`. Readiness retorna apenas `ready`/`not_ready`; não expõe caminhos, versão, usuários ou conteúdo.
 
 ## Plano e distribuição

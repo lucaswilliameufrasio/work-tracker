@@ -16,7 +16,8 @@
     "format:check": "prettier --check .",
     "test": "vitest run",
     "test:e2e": "playwright test",
-    "test:s3": "node --test --test-timeout=120000 scripts/s3-spike.test.mjs"
+    "test:s3": "node --test --test-timeout=120000 scripts/s3-spike.test.mjs",
+    "measure:resources": "node scripts/measure-resources.mjs"
   },
   "dependencies": {
     "@fontsource/inter": "5.3.0",

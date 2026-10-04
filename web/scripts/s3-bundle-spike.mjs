@@ -7,7 +7,7 @@ import {
   createHash,
   randomBytes,
 } from 'node:crypto';
-import { createReadStream, createWriteStream } from 'node:fs';
+import { createReadStream, createWriteStream, statfsSync } from 'node:fs';
 import {
   appendFile,
   chmod,
@@ -56,7 +56,18 @@ export async function freezeSnapshot(
   directory,
   afterPinned = async () => {},
   guardFreeze = () => {},
+  limits = { maxObjects: 10_000, maxBytes: LIMIT },
 ) {
+  if (
+    !Number.isSafeInteger(limits.maxObjects) ||
+    limits.maxObjects < 1 ||
+    limits.maxObjects > 10_000 ||
+    !Number.isSafeInteger(limits.maxBytes) ||
+    limits.maxBytes < 1 ||
+    limits.maxBytes > LIMIT
+  ) {
+    throw new Error('Invalid bundle fixture limits');
+  }
   await mkdir(directory, { recursive: true, mode: 0o700 });
   const reader = new DatabaseSync(sourcePath, { readOnly: true });
   let inventory;
@@ -69,9 +80,28 @@ export async function freezeSnapshot(
         `SELECT DISTINCT objects.key, objects.sha256, objects.bytes
       FROM objects JOIN refs ON refs.object_key = objects.key WHERE objects.state = 'available'
       AND (objects.key LIKE 'images/objects/%' OR objects.key LIKE 'avatars/objects/%')
-      ORDER BY objects.key`,
+       ORDER BY objects.key LIMIT ?`,
       )
-      .all();
+      .all(limits.maxObjects + 1);
+    if (inventory.length > limits.maxObjects)
+      throw new Error('Bundle inventory exceeds fixture limit');
+    const pages = reader.prepare('PRAGMA page_count').get().page_count;
+    const pageSize = reader.prepare('PRAGMA page_size').get().page_size;
+    const reserved = inventory.reduce((total, object) => {
+      if (!Number.isSafeInteger(object.bytes) || object.bytes < 0)
+        throw new Error('Invalid reserved object size');
+      return total + object.bytes;
+    }, pages * pageSize);
+    if (!Number.isSafeInteger(reserved) || reserved > limits.maxBytes) {
+      throw new Error('Bundle fixture exceeds safety budget');
+    }
+    const disk = statfsSync(directory);
+    // Conservative reservation for plaintext spool + cipher/TAR overhead.
+    // This preflight is not an atomic global disk reservation; concurrent jobs
+    // and other writers can still exhaust disk and need normal failure recovery.
+    if (disk.bavail * disk.bsize < 2 * limits.maxBytes + 65536) {
+      throw new Error('Insufficient free space for bundle fixture');
+    }
     for (const object of inventory) {
       store.db
         .prepare('INSERT INTO pins (job, object_key) VALUES (?, ?)')
@@ -153,6 +183,7 @@ export async function buildBundle({
   afterSnapshot = async () => {},
   afterPartial,
   releasePins = true,
+  limits,
 }) {
   try {
     const snapshot = await freezeSnapshot(
@@ -162,6 +193,7 @@ export async function buildBundle({
       directory,
       afterPinned,
       guardFreeze,
+      limits,
     );
     await afterSnapshot(snapshot);
     const reservedBytes = snapshot.inventory.reduce(

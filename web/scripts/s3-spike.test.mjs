@@ -27,6 +27,7 @@ import { inspectStaging, promoteValidated } from './s3-confirmation-spike.mjs';
 import { LifecycleStore, prepareRemote } from './s3-lifecycle-spike.mjs';
 import { registerBundleTests } from './s3-bundle-contracts.mjs';
 import { registerBundleJobTests } from './s3-bundle-job-contracts.mjs';
+import { registerSpoolBudgetTests } from './s3-spool-budget-contracts.mjs';
 
 const image =
   'cgr.dev/chainguard/minio@sha256:dc8b7ba9bdd982d28af533121e5438239624460432e090a52f81b36e7bd5f7dd';
@@ -955,3 +956,5 @@ registerBundleJobTests({
   lifecycleFixture,
   context: () => ({ client, bucket, endpoint, credentials }),
 });
+
+registerSpoolBudgetTests({ test, lifecycleFixture });

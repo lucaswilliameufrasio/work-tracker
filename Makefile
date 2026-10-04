@@ -1,4 +1,4 @@
-.PHONY: install web build serve check format test-s3
+.PHONY: install web build serve check format test-s3 measure-snapshot measure-resources
 
 install:
 	cd web && pnpm install --frozen-lockfile
@@ -30,3 +30,11 @@ check: web
 
 test-s3:
 	cd web && pnpm test:s3
+
+# Synthetic local evidence; does not assert product capacity or latency targets.
+measure-snapshot: web
+	cargo run --release --locked --example resource_spike
+
+measure-resources: web
+	cargo build --release --locked --example resource_spike
+	cd web && pnpm measure:resources
