@@ -77,6 +77,8 @@ As quatro projeções agora alimentam uma política **comum nas fixtures** por e
 
 `tests/apple_client_secret_spike.rs` valida assinatura ES256 de client credentials com chave PKCS#8 artificial, verificação independente OpenSSL, teto de validade e limite de renovação/rotação. Não verifica ID tokens Apple, não troca code no SaaS e não implementa armazenamento ou renovação operacional de segredos.
 
+`tests/oidc_identity_spike.rs` também valida um perfil Apple RS256 artificial com issuer/Services ID/nonce configurados, booleanos ou strings de email_verified e is_private_email. Email ausente/vazio/alterado não muda subject. Discovery pública confirma RS256/client_secret_post, mas troca de code e browser Apple reais continuam pendentes.
+
 Endpoints públicos deste spike: `/health/live` e `/health/ready`. Readiness retorna apenas `ready`/`not_ready`; não expõe caminhos, versão, usuários ou conteúdo.
 
 ## Plano e distribuição

@@ -28,9 +28,12 @@ const NOW: i64 = 1_800_000_000;
 const ISSUER: &str = "https://gitlab.com";
 const CLIENT: &str = "local-fixture-client";
 const NONCE: &str = "artificial-single-attempt-nonce";
+const APPLE_ISSUER: &str = "https://appleid.apple.com";
+const APPLE_CLIENT: &str = "com.example.puxiri.web";
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct Extra {
     nbf: Option<i64>,
+    is_private_email: Option<Value>,
 }
 impl AdditionalClaims for Extra {}
 type Token =
@@ -45,15 +48,25 @@ struct Identity {
     subject: String,
     email: Option<String>,
     verified: bool,
+    private_email: Option<bool>,
 }
 fn verify(raw: &str, keys: CoreJsonWebKeySet, nonce: &str) -> Result<Identity, Failure> {
+    verify_for(raw, keys, nonce, ISSUER, CLIENT)
+}
+fn verify_for(
+    raw: &str,
+    keys: CoreJsonWebKeySet,
+    nonce: &str,
+    issuer: &str,
+    client: &str,
+) -> Result<Identity, Failure> {
     if raw.len() > 16384 {
         return Err(Failure::Token);
     }
     let token: Token = serde_json::from_value(json!(raw)).map_err(|_| Failure::Token)?;
     let verifier = CoreIdTokenVerifier::new_public_client(
-        ClientId::new(CLIENT.into()),
-        IssuerUrl::new(ISSUER.into()).unwrap(),
+        ClientId::new(client.into()),
+        IssuerUrl::new(issuer.into()).unwrap(),
         keys,
     )
     .set_allowed_algs([CoreJwsSigningAlgorithm::RsaSsaPkcs1V15Sha256])
@@ -73,15 +86,24 @@ fn verify(raw: &str, keys: CoreJsonWebKeySet, nonce: &str) -> Result<Identity, F
         || claims.additional_claims().nbf.is_some_and(|nbf| nbf > NOW)
         || claims
             .authorized_party()
-            .is_some_and(|party| party.as_str() != CLIENT)
+            .is_some_and(|party| party.as_str() != client)
     {
         return Err(Failure::Token);
     }
+    // Apple boolean/string variants are metadata only, never account keys.
+    let private_email = match claims.additional_claims().is_private_email.as_ref() {
+        None => None,
+        Some(Value::Bool(value)) => Some(*value),
+        Some(Value::String(value)) if value == "true" => Some(true),
+        Some(Value::String(value)) if value == "false" => Some(false),
+        _ => return Err(Failure::Token),
+    };
     Ok(Identity {
         issuer: claims.issuer().as_str().into(),
         subject: claims.subject().as_str().into(),
         email: claims.email().map(|email| email.as_str().into()),
         verified: claims.email_verified() == Some(true),
+        private_email,
     })
 }
 fn key() -> PKey<Private> {
@@ -105,6 +127,105 @@ fn signed(key: &PKey<Private>, kid: &str, claims: Value) -> String {
         "{input}.{}",
         URL_SAFE_NO_PAD.encode(signer.sign_to_vec().unwrap())
     )
+}
+fn apple_claims() -> Value {
+    json!({"iss":APPLE_ISSUER,"aud":APPLE_CLIENT,"sub":"apple-pairwise-subject","iat":NOW,"exp":NOW+300,"nonce":NONCE,"email":"artificial@privaterelay.appleid.com","email_verified":"true","is_private_email":"true","nonce_supported":true})
+}
+
+#[tokio::test]
+async fn apple_profile_accepts_boolean_and_string_metadata_without_using_relay_email_as_identity() {
+    let fixture = Fixture::new().await;
+    let keys = fixture.keys().await.unwrap();
+    for value in [json!(true), json!("true"), json!(false), json!("false")] {
+        let mut claims = apple_claims();
+        claims["email_verified"] = value.clone();
+        claims["is_private_email"] = value.clone();
+        let identity = verify_for(
+            &signed(&fixture.key, "key-one", claims),
+            keys.clone(),
+            NONCE,
+            APPLE_ISSUER,
+            APPLE_CLIENT,
+        )
+        .unwrap();
+        assert_eq!(identity.issuer, APPLE_ISSUER);
+        assert_eq!(identity.subject, "apple-pairwise-subject");
+        let expected = value == json!(true) || value == json!("true");
+        assert_eq!(identity.verified, expected);
+        assert_eq!(identity.private_email, Some(expected));
+    }
+    for email in [Some(""), Some("changed@example.invalid"), None] {
+        let mut claims = apple_claims();
+        if let Some(email) = email {
+            claims["email"] = json!(email);
+        } else {
+            claims.as_object_mut().unwrap().remove("email");
+        }
+        claims.as_object_mut().unwrap().remove("is_private_email");
+        let identity = verify_for(
+            &signed(&fixture.key, "key-one", claims),
+            keys.clone(),
+            NONCE,
+            APPLE_ISSUER,
+            APPLE_CLIENT,
+        )
+        .unwrap();
+        assert_eq!(identity.subject, "apple-pairwise-subject");
+        assert_eq!(identity.private_email, None);
+    }
+}
+
+#[tokio::test]
+async fn apple_profile_rejects_cross_provider_client_nonce_and_invalid_metadata_without_relaxing_crypto()
+ {
+    let fixture = Fixture::new().await;
+    let keys = fixture.keys().await.unwrap();
+    let raw = signed(&fixture.key, "key-one", apple_claims());
+    assert!(verify(&raw, keys.clone(), NONCE).is_err());
+    for (field, value) in [
+        ("iss", json!(ISSUER)),
+        ("aud", json!(CLIENT)),
+        ("nonce", json!("wrong")),
+        ("exp", json!(NOW)),
+        ("email_verified", json!("TRUE")),
+        ("email_verified", json!(1)),
+        ("is_private_email", json!("yes")),
+        ("is_private_email", json!(1)),
+    ] {
+        let mut claims = apple_claims();
+        claims[field] = value;
+        assert!(
+            verify_for(
+                &signed(&fixture.key, "key-one", claims),
+                keys.clone(),
+                NONCE,
+                APPLE_ISSUER,
+                APPLE_CLIENT
+            )
+            .is_err(),
+            "accepted {field}"
+        );
+    }
+    let parts: Vec<_> = raw.split('.').collect();
+    // ES256 is the CLIENT-secret algorithm, not an accepted Apple ID-token alg
+    // in this RS256 profile. No header-based auto-enablement.
+    let wrong_alg = format!(
+        "{}.{}.{}",
+        URL_SAFE_NO_PAD.encode(br#"{"alg":"ES256","kid":"key-one"}"#),
+        parts[1],
+        parts[2]
+    );
+    assert!(verify_for(&wrong_alg, keys.clone(), NONCE, APPLE_ISSUER, APPLE_CLIENT).is_err());
+    assert!(
+        verify_for(
+            &signed(&key(), "key-one", apple_claims()),
+            keys,
+            NONCE,
+            APPLE_ISSUER,
+            APPLE_CLIENT
+        )
+        .is_err()
+    );
 }
 struct Fixture {
     key: PKey<Private>,
