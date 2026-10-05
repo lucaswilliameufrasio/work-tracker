@@ -38,6 +38,7 @@ struct Call {
     headers: HeaderMap,
     body: Value,
     persisted_at_call: i64,
+    effects_at_call: i64,
 }
 struct Server {
     replies: Mutex<VecDeque<Reply>>,
@@ -125,11 +126,16 @@ async fn receive(
         .fetch_one(database.pool())
         .await
         .unwrap();
+    let effects_at_call = sqlx::query_scalar("SELECT count(*) FROM cf_feedback_audit")
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
     server.calls.lock().unwrap().push(Call {
         path: uri.path().into(),
         headers,
         body: serde_json::from_slice(&body).unwrap(),
         persisted_at_call: count,
+        effects_at_call,
     });
     let reply = server
         .replies
@@ -164,6 +170,312 @@ fn ack(count: usize) -> Reply {
     Reply::json(
         json!({"success":true,"errors":[],"result":{"ackCount":count,"retryCount":0,"warnings":{}}}),
     )
+}
+
+const RECIPIENT: &str = "recipient@example.invalid";
+fn config() -> String {
+    format!(
+        "{}/{}/{}",
+        queue::ACCOUNT,
+        queue::QUEUE,
+        queue::SUBSCRIPTION
+    )
+}
+async fn registered(fixture: &Fixture, scope: &str) {
+    sqlx::query(
+        "INSERT INTO cf_feedback_sends(config,message_id,recipient) VALUES(?,'fixture-email-id',?)",
+    )
+    .bind(scope)
+    .bind(RECIPIENT)
+    .execute(fixture.db().pool())
+    .await
+    .unwrap();
+}
+fn classified(id: &str, kind: &str) -> Value {
+    let mut value = event(id, kind);
+    if kind == "complained" {
+        value["payload"]["complaint"] = json!({"type":"abuse"});
+    }
+    if kind == "bounced" {
+        value["payload"]["bounce"] =
+            json!({"type":"hard","classification":"permanent_failure","reason":"PRIVATE"});
+        value["payload"]["delivery"]["smtpEnhancedStatusCode"] = json!("5.1.1");
+    }
+    value
+}
+async fn effects(fixture: &Fixture) -> (i64, i64) {
+    (
+        sqlx::query_scalar("SELECT count(*) FROM cf_feedback_suppression")
+            .fetch_one(fixture.db().pool())
+            .await
+            .unwrap(),
+        sqlx::query_scalar("SELECT count(*) FROM cf_feedback_audit")
+            .fetch_one(fixture.db().pool())
+            .await
+            .unwrap(),
+    )
+}
+async fn consume(fixture: &Fixture, value: Value, lease: &str) -> Result<usize, Failure> {
+    fixture.replies(vec![pull(vec![message(value, lease, "json")]), ack(1)]);
+    fixture.client().consume_once().await
+}
+
+#[tokio::test]
+async fn correlated_complaint_commits_before_ack_and_survives_reopen_without_banning_or_clearing_on_delivery()
+ {
+    let mut fixture = Fixture::new().await;
+    registered(&fixture, &config()).await;
+    sqlx::raw_sql("CREATE TABLE fixture_users(id TEXT PRIMARY KEY,banned INTEGER); INSERT INTO fixture_users VALUES('user',0);
+        CREATE TABLE fixture_bell(id TEXT PRIMARY KEY); INSERT INTO fixture_bell VALUES('notification');")
+        .execute(fixture.db().pool()).await.unwrap();
+    assert_eq!(
+        consume(&fixture, classified("complaint", "complained"), "lease-old").await,
+        Ok(1)
+    );
+    assert_eq!(
+        fixture
+            .server
+            .calls
+            .lock()
+            .unwrap()
+            .last()
+            .unwrap()
+            .effects_at_call,
+        1
+    );
+    fixture.reopen().await;
+    assert_eq!(
+        consume(&fixture, classified("complaint", "complained"), "lease-new").await,
+        Ok(1)
+    );
+    assert_eq!(
+        consume(&fixture, event("delivery", "delivered"), "lease-delivery").await,
+        Ok(1)
+    );
+    assert_eq!(effects(&fixture).await, (1, 1));
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT banned FROM fixture_users")
+            .fetch_one(fixture.db().pool())
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM fixture_bell")
+            .fetch_one(fixture.db().pool())
+            .await
+            .unwrap(),
+        1
+    );
+    let audit: Vec<(String, String, String)> =
+        sqlx::query_as("SELECT event_id,message_id,reason FROM cf_feedback_audit")
+            .fetch_all(fixture.db().pool())
+            .await
+            .unwrap();
+    assert!(!format!("{audit:?}").contains(RECIPIENT));
+    assert!(!format!("{audit:?}").contains("PRIVATE"));
+}
+
+#[tokio::test]
+async fn terminal_soft_bounce_policy_rejection_and_inconsistent_classification_never_suppress() {
+    let fixture = Fixture::new().await;
+    registered(&fixture, &config()).await;
+    let mut cases = vec![
+        event("deferred", "deferred"),
+        event("failed", "failed"),
+        event("rejected", "rejected"),
+        event("unknown", "new_kind"),
+        event("missing", "bounced"),
+    ];
+    let mut soft = classified("soft", "bounced");
+    soft["payload"]["bounce"]["type"] = json!("soft");
+    cases.push(soft);
+    let mut content = classified("content", "bounced");
+    content["payload"]["delivery"]["smtpEnhancedStatusCode"] = json!("5.7.1");
+    cases.push(content);
+    let mut transient = classified("transient", "bounced");
+    transient["payload"]["bounce"]["classification"] = json!("temporary_failure");
+    cases.push(transient);
+    let mut nonterminal = classified("nonterminal", "bounced");
+    nonterminal["payload"]["terminal"] = json!(false);
+    cases.push(nonterminal);
+    let mut inconsistent = classified("inconsistent", "bounced");
+    inconsistent["payload"]["delivery"]["status"] = json!("delivered");
+    cases.push(inconsistent);
+    let mut notspam = classified("notspam", "complained");
+    notspam["payload"]["complaint"]["type"] = json!("not-spam");
+    cases.push(notspam);
+    cases.push(event("complaint-missing", "complained"));
+    for (index, value) in cases.into_iter().enumerate() {
+        assert_eq!(
+            consume(&fixture, value, &format!("lease-{index}")).await,
+            Ok(1)
+        );
+    }
+    assert_eq!(effects(&fixture).await, (0, 0));
+    assert_eq!(
+        consume(&fixture, classified("invalid", "bounced"), "lease-invalid").await,
+        Ok(1)
+    );
+    assert_eq!(effects(&fixture).await, (1, 1));
+    assert_eq!(
+        consume(
+            &fixture,
+            classified("complaint", "complained"),
+            "lease-complaint"
+        )
+        .await,
+        Ok(1)
+    );
+    assert_eq!(
+        consume(
+            &fixture,
+            classified("later-bounce", "bounced"),
+            "lease-later"
+        )
+        .await,
+        Ok(1)
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT reason FROM cf_feedback_suppression")
+            .fetch_one(fixture.db().pool())
+            .await
+            .unwrap(),
+        "complaint"
+    );
+}
+
+#[tokio::test]
+async fn unknown_send_wrong_configuration_and_recipient_are_inbox_only_then_acked_event_reconciles_locally()
+ {
+    let fixture = Fixture::new().await;
+    registered(&fixture, "other-config").await;
+    assert_eq!(
+        consume(&fixture, classified("early", "complained"), "lease-early").await,
+        Ok(1)
+    );
+    assert_eq!(effects(&fixture).await, (0, 0));
+    queue::feedback::reconcile(fixture.db()).await.unwrap();
+    assert_eq!(effects(&fixture).await, (0, 0));
+    registered(&fixture, &config()).await;
+    let mut recipient = classified("mismatch", "complained");
+    recipient["payload"]["recipient"] = json!("other@example.invalid");
+    assert_eq!(consume(&fixture, recipient, "lease-mismatch").await, Ok(1));
+    assert_eq!(effects(&fixture).await, (0, 0));
+    queue::feedback::reconcile(fixture.db()).await.unwrap();
+    queue::feedback::reconcile(fixture.db()).await.unwrap();
+    assert_eq!(effects(&fixture).await, (1, 1));
+    assert_eq!(
+        consume(&fixture, classified("early", "complained"), "lease-replay").await,
+        Ok(1)
+    );
+    assert_eq!(effects(&fixture).await, (1, 1));
+    let mut scope = classified("bad-scope", "complained");
+    scope["metadata"]["eventSubscriptionId"] = json!("other-subscription");
+    fixture.replies(vec![pull(vec![message(scope, "bad-lease", "json")])]);
+    assert_eq!(fixture.client().consume_once().await, Err(Failure::Scope));
+    assert_eq!(effects(&fixture).await, (1, 1));
+    assert_eq!(
+        fixture.server.calls.lock().unwrap().last().unwrap().body["batch_size"],
+        queue::BATCH
+    );
+}
+
+#[tokio::test]
+async fn failed_projection_rolls_back_whole_batch_without_ack_and_conflicting_event_cannot_change_recipient()
+ {
+    let fixture = Fixture::new().await;
+    registered(&fixture, &config()).await;
+    sqlx::raw_sql("CREATE TRIGGER fail_feedback BEFORE INSERT ON cf_feedback_audit BEGIN SELECT RAISE(ABORT,'fixture failure'); END")
+        .execute(fixture.db().pool()).await.unwrap();
+    let batch = vec![
+        message(event("delivery", "delivered"), "lease-a", "json"),
+        message(classified("complaint", "complained"), "lease-b", "json"),
+    ];
+    fixture.replies(vec![pull(batch.clone())]);
+    assert_eq!(
+        fixture.client().consume_once().await,
+        Err(Failure::Database)
+    );
+    assert_eq!(fixture.count().await, 0);
+    assert_eq!(effects(&fixture).await, (0, 0));
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM cf_feedback_projection")
+            .fetch_one(fixture.db().pool())
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(fixture.server.calls.lock().unwrap().len(), 1);
+    sqlx::query("DROP TRIGGER fail_feedback")
+        .execute(fixture.db().pool())
+        .await
+        .unwrap();
+    fixture.replies(vec![pull(batch), ack(2)]);
+    assert_eq!(fixture.client().consume_once().await, Ok(2));
+    assert_eq!(effects(&fixture).await, (1, 1));
+    let mut conflict = classified("complaint", "complained");
+    conflict["payload"]["recipient"] = json!("other@example.invalid");
+    fixture.replies(vec![pull(vec![message(
+        conflict,
+        "lease-conflict",
+        "json",
+    )])]);
+    assert_eq!(
+        fixture.client().consume_once().await,
+        Err(Failure::Conflict)
+    );
+    assert_eq!(effects(&fixture).await, (1, 1));
+    assert_eq!(fixture.server.calls.lock().unwrap().len(), 4);
+}
+
+#[tokio::test]
+async fn concurrent_projection_and_ack_ambiguity_never_duplicate_or_undo_committed_suppression() {
+    let fixture = Fixture::new().await;
+    registered(&fixture, &config()).await;
+    fixture.replies(vec![
+        pull(vec![message(
+            classified("complaint", "complained"),
+            "lease-a",
+            "json",
+        )]),
+        pull(vec![message(
+            classified("complaint", "complained"),
+            "lease-b",
+            "text",
+        )]),
+    ]);
+    let a = fixture.client();
+    let b = fixture.client();
+    let am = a.pull().await.unwrap();
+    let bm = b.pull().await.unwrap();
+    let (ar, br) = tokio::join!(a.persist(&am), b.persist(&bm));
+    assert_eq!((ar, br), (Ok(()), Ok(())));
+    assert_eq!(effects(&fixture).await, (1, 1));
+    fixture.replies(vec![
+        pull(vec![message(
+            classified("complaint", "complained"),
+            "lease-current",
+            "json",
+        )]),
+        ack(0),
+    ]);
+    assert_eq!(
+        fixture.client().consume_once().await,
+        Err(Failure::AckUnknown)
+    );
+    assert_eq!(effects(&fixture).await, (1, 1));
+    assert_eq!(
+        fixture
+            .server
+            .calls
+            .lock()
+            .unwrap()
+            .last()
+            .unwrap()
+            .effects_at_call,
+        1
+    );
 }
 
 #[tokio::test]

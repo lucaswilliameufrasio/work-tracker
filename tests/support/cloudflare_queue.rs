@@ -1,4 +1,6 @@
 //! Local-only protocol spike; no production worker, credentials or effects.
+#[path = "cloudflare_feedback.rs"]
+pub mod feedback;
 use base64::{Engine, engine::general_purpose::STANDARD};
 use puxiri::db::Database;
 use reqwest::{Client, Url, redirect::Policy};
@@ -217,6 +219,14 @@ impl Consumer {
             if stored != json {
                 return Err(Failure::Conflict);
             }
+            feedback::apply(
+                &mut transaction,
+                &format!("{ACCOUNT}/{QUEUE}/{SUBSCRIPTION}"),
+                &id,
+                &json,
+            )
+            .await
+            .map_err(|_| Failure::Database)?;
         }
         transaction.commit().await.map_err(|_| Failure::Database)?;
         Ok(())
@@ -252,6 +262,7 @@ impl Consumer {
     }
 }
 pub async fn schema(database: &Database) {
+    feedback::schema(database).await;
     sqlx::query("CREATE TABLE IF NOT EXISTS cloudflare_inbox(config TEXT NOT NULL,event_id TEXT NOT NULL,event_json BLOB NOT NULL,PRIMARY KEY(config,event_id))")
         .execute(database.pool()).await.unwrap();
 }

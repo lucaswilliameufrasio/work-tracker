@@ -63,6 +63,8 @@ O ingester SendGrid experimental também projeta supressão/audit na mesma trans
 
 O spike SES/SNS correlaciona topic/conta/SES messageId/destinatário antes de supressão atômica e audit. Candidatos múltiplos a reclamante, falhas temporárias e bounces sem evidência explícita de endereço inválido ficam sem efeito. Replay/reopen, colisão de feedbackId e rollback são testados; política conservadora ainda não cobre todo hard bounce SES. Certificados continuam artificiais; TLS AWS, contas reais, Cloudflare e unificação/enforcement no produto seguem pendentes.
 
+O consumer Cloudflare experimental correlaciona configuração/messageId/recipient antes de confirmar inbox+supressão+audit e só depois faz ack. Terminal soft bounce não vira endereço inválido; eventos precoces já acked reconciliam pela inbox local. Concorrência, reopen, rollback e ack ambíguo são testados. Metadata não autentica produtor: TLS e controle de escrita na queue real precisam de validação antes do produto. Unificação/enforcement entre providers permanecem pendentes.
+
 Endpoints públicos deste spike: `/health/live` e `/health/ready`. Readiness retorna apenas `ready`/`not_ready`; não expõe caminhos, versão, usuários ou conteúdo.
 
 ## Plano e distribuição
