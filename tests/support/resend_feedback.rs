@@ -1,15 +1,16 @@
 //! Experimental projection from authenticated Resend inbox. Not product auth,
 //! outbox or a public callback. One recipient per send in this fixture.
+use crate::suppression;
 use puxiri::db::Database;
 use serde_json::Value;
 use sqlx::{Sqlite, Transaction};
 
 pub async fn schema(database: &Database) {
+    suppression::schema(database).await;
     sqlx::raw_sql("CREATE TABLE feedback_sends(id TEXT PRIMARY KEY,config TEXT NOT NULL,message_id TEXT,recipient TEXT NOT NULL,UNIQUE(config,message_id));
         CREATE TABLE feedback_projection(config TEXT NOT NULL,event_id TEXT NOT NULL,disposition TEXT NOT NULL,PRIMARY KEY(config,event_id));
         CREATE TABLE feedback_suppression(recipient TEXT PRIMARY KEY,reason TEXT NOT NULL CHECK(reason IN ('complaint','permanent_bounce')));
-        CREATE TABLE feedback_audit(config TEXT NOT NULL,event_id TEXT NOT NULL,send_id TEXT NOT NULL,reason TEXT NOT NULL,PRIMARY KEY(config,event_id));
-        CREATE TABLE feedback_pending(id TEXT PRIMARY KEY,recipient TEXT NOT NULL,state TEXT NOT NULL CHECK(state IN ('ready','dispatch_authorized','suppressed')));")
+        CREATE TABLE feedback_audit(config TEXT NOT NULL,event_id TEXT NOT NULL,send_id TEXT NOT NULL,reason TEXT NOT NULL,PRIMARY KEY(config,event_id));")
         .execute(database.pool()).await.unwrap();
 }
 
@@ -66,17 +67,19 @@ pub async fn apply(
     if let Some(reason) = reason {
         sqlx::query("INSERT INTO feedback_suppression(recipient,reason) VALUES(?,?) ON CONFLICT(recipient) DO UPDATE SET reason=CASE WHEN excluded.reason='complaint' THEN 'complaint' ELSE feedback_suppression.reason END")
             .bind(&recipient).bind(reason).execute(&mut **transaction).await?;
-        // Installation-wide address block; changing provider does not bypass it.
-        // Already-authorized/in-flight transfers cannot be undone by this SQL.
-        sqlx::query(
-            "UPDATE feedback_pending SET state='suppressed' WHERE recipient=? AND state='ready'",
-        )
-        .bind(&recipient)
-        .execute(&mut **transaction)
-        .await?;
         // Redacted audit: local ids and fixed reason only, no private content.
         sqlx::query("INSERT INTO feedback_audit(config,event_id,send_id,reason) VALUES(?,?,?,?) ON CONFLICT DO NOTHING")
             .bind(config).bind(event_id).bind(send_id).bind(reason).execute(&mut **transaction).await?;
+        suppression::block(
+            transaction,
+            &recipient,
+            if reason == "complaint" {
+                suppression::Reason::Complaint
+            } else {
+                suppression::Reason::PermanentInvalid
+            },
+        )
+        .await?;
     }
     record(transaction, config, event_id, "processed").await
 }
@@ -117,7 +120,7 @@ pub async fn authorize_dispatch(database: &Database, id: &str) -> Result<bool, s
         return Ok(false);
     }
     let blocked: bool =
-        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM feedback_suppression WHERE recipient=?)")
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM email_suppression WHERE recipient=?)")
             .bind(recipient)
             .fetch_one(&mut *transaction)
             .await?;

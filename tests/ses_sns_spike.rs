@@ -1,6 +1,8 @@
 //! SNS protocol/crypto fixtures with real HTTP/SQLite, no AWS calls.
 #[path = "support/sns_contract.rs"]
 mod sns;
+#[path = "support/email_suppression.rs"]
+mod suppression;
 use axum::{
     Router,
     body::Body,

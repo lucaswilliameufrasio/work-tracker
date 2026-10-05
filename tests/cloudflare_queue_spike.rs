@@ -1,6 +1,8 @@
 //! SaaS fake only; local SQLite/HTTP/client are real. No Cloudflare provisioning.
 #[path = "support/cloudflare_queue.rs"]
 mod queue;
+#[path = "support/email_suppression.rs"]
+mod suppression;
 use axum::{
     Router,
     body::Bytes,

@@ -1,6 +1,8 @@
 //! Real local HTTP + SQLite; signed fixtures never contact SendGrid.
 #[path = "support/sendgrid_inbox.rs"]
 mod inbox;
+#[path = "support/email_suppression.rs"]
+mod suppression;
 
 use axum::http::HeaderMap;
 use base64::{Engine, engine::general_purpose::STANDARD};

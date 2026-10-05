@@ -1,6 +1,8 @@
 //! Authenticated Resend-style ingress fixture, NOT production suppression/auth.
 #[path = "support/resend_feedback.rs"]
 mod feedback;
+#[path = "support/email_suppression.rs"]
+mod suppression;
 use axum::{
     Router,
     body::Bytes,

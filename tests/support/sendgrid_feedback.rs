@@ -1,9 +1,11 @@
 //! Dev-only effects after ECDSA authentication. Correlation uses an opaque local
 //! attempt token, never inferred X-Message-ID/sg_message_id prefix equivalence.
+use crate::suppression;
 use puxiri::db::Database;
 use serde_json::Value;
 use sqlx::{Sqlite, Transaction};
 pub async fn schema(database: &Database) {
+    suppression::schema(database).await;
     sqlx::raw_sql("CREATE TABLE IF NOT EXISTS sg_feedback_sends(config TEXT NOT NULL,attempt TEXT NOT NULL,recipient TEXT NOT NULL,PRIMARY KEY(config,attempt));
         CREATE TABLE IF NOT EXISTS sg_feedback_projection(config TEXT NOT NULL,event_id TEXT NOT NULL,disposition TEXT NOT NULL,PRIMARY KEY(config,event_id));
         CREATE TABLE IF NOT EXISTS sg_feedback_suppression(recipient TEXT PRIMARY KEY,reason TEXT NOT NULL);
@@ -55,9 +57,19 @@ pub async fn apply(
             };
             if let Some(reason) = reason {
                 sqlx::query("INSERT INTO sg_feedback_suppression(recipient,reason) VALUES(?,?) ON CONFLICT(recipient) DO UPDATE SET reason=CASE WHEN excluded.reason='complaint' THEN 'complaint' ELSE sg_feedback_suppression.reason END")
-                    .bind(recipient).bind(reason).execute(&mut **transaction).await?;
+                    .bind(&recipient).bind(reason).execute(&mut **transaction).await?;
                 sqlx::query("INSERT INTO sg_feedback_audit(config,event_id,attempt,reason) VALUES(?,?,?,?) ON CONFLICT DO NOTHING")
                     .bind(config).bind(id).bind(token).bind(reason).execute(&mut **transaction).await?;
+                suppression::block(
+                    transaction,
+                    &recipient,
+                    if reason == "complaint" {
+                        suppression::Reason::Complaint
+                    } else {
+                        suppression::Reason::PermanentInvalid
+                    },
+                )
+                .await?;
             }
             "processed"
         }

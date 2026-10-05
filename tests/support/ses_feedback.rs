@@ -1,9 +1,11 @@
 //! Dev-only projection. Topic scope comes from authenticated SNS, not Message.
+use crate::suppression;
 use puxiri::db::Database;
 use serde_json::Value;
 use sqlx::{Sqlite, Transaction};
 
 pub async fn schema(database: &Database) {
+    suppression::schema(database).await;
     sqlx::raw_sql("CREATE TABLE IF NOT EXISTS ses_feedback_sends(topic TEXT NOT NULL,ses_id TEXT NOT NULL,recipient TEXT NOT NULL,PRIMARY KEY(topic,ses_id));
         CREATE TABLE IF NOT EXISTS ses_feedback_projection(topic TEXT NOT NULL,sns_id TEXT NOT NULL,disposition TEXT NOT NULL,PRIMARY KEY(topic,sns_id));
         CREATE TABLE IF NOT EXISTS ses_feedback_suppression(recipient TEXT PRIMARY KEY,reason TEXT NOT NULL);
@@ -122,7 +124,7 @@ pub async fn apply(
         feedback_id.filter(|id| !id.is_empty() && id.len() <= 256),
     ) {
         sqlx::query("INSERT INTO ses_feedback_suppression(recipient,reason) VALUES(?,?) ON CONFLICT(recipient) DO UPDATE SET reason=CASE WHEN excluded.reason='complaint' THEN 'complaint' ELSE ses_feedback_suppression.reason END")
-            .bind(recipient).bind(reason).execute(&mut **transaction).await?;
+            .bind(&recipient).bind(reason).execute(&mut **transaction).await?;
         // Feedback identity is distinct from SNS envelope identity; identical
         // feedback republished in another envelope doesn't duplicate audit.
         sqlx::query("INSERT INTO ses_feedback_audit(topic,feedback_id,ses_id,reason) VALUES(?,?,?,?) ON CONFLICT DO NOTHING")
@@ -141,6 +143,16 @@ pub async fn apply(
                 "conflicting SES feedback identity".into(),
             ));
         }
+        suppression::block(
+            transaction,
+            &recipient,
+            if reason == "complaint" {
+                suppression::Reason::Complaint
+            } else {
+                suppression::Reason::PermanentInvalid
+            },
+        )
+        .await?;
     }
     record(transaction, topic, sns_id, "processed").await
 }
