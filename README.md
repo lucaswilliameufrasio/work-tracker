@@ -81,6 +81,8 @@ As quatro projeções agora alimentam uma política **comum nas fixtures** por e
 
 `tests/oidc_flow_spike.rs` também integra o perfil Apple local: claim SQLite, client_secret ES256 em POST body, CoreClient e ID token RS256/nonce antes de identidade. Confere ausência de Basic/PKCE inferido, concorrência e falhas sem retry. Credenciais artificiais, cookie inserido por reqwest e nenhum login/SaaS real.
 
+`tests/mcp_http_spike.rs` usa rmcp 3.5.1 dev-only em Streamable HTTP loopback: metadata/challenge, grants opacos inseridos pelo teste, recurso/scope/expiração/revogação/banimento e initialize/list/call de ferramenta diagnóstica. Não emite OAuth, não serve conteúdo real e não comprova OpenCode/Claude Code/Claude Desktop/Codex remotos.
+
 Endpoints públicos deste spike: `/health/live` e `/health/ready`. Readiness retorna apenas `ready`/`not_ready`; não expõe caminhos, versão, usuários ou conteúdo.
 
 ## Plano e distribuição
