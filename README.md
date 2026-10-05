@@ -71,7 +71,9 @@ As quatro projeções agora alimentam uma política **comum nas fixtures** por e
 
 `tests/oidc_identity_spike.rs` usa openidconnect 4.0.1 como dependência de teste para validar JWT RS256 com issuer/client/nonce/clock fixos e JWKS artificial servido via HTTP. Claims/chaves inválidas são recusadas; email não é identidade e pode faltar. Perfil GitLab local, não login real nem compatibilidade Apple comprovada. Token exchange/PKCE integrado, discovery seguro, TLS e sessões/vínculos do produto seguem pendentes.
 
-`tests/gitlab_exchange_spike.rs` exercita Authorization Code/PKCE S256 e token exchange via oauth2 5.0.0 sobre HTTP local. Confere state, redirect, verifier e Basic auth; erro/timeout/redirect não gera retry oculto. Resposta OAuth não é identidade: tokens são descartados e integração com state durável/verificador OIDC/sessão ainda não existe.
+`tests/gitlab_exchange_spike.rs` exercita Authorization Code/PKCE S256 e token exchange via oauth2 5.0.0 sobre HTTP local. Confere state, redirect, verifier e Basic auth; erro/timeout/redirect não gera retry oculto. Neste contrato isolado, tokens são descartados e resposta OAuth não é identidade. Integração de produto com state durável/verificador OIDC/sessão ainda não existe.
+
+`tests/oidc_flow_spike.rs` une esses contratos em uma fixture: claim SQLite antes da rede, exchange CoreClient e validação de nonce/ID token antes de registrar identidade atomicamente. Concorrência/replay, timeout, rollback e reopen após claim são testados. Não reusa code após resultado ambíguo e não cria sessão/conta/vínculo. Browser HTTPS, SaaS real, proteção/limpeza de nonce/verifier e produto seguem pendentes.
 
 Endpoints públicos deste spike: `/health/live` e `/health/ready`. Readiness retorna apenas `ready`/`not_ready`; não expõe caminhos, versão, usuários ou conteúdo.
 
