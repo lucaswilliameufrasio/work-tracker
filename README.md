@@ -67,6 +67,8 @@ O consumer Cloudflare experimental correlaciona configuração/messageId/recipie
 
 As quatro projeções agora alimentam uma política **comum nas fixtures** por endereço, com cancelamento de pendências ready e gate SQLite de autorização independente de provider. Troca de provider, concorrência, rollback e persistência são testados; envios já autorizados não são desfeitos. Unificação de fixtures não é integração no sender/outbox do produto, nem backfill/migração dos dados anteriores.
 
+`tests/apple_callback_spike.rs` valida POST form-urlencoded, state/cookie de tentativa única, concorrência, expiry e rollback no SQLite real. Cookie restrito ao callback não enfraquece a sessão global. É só correlação: não valida identidade Apple nem cria login; token exchange/JWT/nonce, GitLab e browser HTTPS real continuam pendentes. Loopback não é return URL aceito pela Apple.
+
 Endpoints públicos deste spike: `/health/live` e `/health/ready`. Readiness retorna apenas `ready`/`not_ready`; não expõe caminhos, versão, usuários ou conteúdo.
 
 ## Plano e distribuição
