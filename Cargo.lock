@@ -2381,6 +2381,7 @@ dependencies = [
  "clap",
  "http-body-util",
  "mime_guess",
+ "oauth2",
  "openidconnect",
  "openssl",
  "p256 0.14.0",
