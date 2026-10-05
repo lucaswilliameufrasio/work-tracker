@@ -75,6 +75,8 @@ As quatro projeções agora alimentam uma política **comum nas fixtures** por e
 
 `tests/oidc_flow_spike.rs` une esses contratos em uma fixture: claim SQLite antes da rede, exchange CoreClient e validação de nonce/ID token antes de registrar identidade atomicamente. Concorrência/replay, timeout, rollback e reopen após claim são testados. Não reusa code após resultado ambíguo e não cria sessão/conta/vínculo. Browser HTTPS, SaaS real, proteção/limpeza de nonce/verifier e produto seguem pendentes.
 
+`tests/apple_client_secret_spike.rs` valida assinatura ES256 de client credentials com chave PKCS#8 artificial, verificação independente OpenSSL, teto de validade e limite de renovação/rotação. Não verifica ID tokens Apple, não troca code no SaaS e não implementa armazenamento ou renovação operacional de segredos.
+
 Endpoints públicos deste spike: `/health/live` e `/health/ready`. Readiness retorna apenas `ready`/`not_ready`; não expõe caminhos, versão, usuários ou conteúdo.
 
 ## Plano e distribuição
