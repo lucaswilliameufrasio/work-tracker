@@ -2,6 +2,7 @@
 //! account linking, real provider, production endpoint or operational recovery.
 use axum::{
     Form, Router,
+    body::Bytes,
     extract::{DefaultBodyLimit, State},
     http::{HeaderMap, StatusCode},
     routing::post,
@@ -9,7 +10,7 @@ use axum::{
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{DateTime, Utc};
 use openidconnect::{
-    AuthUrl, AuthorizationCode, ClientId, ClientSecret, CsrfToken, IssuerUrl, Nonce,
+    AuthType, AuthUrl, AuthorizationCode, ClientId, ClientSecret, CsrfToken, IssuerUrl, Nonce,
     PkceCodeChallenge, PkceCodeVerifier, RedirectUrl, TokenResponse, TokenUrl,
     core::{CoreAuthenticationFlow, CoreClient, CoreJsonWebKeySet, CoreJwsSigningAlgorithm},
 };
@@ -35,15 +36,192 @@ const NOW: i64 = 1_800_000_000;
 const ISSUER: &str = "https://gitlab.com";
 const CLIENT: &str = "fixture-client";
 const REDIRECT: &str = "https://puxiri.example.invalid/callbacks/gitlab";
+#[derive(Clone, Copy)]
+enum Profile {
+    Gitlab,
+    Apple,
+}
+impl Profile {
+    fn issuer(self) -> &'static str {
+        match self {
+            Self::Gitlab => ISSUER,
+            Self::Apple => "https://appleid.apple.com",
+        }
+    }
+    fn client(self) -> &'static str {
+        match self {
+            Self::Gitlab => CLIENT,
+            Self::Apple => "com.example.puxiri.web",
+        }
+    }
+    fn revision(self) -> &'static str {
+        match self {
+            Self::Gitlab => "gitlab-v1",
+            Self::Apple => "apple-v1",
+        }
+    }
+    fn provider(self) -> &'static str {
+        match self {
+            Self::Gitlab => "gitlab",
+            Self::Apple => "apple",
+        }
+    }
+    fn redirect(self) -> &'static str {
+        match self {
+            Self::Gitlab => REDIRECT,
+            Self::Apple => "https://puxiri.example.invalid/callbacks/apple",
+        }
+    }
+    fn authorize(self) -> &'static str {
+        match self {
+            Self::Gitlab => "https://gitlab.com/oauth/authorize",
+            Self::Apple => "https://appleid.apple.com/auth/authorize",
+        }
+    }
+}
+fn artificial_apple_secret() -> String {
+    use p256::ecdsa::{Signature, SigningKey, signature::Signer};
+    // Public artificial key material. No product key loading or cache.
+    let key = SigningKey::from_slice(&[42; 32]).unwrap();
+    let input=format!("{}.{}",URL_SAFE_NO_PAD.encode(json!({"alg":"ES256","kid":"KEY1234567"}).to_string()),
+        URL_SAFE_NO_PAD.encode(json!({"iss":"TEAM123456","sub":Profile::Apple.client(),"aud":Profile::Apple.issuer(),"iat":NOW,"exp":NOW+3600}).to_string()));
+    let signature: Signature = key.sign(input.as_bytes());
+    format!("{input}.{}", URL_SAFE_NO_PAD.encode(signature.to_bytes()))
+}
 struct Endpoint {
     db: Arc<Database>,
     keys: CoreJsonWebKeySet,
     token_url: String,
+    profile: Profile,
+    secret: String,
 }
 struct Attempt {
     state: String,
     cookie: String,
     nonce: String,
+    url: reqwest::Url,
+}
+#[tokio::test]
+async fn apple_claim_once_sends_signed_secret_in_body_without_basic_or_inferred_pkce_then_records_verified_identity()
+ {
+    let fixture = Fixture::with_profile(Profile::Apple).await;
+    let attempt = begin(&fixture.endpoint).await;
+    let authorization: std::collections::BTreeMap<_, _> =
+        attempt.url.query_pairs().into_owned().collect();
+    assert_eq!(
+        attempt.url.origin().ascii_serialization(),
+        Profile::Apple.issuer()
+    );
+    assert_eq!(authorization["response_mode"], "form_post");
+    assert_eq!(authorization["nonce"], attempt.nonce);
+    assert!(!authorization.contains_key("code_challenge"));
+    assert!(!attempt.url.as_str().contains(&fixture.endpoint.secret));
+    let mut claims = fixture.token(&attempt.nonce);
+    claims["email_verified"] = json!("true");
+    fixture.respond(Some(claims));
+    assert_eq!(fixture.post(&attempt, "wrong-browser").await, 401);
+    assert_eq!(fixture.provider.calls.load(Ordering::SeqCst), 0);
+    let (a, b) = tokio::join!(
+        fixture.post(&attempt, &attempt.cookie),
+        fixture.post(&attempt, &attempt.cookie)
+    );
+    assert!(matches!((a, b), (202, 401) | (401, 202)));
+    assert_eq!(fixture.provider.calls.load(Ordering::SeqCst), 1);
+    let (headers, body) = fixture.provider.requests.lock().unwrap()[0].clone();
+    assert!(!headers.contains_key("authorization"));
+    assert_eq!(headers["content-type"], "application/x-www-form-urlencoded");
+    let url = reqwest::Url::parse(&format!("https://fixture.invalid/?{body}")).unwrap();
+    let fields: std::collections::BTreeMap<_, _> = url.query_pairs().into_owned().collect();
+    assert_eq!(fields["grant_type"], "authorization_code");
+    assert_eq!(fields["code"], "artificial-code");
+    assert_eq!(fields["client_id"], Profile::Apple.client());
+    assert_eq!(fields["redirect_uri"], Profile::Apple.redirect());
+    assert_eq!(fields["client_secret"], fixture.endpoint.secret);
+    assert!(!fields.contains_key("code_verifier"));
+    // Independent OpenSSL verification of ES256 client credential sent on wire.
+    let pieces: Vec<_> = fields["client_secret"].split('.').collect();
+    let payload: Value =
+        serde_json::from_slice(&URL_SAFE_NO_PAD.decode(pieces[1]).unwrap()).unwrap();
+    assert_eq!(payload["aud"], Profile::Apple.issuer());
+    assert_eq!(payload["sub"], Profile::Apple.client());
+    let signing_key = p256::ecdsa::SigningKey::from_slice(&[42; 32]).unwrap();
+    let point = signing_key.verifying_key().to_sec1_point(false);
+    let group = openssl::ec::EcGroup::from_curve_name(openssl::nid::Nid::X9_62_PRIME256V1).unwrap();
+    let mut ctx = openssl::bn::BigNumContext::new().unwrap();
+    let point = openssl::ec::EcPoint::from_bytes(&group, point.as_bytes(), &mut ctx).unwrap();
+    let key =
+        PKey::from_ec_key(openssl::ec::EcKey::from_public_key(&group, &point).unwrap()).unwrap();
+    let signature =
+        p256::ecdsa::Signature::from_slice(&URL_SAFE_NO_PAD.decode(pieces[2]).unwrap()).unwrap();
+    let mut verifier = openssl::sign::Verifier::new(MessageDigest::sha256(), &key).unwrap();
+    verifier
+        .update(format!("{}.{}", pieces[0], pieces[1]).as_bytes())
+        .unwrap();
+    assert!(verifier.verify(signature.to_der().as_bytes()).unwrap());
+    let identity: (String, String, String) =
+        sqlx::query_as("SELECT provider,issuer,subject FROM flow_identities")
+            .fetch_one(fixture.endpoint.db.pool())
+            .await
+            .unwrap();
+    assert_eq!(
+        identity,
+        (
+            "apple".into(),
+            Profile::Apple.issuer().into(),
+            "stable-subject".into()
+        )
+    );
+    assert_eq!(fixture.status(&attempt).await, "verified");
+    assert_eq!(fixture.post(&attempt, &attempt.cookie).await, 401);
+}
+
+#[tokio::test]
+async fn apple_missing_or_wrong_nonce_id_token_never_becomes_identity_or_replays_exchange() {
+    let fixture = Fixture::with_profile(Profile::Apple).await;
+    for missing in [false, true] {
+        let attempt = begin(&fixture.endpoint).await;
+        let mut claims = fixture.token("wrong-nonce");
+        claims["email_verified"] = json!("true");
+        fixture.respond(if missing { None } else { Some(claims) });
+        assert_eq!(fixture.post(&attempt, &attempt.cookie).await, 401);
+        assert_eq!(fixture.status(&attempt).await, "rejected");
+        assert_eq!(fixture.post(&attempt, &attempt.cookie).await, 401);
+    }
+    assert_eq!(fixture.identities().await, 0);
+    assert_eq!(fixture.provider.calls.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn apple_provider_errors_redirect_malformed_success_and_timeout_are_unknown_without_hidden_retry()
+ {
+    let fixture = Fixture::with_profile(Profile::Apple).await;
+    for (index, (status, body, delay)) in [
+        (
+            400,
+            json!({"error":"invalid_client","error_description":"private-provider-diagnostic"}),
+            Duration::ZERO,
+        ),
+        (302, json!({}), Duration::ZERO),
+        (503, json!({}), Duration::ZERO),
+        (200, json!({"token_type":"Bearer"}), Duration::ZERO),
+        (200, json!({"padding":"x".repeat(65536)}), Duration::ZERO),
+        (
+            200,
+            json!({"access_token":"artificial","token_type":"Bearer"}),
+            Duration::from_millis(300),
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let attempt = begin(&fixture.endpoint).await;
+        *fixture.provider.reply.lock().unwrap() = (status, body, delay);
+        assert_eq!(fixture.post(&attempt, &attempt.cookie).await, 503);
+        assert_eq!(fixture.status(&attempt).await, "unknown");
+        assert_eq!(fixture.post(&attempt, &attempt.cookie).await, 401);
+        assert_eq!(fixture.provider.calls.load(Ordering::SeqCst), index + 1);
+    }
+    assert_eq!(fixture.identities().await, 0);
 }
 #[derive(Deserialize)]
 struct Callback {
@@ -55,39 +233,46 @@ struct Callback {
 struct Transport;
 async fn begin(endpoint: &Endpoint) -> Attempt {
     let client = CoreClient::new(
-        ClientId::new(CLIENT.into()),
-        IssuerUrl::new(ISSUER.into()).unwrap(),
+        ClientId::new(endpoint.profile.client().into()),
+        IssuerUrl::new(endpoint.profile.issuer().into()).unwrap(),
         endpoint.keys.clone(),
     )
-    .set_auth_uri(AuthUrl::new("https://gitlab.com/oauth/authorize".into()).unwrap())
-    .set_redirect_uri(RedirectUrl::new(REDIRECT.into()).unwrap());
+    .set_auth_uri(AuthUrl::new(endpoint.profile.authorize().into()).unwrap())
+    .set_redirect_uri(RedirectUrl::new(endpoint.profile.redirect().into()).unwrap());
     let (challenge, verifier) = PkceCodeChallenge::new_random_sha256();
-    let (_, state, nonce) = client
+    let request = client
         .authorize_url(
             CoreAuthenticationFlow::AuthorizationCode,
             CsrfToken::new_random,
             Nonce::new_random,
         )
-        .add_extra_param("response_mode", "form_post")
-        .set_pkce_challenge(challenge)
-        .url();
+        .add_extra_param("response_mode", "form_post");
+    let (url, state, nonce) = match endpoint.profile {
+        Profile::Gitlab => request.set_pkce_challenge(challenge).url(),
+        Profile::Apple => request.url(), // Discovery does not advertise PKCE.
+    };
+    let verifier = match endpoint.profile {
+        Profile::Gitlab => Some(verifier.secret()),
+        Profile::Apple => None,
+    };
     let cookie = CsrfToken::new_random().secret().clone();
-    sqlx::query("INSERT INTO flow_attempts(state,cookie,nonce,verifier,config,expires,status) VALUES(?,?,?,?,'gitlab-v1',?,'ready')")
-        .bind(sha256(state.secret().as_bytes()).to_vec()).bind(sha256(cookie.as_bytes()).to_vec()).bind(nonce.secret()).bind(verifier.secret()).bind(NOW+300).execute(endpoint.db.pool()).await.unwrap();
+    sqlx::query("INSERT INTO flow_attempts(state,cookie,nonce,verifier,config,expires,status) VALUES(?,?,?,?,?,?,'ready')")
+        .bind(sha256(state.secret().as_bytes()).to_vec()).bind(sha256(cookie.as_bytes()).to_vec()).bind(nonce.secret()).bind(verifier).bind(endpoint.profile.revision()).bind(NOW+300).execute(endpoint.db.pool()).await.unwrap();
     Attempt {
         state: state.secret().clone(),
         cookie,
         nonce: nonce.secret().clone(),
+        url,
     }
 }
 async fn claim(
     endpoint: &Endpoint,
     state: &str,
     cookie: &str,
-) -> Result<Option<(String, String)>, sqlx::Error> {
+) -> Result<Option<(String, Option<String>)>, sqlx::Error> {
     let mut tx = endpoint.db.pool().begin_with("BEGIN IMMEDIATE").await?;
-    let claimed=sqlx::query_as("UPDATE flow_attempts SET status='exchanging' WHERE state=? AND cookie=? AND config='gitlab-v1' AND expires>? AND status='ready' RETURNING nonce,verifier")
-        .bind(sha256(state.as_bytes()).to_vec()).bind(sha256(cookie.as_bytes()).to_vec()).bind(NOW).fetch_optional(&mut *tx).await?;
+    let claimed=sqlx::query_as("UPDATE flow_attempts SET status='exchanging' WHERE state=? AND cookie=? AND config=? AND expires>? AND status='ready' RETURNING nonce,verifier")
+        .bind(sha256(state.as_bytes()).to_vec()).bind(sha256(cookie.as_bytes()).to_vec()).bind(endpoint.profile.revision()).bind(NOW).fetch_optional(&mut *tx).await?;
     tx.commit().await?;
     Ok(claimed)
 }
@@ -134,15 +319,15 @@ async fn callback(
     let state = sha256(form.state.as_bytes()).to_vec();
     let (outcome, response) = match result {
         Ok(Some(subject)) => {
-            if sqlx::query("INSERT INTO flow_identities(provider,issuer,subject) VALUES('gitlab',?,?) ON CONFLICT DO NOTHING")
-                .bind(ISSUER).bind(subject).execute(&mut *tx).await.is_err() {return StatusCode::SERVICE_UNAVAILABLE;}
+            if sqlx::query("INSERT INTO flow_identities(provider,issuer,subject) VALUES(?,?,?) ON CONFLICT DO NOTHING")
+                .bind(endpoint.profile.provider()).bind(endpoint.profile.issuer()).bind(subject).execute(&mut *tx).await.is_err() {return StatusCode::SERVICE_UNAVAILABLE;}
             ("verified", StatusCode::ACCEPTED)
         }
         Ok(None) => ("rejected", StatusCode::UNAUTHORIZED),
         Err(_) => ("unknown", StatusCode::SERVICE_UNAVAILABLE),
     };
-    let updated=sqlx::query("UPDATE flow_attempts SET status=?,nonce=NULL,verifier=NULL WHERE state=? AND status='exchanging' AND config='gitlab-v1'")
-        .bind(outcome).bind(state).execute(&mut *tx).await;
+    let updated=sqlx::query("UPDATE flow_attempts SET status=?,nonce=NULL,verifier=NULL WHERE state=? AND status='exchanging' AND config=?")
+        .bind(outcome).bind(state).bind(endpoint.profile.revision()).execute(&mut *tx).await;
     if !updated.is_ok_and(|result| result.rows_affected() == 1) || tx.commit().await.is_err() {
         return StatusCode::SERVICE_UNAVAILABLE;
     }
@@ -152,16 +337,20 @@ async fn exchange(
     endpoint: &Endpoint,
     code: String,
     nonce: String,
-    verifier: String,
+    verifier: Option<String>,
 ) -> Result<Option<String>, Transport> {
     let client = CoreClient::new(
-        ClientId::new(CLIENT.into()),
-        IssuerUrl::new(ISSUER.into()).unwrap(),
+        ClientId::new(endpoint.profile.client().into()),
+        IssuerUrl::new(endpoint.profile.issuer().into()).unwrap(),
         endpoint.keys.clone(),
     )
-    .set_client_secret(ClientSecret::new("artificial-secret".into()))
+    .set_client_secret(ClientSecret::new(endpoint.secret.clone()))
+    .set_auth_type(match endpoint.profile {
+        Profile::Gitlab => AuthType::BasicAuth,
+        Profile::Apple => AuthType::RequestBody,
+    })
     .set_token_uri(TokenUrl::new(endpoint.token_url.clone()).unwrap())
-    .set_redirect_uri(RedirectUrl::new(REDIRECT.into()).unwrap());
+    .set_redirect_uri(RedirectUrl::new(endpoint.profile.redirect().into()).unwrap());
     let http = reqwest::Client::builder()
         .no_proxy()
         .timeout(Duration::from_millis(100))
@@ -196,9 +385,13 @@ async fn exchange(
             builder.body(bytes).map_err(|_| Transport)
         }
     };
-    let response = client
-        .exchange_code(AuthorizationCode::new(code))
-        .set_pkce_verifier(PkceCodeVerifier::new(verifier))
+    let request = client.exchange_code(AuthorizationCode::new(code));
+    let request = if let Some(verifier) = verifier {
+        request.set_pkce_verifier(PkceCodeVerifier::new(verifier))
+    } else {
+        request
+    };
+    let response = request
         .request_async(&adapter)
         .await
         .map_err(|_| Transport)?;
@@ -242,7 +435,7 @@ async fn exchange(
         || claims.subject().as_str().len() > 256
         || claims
             .authorized_party()
-            .is_some_and(|p| p.as_str() != CLIENT)
+            .is_some_and(|p| p.as_str() != endpoint.profile.client())
     {
         return Ok(None);
     }
@@ -251,6 +444,7 @@ async fn exchange(
 struct Provider {
     reply: Mutex<(u16, Value, Duration)>,
     calls: AtomicUsize,
+    requests: Mutex<Vec<(HeaderMap, String)>>,
 }
 struct Fixture {
     directory: TempDir,
@@ -269,6 +463,9 @@ impl Drop for Fixture {
 }
 impl Fixture {
     async fn new() -> Self {
+        Self::with_profile(Profile::Gitlab).await
+    }
+    async fn with_profile(profile: Profile) -> Self {
         let directory = TempDir::new().unwrap();
         let db = Arc::new(Database::open(directory.path()).await.unwrap());
         sqlx::raw_sql("CREATE TABLE flow_attempts(state BLOB PRIMARY KEY,cookie BLOB NOT NULL,nonce TEXT,verifier TEXT,config TEXT NOT NULL,expires INTEGER NOT NULL,status TEXT NOT NULL CHECK(status IN ('ready','exchanging','verified','rejected','unknown')));
@@ -280,19 +477,28 @@ impl Fixture {
         let provider = Arc::new(Provider {
             reply: Mutex::new((200, json!({}), Duration::ZERO)),
             calls: AtomicUsize::new(0),
+            requests: Mutex::new(Vec::new()),
         });
         let source = provider.clone();
         let app = Router::new().route(
             "/token",
-            post(move || {
+            post(move |headers: HeaderMap, body: Bytes| {
                 let source = source.clone();
                 async move {
                     source.calls.fetch_add(1, Ordering::SeqCst);
+                    source
+                        .requests
+                        .lock()
+                        .unwrap()
+                        .push((headers, String::from_utf8(body.to_vec()).unwrap()));
                     let (status, body, delay) = source.reply.lock().unwrap().clone();
                     tokio::time::sleep(delay).await;
                     (
                         StatusCode::from_u16(status).unwrap(),
-                        [("content-type", "application/json")],
+                        [
+                            ("content-type", "application/json"),
+                            ("location", "http://127.0.0.1:1/never-follow"),
+                        ],
                         body.to_string(),
                     )
                 }
@@ -307,6 +513,11 @@ impl Fixture {
             db,
             keys,
             token_url,
+            profile,
+            secret: match profile {
+                Profile::Gitlab => "artificial-secret".into(),
+                Profile::Apple => artificial_apple_secret(),
+            },
         });
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
@@ -328,7 +539,7 @@ impl Fixture {
         }
     }
     fn token(&self, nonce: &str) -> Value {
-        json!({"iss":ISSUER,"aud":CLIENT,"sub":"stable-subject","exp":NOW+300,"iat":NOW,"nonce":nonce})
+        json!({"iss":self.endpoint.profile.issuer(),"aud":self.endpoint.profile.client(),"sub":"stable-subject","exp":NOW+300,"iat":NOW,"nonce":nonce})
     }
     fn respond(&self, claims: Option<Value>) {
         let mut body = json!({"access_token":"artificial-access","token_type":"Bearer"});
@@ -498,6 +709,8 @@ async fn interrupted_after_claim_remains_consumed_after_reopen_without_reusing_a
         db: db.clone(),
         keys,
         token_url,
+        profile: Profile::Gitlab,
+        secret: "artificial-secret".into(),
     };
     assert!(
         claim(&reopened, &attempt.state, &attempt.cookie)

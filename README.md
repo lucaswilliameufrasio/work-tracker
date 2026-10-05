@@ -79,6 +79,8 @@ As quatro projeções agora alimentam uma política **comum nas fixtures** por e
 
 `tests/oidc_identity_spike.rs` também valida um perfil Apple RS256 artificial com issuer/Services ID/nonce configurados, booleanos ou strings de email_verified e is_private_email. Email ausente/vazio/alterado não muda subject. Discovery pública confirma RS256/client_secret_post, mas troca de code e browser Apple reais continuam pendentes.
 
+`tests/oidc_flow_spike.rs` também integra o perfil Apple local: claim SQLite, client_secret ES256 em POST body, CoreClient e ID token RS256/nonce antes de identidade. Confere ausência de Basic/PKCE inferido, concorrência e falhas sem retry. Credenciais artificiais, cookie inserido por reqwest e nenhum login/SaaS real.
+
 Endpoints públicos deste spike: `/health/live` e `/health/ready`. Readiness retorna apenas `ready`/`not_ready`; não expõe caminhos, versão, usuários ou conteúdo.
 
 ## Plano e distribuição
