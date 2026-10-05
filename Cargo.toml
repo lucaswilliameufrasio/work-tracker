@@ -21,6 +21,8 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
 uuid = { version = "1.0", features = ["v7"] }
 
 [dev-dependencies]
+openidconnect = { version = "=4.0.1", default-features = false }
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 aws-sdk-sesv2 = { version = "=1.123.0", default-features = false, features = ["rt-tokio", "default-https-client"] }
 http-body-util = "0.1"
 base64 = "=0.22.1"

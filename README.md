@@ -69,6 +69,8 @@ As quatro projeções agora alimentam uma política **comum nas fixtures** por e
 
 `tests/apple_callback_spike.rs` valida POST form-urlencoded, state/cookie de tentativa única, concorrência, expiry e rollback no SQLite real. Cookie restrito ao callback não enfraquece a sessão global. É só correlação: não valida identidade Apple nem cria login; token exchange/JWT/nonce, GitLab e browser HTTPS real continuam pendentes. Loopback não é return URL aceito pela Apple.
 
+`tests/oidc_identity_spike.rs` usa openidconnect 4.0.1 como dependência de teste para validar JWT RS256 com issuer/client/nonce/clock fixos e JWKS artificial servido via HTTP. Claims/chaves inválidas são recusadas; email não é identidade e pode faltar. Perfil GitLab local, não login real nem compatibilidade Apple comprovada. Token exchange/PKCE integrado, discovery seguro, TLS e sessões/vínculos do produto seguem pendentes.
+
 Endpoints públicos deste spike: `/health/live` e `/health/ready`. Readiness retorna apenas `ready`/`not_ready`; não expõe caminhos, versão, usuários ou conteúdo.
 
 ## Plano e distribuição
