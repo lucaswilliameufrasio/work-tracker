@@ -1167,6 +1167,10 @@ Revisão documental oficial em 06/10/2026, sem acessar contas, registrar aplica�
 
 Conclusão: requisitos e fixtures locais de callback/code-exchange/verificação e credencial cobrem contratos artificiais; **não** cobrem browser real, TLS operacional, credenciais/entitlements, configuração draft→test→activate nem login/vínculo de produto. Fase 0 provider checkbox permanece aberta. Nenhum acesso autenticado ou mutação em Apple/GitLab ocorreu; a regra de autorizar explicitamente contas controladas para smoke externo continua valendo. Esta fatia documental não altera status de código/gates nem conclui o plano.
 
+#### Evidências da quadragésima segunda fatia — ADR de seleção do Authorization Server
+
+Criado `docs/adr/0001-authorization-server-selection.md`, status **Deferred — product/architecture decision required**. Registra que nenhuma candidata avaliada foi aprovada, mantém o OAuth de produção/CIMD fora do escopo imediato e oferece três caminhos explícitos para uma decisão futura; reafirma que autorização de recursos continua na aplicação Puxiri e que scopes/claims não substituem membership. ADR referencia evidências e limites em vez de promover o probe RustAuth a decisão. A checkbox coletiva de ADRs da Fase 0 segue aberta, assim como MCP/OAuth, smoke real e o plano completo; este registro não é a escolha da arquitetura.
+
 ### Fase 1 — Fundação e identidade
 
 - [ ] Migrations, usuários/organização/settings e infraestrutura básica de outbox/jobs/leases necessária aos próximos fluxos.
