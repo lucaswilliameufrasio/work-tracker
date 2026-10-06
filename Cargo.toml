@@ -21,6 +21,7 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
 uuid = { version = "1.0", features = ["v7"] }
 
 [dev-dependencies]
+argon2 = "=0.5.3"
 rmcp = { version = "=3.5.1", default-features = false, features = ["server", "transport-streamable-http-server"] }
 oauth2 = { version = "=5.0.0", default-features = false }
 openidconnect = { version = "=4.0.1", default-features = false, features = ["accept-string-booleans"] }

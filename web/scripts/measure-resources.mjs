@@ -128,6 +128,21 @@ console.log(
         walAfterReleaseBytes: report.wal_after_reader_release_bytes,
         processMemory: report.proc_status,
         cgroupMemoryPeakBytes: Number(report.cgroup_memory_peak),
+        argon2id: {
+          sequential: report.argon2id.sequential.map(
+            ({ memory_kib, iterations, median_ms, p95_ms }) => ({
+              memory_kib,
+              iterations,
+              median_ms,
+              p95_ms,
+            }),
+          ),
+          concurrencyBurst: report.argon2id.concurrency_burst,
+          processMemoryAfterKdf: report.argon2id.process_status_after_kdf,
+          wholeRunCgroupPeakAfterKdfBytes: Number(
+            report.argon2id.cgroup_memory_peak_after_kdf,
+          ),
+        },
       })),
     },
     null,
