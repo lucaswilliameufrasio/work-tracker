@@ -12,6 +12,11 @@ pub enum FetchError {
     Response,
     TooLarge,
 }
+#[derive(Debug, PartialEq)]
+pub struct FetchedMetadata {
+    pub body: Vec<u8>,
+    pub cache_control: Option<String>,
+}
 pub struct PinnedTarget {
     address: SocketAddr,
 }
@@ -53,7 +58,7 @@ impl PinnedTarget {
         Ok(Self { address })
     }
 }
-pub async fn fetch(target: PinnedTarget, root_pem: &[u8]) -> Result<Vec<u8>, FetchError> {
+pub async fn fetch(target: PinnedTarget, root_pem: &[u8]) -> Result<FetchedMetadata, FetchError> {
     // reqwest defers some root parsing until connect; reject malformed config
     // before creating any connection, using the already pinned crypto library.
     openssl::x509::X509::from_pem(root_pem).map_err(|_| FetchError::Policy)?;
@@ -86,6 +91,19 @@ pub async fn fetch(target: PinnedTarget, root_pem: &[u8]) -> Result<Vec<u8>, Fet
     {
         return Err(FetchError::Response);
     }
+    let cache_headers: Vec<_> = response.headers().get_all("cache-control").iter().collect();
+    if cache_headers.len() > 1 {
+        return Err(FetchError::Response);
+    }
+    let cache_control = cache_headers
+        .first()
+        .map(|value| {
+            value
+                .to_str()
+                .map(str::to_owned)
+                .map_err(|_| FetchError::Response)
+        })
+        .transpose()?;
     if response
         .content_length()
         .is_some_and(|length| length > 8192)
@@ -99,7 +117,10 @@ pub async fn fetch(target: PinnedTarget, root_pem: &[u8]) -> Result<Vec<u8>, Fet
         }
         bytes.extend_from_slice(&chunk);
     }
-    Ok(bytes)
+    Ok(FetchedMetadata {
+        body: bytes,
+        cache_control,
+    })
 }
 
 pub mod laboratory {
@@ -262,7 +283,10 @@ pub mod laboratory {
         }
     }
     pub fn json_response(body: &[u8]) -> Vec<u8> {
-        let mut response=format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",body.len()).into_bytes();
+        json_response_with_cache(body, "max-age=120")
+    }
+    pub fn json_response_with_cache(body: &[u8], cache_control: &str) -> Vec<u8> {
+        let mut response=format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nCache-Control: {cache_control}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",body.len()).into_bytes();
         response.extend_from_slice(body);
         response
     }

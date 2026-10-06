@@ -181,12 +181,129 @@ async fn import_cimd_snapshot(
         .execute(&mut *tx)
         .await
         .map_err(|_| SnapshotError::Unavailable)?;
-    sqlx::query("INSERT INTO oauth_cimd_snapshots VALUES(?,?)")
+    sqlx::query("INSERT INTO oauth_cimd_snapshots VALUES(?,?,?,0,0)")
         .bind(approved_url)
         .bind(sha256(body).to_vec())
+        .bind(body)
         .execute(&mut *tx)
         .await
         .map_err(|_| SnapshotError::Unavailable)?;
+    tx.commit().await.map_err(|_| SnapshotError::Unavailable)
+}
+const CIMD_CACHE_MAX_AGE: i64 = 300;
+fn metadata_cache_expiry(now: i64, cache_control: Option<&str>, max_age: i64) -> i64 {
+    if now < 0 || max_age <= 0 {
+        return now;
+    }
+    let Some(header) = cache_control else {
+        return now;
+    };
+    let mut age = None;
+    for directive in header.split(',').map(str::trim) {
+        let (name, value) = directive.split_once('=').unwrap_or((directive, ""));
+        match name.trim().to_ascii_lowercase().as_str() {
+            "no-store" | "no-cache" => return now,
+            "max-age" => {
+                if age.is_some()
+                    || value.trim().is_empty()
+                    || !value.trim().bytes().all(|byte| byte.is_ascii_digit())
+                {
+                    return now;
+                }
+                age = value.trim().parse::<i64>().ok();
+                if age.is_none() {
+                    return now;
+                }
+            }
+            _ => {}
+        }
+    }
+    now.saturating_add(age.unwrap_or(0).min(max_age))
+}
+async fn cache_cimd_snapshot(
+    db: &Database,
+    client: &str,
+    body: &[u8],
+    now: i64,
+    cache_control: Option<&str>,
+) -> Result<i64, SnapshotError> {
+    if now < 0 || body.len() > 8192 {
+        return Err(SnapshotError::Invalid);
+    }
+    let expiry = metadata_cache_expiry(now, cache_control, CIMD_CACHE_MAX_AGE);
+    let mut tx = db
+        .pool()
+        .begin_with("BEGIN IMMEDIATE")
+        .await
+        .map_err(|_| SnapshotError::Unavailable)?;
+    let stored:Option<Vec<u8>>=sqlx::query_scalar("SELECT s.body FROM oauth_cimd_snapshots s JOIN oauth_clients c ON c.id=s.client WHERE s.client=? AND c.active=1 AND s.invalidated=0").bind(client).fetch_optional(&mut *tx).await.map_err(|_|SnapshotError::Unavailable)?;
+    let Some(stored) = stored else {
+        return Err(SnapshotError::Conflict);
+    };
+    if sha256(body) != sha256(&stored) {
+        invalidate_cimd_tx(&mut tx, client).await?;
+        tx.commit().await.map_err(|_| SnapshotError::Unavailable)?;
+        return Err(SnapshotError::Conflict);
+    }
+    sqlx::query("UPDATE oauth_cimd_snapshots SET cache_expires=? WHERE client=? AND invalidated=0")
+        .bind(expiry)
+        .bind(client)
+        .execute(&mut *tx)
+        .await
+        .map_err(|_| SnapshotError::Unavailable)?;
+    tx.commit().await.map_err(|_| SnapshotError::Unavailable)?;
+    Ok(expiry)
+}
+async fn read_cimd_cache(
+    db: &Database,
+    client: &str,
+    now: i64,
+) -> Result<Option<Vec<u8>>, SnapshotError> {
+    let cached:Option<(Vec<u8>,Vec<u8>)>=sqlx::query_as("SELECT s.body,s.digest FROM oauth_cimd_snapshots s JOIN oauth_clients c ON c.id=s.client WHERE s.client=? AND c.active=1 AND s.invalidated=0 AND s.cache_expires>?").bind(client).bind(now).fetch_optional(db.pool()).await.map_err(|_|SnapshotError::Unavailable)?;
+    match cached {
+        Some((body, digest)) if sha256(&body).as_slice() == digest.as_slice() => Ok(Some(body)),
+        Some(_) => Err(SnapshotError::Invalid),
+        None => Ok(None),
+    }
+}
+async fn invalidate_cimd_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    client: &str,
+) -> Result<(), SnapshotError> {
+    sqlx::query("UPDATE oauth_clients SET active=0 WHERE id=?")
+        .bind(client)
+        .execute(&mut **tx)
+        .await
+        .map_err(|_| SnapshotError::Unavailable)?;
+    sqlx::query("UPDATE oauth_cimd_snapshots SET invalidated=1,cache_expires=0 WHERE client=?")
+        .bind(client)
+        .execute(&mut **tx)
+        .await
+        .map_err(|_| SnapshotError::Unavailable)?;
+    sqlx::query("UPDATE oauth_consent SET active=0 WHERE client=?")
+        .bind(client)
+        .execute(&mut **tx)
+        .await
+        .map_err(|_| SnapshotError::Unavailable)?;
+    sqlx::query("UPDATE oauth_families SET revoked=1 WHERE client=?")
+        .bind(client)
+        .execute(&mut **tx)
+        .await
+        .map_err(|_| SnapshotError::Unavailable)?;
+    sqlx::query("DELETE FROM oauth_codes WHERE client=?")
+        .bind(client)
+        .execute(&mut **tx)
+        .await
+        .map_err(|_| SnapshotError::Unavailable)?;
+    Ok(())
+}
+async fn invalidate_cimd(db: &Database, client: &str) -> Result<(), SnapshotError> {
+    let mut tx = db
+        .pool()
+        .begin_with("BEGIN IMMEDIATE")
+        .await
+        .map_err(|_| SnapshotError::Unavailable)?;
+    invalidate_cimd_tx(&mut tx, client).await?;
     tx.commit().await.map_err(|_| SnapshotError::Unavailable)
 }
 fn native_callback(uri: &str) -> Option<reqwest::Url> {
@@ -445,7 +562,7 @@ async fn rotate(
         Err(_) => return error(StatusCode::SERVICE_UNAVAILABLE, "temporarily_unavailable"),
     };
     let digest = sha256(refresh.as_bytes()).to_vec();
-    let row:Result<Option<RefreshRow>,_>=sqlx::query_as("SELECT r.family,r.client,r.resource,r.scope,r.expires,r.used,f.consent,f.revoked,f.expires AS family_expires,c.active,c.client AS consent_client,c.resource AS consent_resource,c.scope AS consent_scope FROM oauth_refresh r JOIN oauth_families f ON f.id=r.family JOIN oauth_consent c ON c.id=f.consent JOIN oauth_clients p ON p.id=r.client AND p.active=1 WHERE r.digest=? AND f.client=r.client")
+    let row:Result<Option<RefreshRow>,_>=sqlx::query_as("SELECT r.family,r.client,r.resource,r.scope,r.expires,r.used,f.consent,f.revoked,f.expires AS family_expires,c.active,c.client AS consent_client,c.resource AS consent_resource,c.scope AS consent_scope FROM oauth_refresh r JOIN oauth_families f ON f.id=r.family JOIN oauth_consent c ON c.id=f.consent JOIN oauth_clients p ON p.id=r.client AND p.active=1 LEFT JOIN oauth_cimd_snapshots m ON m.client=p.id WHERE r.digest=? AND f.client=r.client AND (m.client IS NULL OR (m.invalidated=0 AND m.cache_expires>1800000000))")
         .bind(&digest).fetch_optional(&mut *tx).await;
     let row = match row {
         Ok(Some(row)) => row,
@@ -544,7 +661,7 @@ async fn authorize(
         Err(_) => return error(StatusCode::SERVICE_UNAVAILABLE, "temporarily_unavailable"),
     };
     let registered: Result<Option<String>, _> =
-        sqlx::query_scalar("SELECT redirect FROM oauth_clients WHERE id=? AND active=1")
+        sqlx::query_scalar("SELECT p.redirect FROM oauth_clients p LEFT JOIN oauth_cimd_snapshots m ON m.client=p.id WHERE p.id=? AND p.active=1 AND (m.client IS NULL OR (m.invalidated=0 AND m.cache_expires>1800000000))")
             .bind(&request.client_id)
             .fetch_optional(&mut *tx)
             .await;
@@ -620,7 +737,7 @@ async fn exchange(
         Err(_) => return error(StatusCode::SERVICE_UNAVAILABLE, "temporarily_unavailable"),
     };
     let digest = sha256(request.code.as_bytes()).to_vec();
-    let row:Result<Option<CodeRow>,_>=sqlx::query_as("SELECT c.client,c.redirect,c.resource,c.challenge,c.scope,c.expires,c.consent,p.redirect FROM oauth_codes c JOIN oauth_consent g ON g.id=c.consent JOIN oauth_clients p ON p.id=c.client AND p.active=1 WHERE c.digest=? AND g.active=1 AND g.client=c.client AND g.resource=c.resource AND g.scope=c.scope")
+    let row:Result<Option<CodeRow>,_>=sqlx::query_as("SELECT c.client,c.redirect,c.resource,c.challenge,c.scope,c.expires,c.consent,p.redirect FROM oauth_codes c JOIN oauth_consent g ON g.id=c.consent JOIN oauth_clients p ON p.id=c.client AND p.active=1 LEFT JOIN oauth_cimd_snapshots m ON m.client=p.id WHERE c.digest=? AND g.active=1 AND g.client=c.client AND g.resource=c.resource AND g.scope=c.scope AND (m.client IS NULL OR (m.invalidated=0 AND m.cache_expires>1800000000))")
         .bind(&digest).fetch_optional(&mut *tx).await;
     let (client, redirect, resource, challenge, scope, expires, consent, registered) = match row {
         Ok(Some(row)) => row,
@@ -711,7 +828,7 @@ async fn token_gate(State(server): State<Arc<Server>>, request: Request, next: N
     {
         return challenge(&server, StatusCode::UNAUTHORIZED, "invalid_token");
     }
-    let row:Result<Option<TokenRow>,_>=sqlx::query_as("SELECT t.resource,t.scope,t.expires,c.active,c.resource,c.scope,c.client,f.revoked,f.expires FROM oauth_tokens t JOIN oauth_consent c ON c.id=t.consent JOIN oauth_families f ON f.id=t.family JOIN oauth_clients p ON p.id=c.client AND p.active=1 WHERE t.digest=? AND f.client=c.client")
+    let row:Result<Option<TokenRow>,_>=sqlx::query_as("SELECT t.resource,t.scope,t.expires,c.active,c.resource,c.scope,c.client,f.revoked,f.expires FROM oauth_tokens t JOIN oauth_consent c ON c.id=t.consent JOIN oauth_families f ON f.id=t.family JOIN oauth_clients p ON p.id=c.client AND p.active=1 LEFT JOIN oauth_cimd_snapshots m ON m.client=p.id WHERE t.digest=? AND f.client=c.client AND (m.client IS NULL OR (m.invalidated=0 AND m.cache_expires>1800000000))")
         .bind(sha256(token.as_bytes()).to_vec()).fetch_optional(server.db.pool()).await;
     let (
         resource,
@@ -762,7 +879,7 @@ impl Fixture {
         sqlx::raw_sql("CREATE TABLE oauth_consent(id INTEGER PRIMARY KEY,client TEXT,resource TEXT,scope TEXT,active INTEGER); CREATE TABLE oauth_codes(digest BLOB PRIMARY KEY,client TEXT,redirect TEXT,resource TEXT,challenge TEXT,scope TEXT,expires INTEGER,consent INTEGER REFERENCES oauth_consent(id)); CREATE TABLE oauth_families(id TEXT PRIMARY KEY,consent INTEGER REFERENCES oauth_consent(id),expires INTEGER,revoked INTEGER,client TEXT NOT NULL); CREATE TABLE oauth_tokens(digest BLOB PRIMARY KEY,consent INTEGER REFERENCES oauth_consent(id),resource TEXT,scope TEXT,expires INTEGER,family TEXT REFERENCES oauth_families(id)); CREATE TABLE oauth_refresh(digest BLOB PRIMARY KEY,family TEXT REFERENCES oauth_families(id),client TEXT,resource TEXT,scope TEXT,expires INTEGER,used INTEGER);")
             .execute(db.pool()).await.unwrap();
         sqlx::raw_sql("CREATE TABLE oauth_clients(id TEXT PRIMARY KEY,redirect TEXT NOT NULL,name TEXT NOT NULL,active INTEGER NOT NULL,dynamic INTEGER NOT NULL); CREATE TABLE oauth_registration_policy(enabled INTEGER NOT NULL,max_clients INTEGER NOT NULL); INSERT INTO oauth_registration_policy VALUES(0,2)").execute(db.pool()).await.unwrap();
-        sqlx::query("CREATE TABLE oauth_cimd_snapshots(client TEXT PRIMARY KEY REFERENCES oauth_clients(id),digest BLOB NOT NULL)").execute(db.pool()).await.unwrap();
+        sqlx::query("CREATE TABLE oauth_cimd_snapshots(client TEXT PRIMARY KEY REFERENCES oauth_clients(id),digest BLOB NOT NULL,body BLOB NOT NULL,cache_expires INTEGER NOT NULL,invalidated INTEGER NOT NULL)").execute(db.pool()).await.unwrap();
         sqlx::query("INSERT INTO oauth_clients VALUES(?,?,'Preregistered fixture',1,0)")
             .bind(CLIENT)
             .bind(REDIRECT)
@@ -1056,6 +1173,307 @@ fn cimd_document() -> Vec<u8> {
 }
 
 #[test]
+fn cimd_http_cache_policy_honors_no_store_no_cache_and_caps_untrusted_max_age() {
+    for (header, expected) in [
+        (Some("max-age=120"), NOW + 120),
+        (Some("public, max-age=999999"), NOW + CIMD_CACHE_MAX_AGE),
+        (Some("max-age=0"), NOW),
+        (Some("no-store, max-age=300"), NOW),
+        (Some("no-cache, max-age=300"), NOW),
+        (None, NOW),
+        (Some("max-age=300, max-age=1"), NOW),
+        (Some("max-age=-1"), NOW),
+        (Some("max-age=999999999999999999999999999999"), NOW),
+        (Some("max-age=oops"), NOW),
+        (Some("s-maxage=3600"), NOW),
+    ] {
+        assert_eq!(
+            metadata_cache_expiry(NOW, header, CIMD_CACHE_MAX_AGE),
+            expected,
+            "{header:?}"
+        );
+    }
+    assert_eq!(
+        metadata_cache_expiry(i64::MAX - 1, Some("max-age=20"), CIMD_CACHE_MAX_AGE),
+        i64::MAX
+    );
+}
+
+#[tokio::test]
+async fn metadata_cache_obeys_fetched_cache_control_caps_ttl_and_expiry_fences_all_grants() {
+    let fixture = Fixture::new().await;
+    let body = cimd_document();
+    assert_eq!(
+        import_cimd_snapshot(&fixture.server.db, CIMD_ID, &body).await,
+        Ok(())
+    );
+    let server = metadata_fetch::laboratory::Server::start(
+        metadata_fetch::laboratory::json_response_with_cache(&body, "public, max-age=999999"),
+        "client.example.invalid",
+        Duration::ZERO,
+    );
+    let fetched = metadata_fetch::fetch(
+        metadata_fetch::PinnedTarget::laboratory(server.address).unwrap(),
+        &server.root,
+    )
+    .await
+    .unwrap();
+    let expiry = cache_cimd_snapshot(
+        &fixture.server.db,
+        CIMD_ID,
+        &fetched.body,
+        NOW,
+        fetched.cache_control.as_deref(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(expiry, NOW + CIMD_CACHE_MAX_AGE);
+    assert_eq!(
+        read_cimd_cache(&fixture.server.db, CIMD_ID, NOW + CIMD_CACHE_MAX_AGE - 1)
+            .await
+            .unwrap(),
+        Some(body.clone())
+    );
+    fixture.consent_for(CIMD_ID).await;
+    let (url, state, verifier) = fixture.begin_for(CIMD_ID);
+    let code = fixture.code(url, state).await;
+    let pair = fixture.redeem_for(CIMD_ID, code, verifier).await.unwrap();
+    let (pending_url, pending_state, pending_verifier) = fixture.begin_for(CIMD_ID);
+    let pending = fixture.code(pending_url, pending_state).await;
+    let refreshed = fixture.refresh_for(CIMD_ID, &pair.refresh).await.unwrap();
+    assert_eq!(
+        fixture
+            .mcp(Some(&refreshed.access), initialize())
+            .await
+            .status(),
+        200
+    );
+    sqlx::query("UPDATE oauth_cimd_snapshots SET cache_expires=? WHERE client=?")
+        .bind(NOW)
+        .bind(CIMD_ID)
+        .execute(fixture.server.db.pool())
+        .await
+        .unwrap();
+    assert_eq!(
+        read_cimd_cache(&fixture.server.db, CIMD_ID, NOW + CIMD_CACHE_MAX_AGE)
+            .await
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        fixture
+            .mcp(Some(&refreshed.access), initialize())
+            .await
+            .status(),
+        401
+    );
+    assert!(
+        fixture
+            .refresh_for(CIMD_ID, &refreshed.refresh)
+            .await
+            .is_err()
+    );
+    let (url, _, _) = fixture.begin_for(CIMD_ID);
+    assert_eq!(
+        Fixture::http()
+            .get(url)
+            .header("cookie", BROWSER)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        400
+    );
+    let exchange = vec![
+        ("grant_type", "authorization_code".into()),
+        ("client_id", CIMD_ID.into()),
+        ("redirect_uri", REDIRECT.into()),
+        ("code", pending),
+        ("resource", fixture.server.resource.clone()),
+        ("code_verifier", pending_verifier.secret().clone()),
+    ];
+    assert_eq!(fixture.raw(exchange).await.status(), 400);
+    assert_eq!(
+        cache_cimd_snapshot(
+            &fixture.server.db,
+            CIMD_ID,
+            &body,
+            NOW + CIMD_CACHE_MAX_AGE,
+            Some("no-cache")
+        )
+        .await,
+        Ok(NOW + CIMD_CACHE_MAX_AGE)
+    );
+    assert!(
+        read_cimd_cache(&fixture.server.db, CIMD_ID, NOW + CIMD_CACHE_MAX_AGE)
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn metadata_invalidation_atomically_revokes_consents_families_codes_and_never_reactivates_on_refresh()
+ {
+    let fixture = Fixture::new().await;
+    let body = cimd_document();
+    assert_eq!(
+        import_cimd_snapshot(&fixture.server.db, CIMD_ID, &body).await,
+        Ok(())
+    );
+    assert_eq!(
+        cache_cimd_snapshot(&fixture.server.db, CIMD_ID, &body, NOW, Some("max-age=240")).await,
+        Ok(NOW + 240)
+    );
+    fixture.consent_for(CIMD_ID).await;
+    let (url, state, verifier) = fixture.begin_for(CIMD_ID);
+    let code = fixture.code(url, state).await;
+    let pair = fixture.redeem_for(CIMD_ID, code, verifier).await.unwrap();
+    let (url, state, pending_verifier) = fixture.begin_for(CIMD_ID);
+    let pending = fixture.code(url, state).await;
+    assert_eq!(invalidate_cimd(&fixture.server.db, CIMD_ID).await, Ok(()));
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT active FROM oauth_clients WHERE id=?")
+            .bind(CIMD_ID)
+            .fetch_one(fixture.server.db.pool())
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT active FROM oauth_consent WHERE client=?")
+            .bind(CIMD_ID)
+            .fetch_one(fixture.server.db.pool())
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT revoked FROM oauth_families WHERE client=?")
+            .bind(CIMD_ID)
+            .fetch_one(fixture.server.db.pool())
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM oauth_codes WHERE client=?")
+            .bind(CIMD_ID)
+            .fetch_one(fixture.server.db.pool())
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        read_cimd_cache(&fixture.server.db, CIMD_ID, NOW)
+            .await
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        fixture.mcp(Some(&pair.access), initialize()).await.status(),
+        401
+    );
+    assert!(fixture.refresh_for(CIMD_ID, &pair.refresh).await.is_err());
+    let fields = vec![
+        ("grant_type", "authorization_code".into()),
+        ("client_id", CIMD_ID.into()),
+        ("redirect_uri", REDIRECT.into()),
+        ("code", pending),
+        ("resource", fixture.server.resource.clone()),
+        ("code_verifier", pending_verifier.secret().clone()),
+    ];
+    assert_eq!(fixture.raw(fields).await.status(), 400);
+    assert_eq!(
+        cache_cimd_snapshot(
+            &fixture.server.db,
+            CIMD_ID,
+            &body,
+            NOW + 100,
+            Some("max-age=300")
+        )
+        .await,
+        Err(SnapshotError::Conflict)
+    );
+    assert_eq!(
+        import_cimd_snapshot(&fixture.server.db, CIMD_ID, &body).await,
+        Err(SnapshotError::Conflict)
+    );
+}
+
+#[tokio::test]
+async fn changed_or_corrupted_cimd_snapshot_fails_closed_and_does_not_overwrite_cached_identity() {
+    let fixture = Fixture::new().await;
+    let body = cimd_document();
+    assert_eq!(
+        import_cimd_snapshot(&fixture.server.db, CIMD_ID, &body).await,
+        Ok(())
+    );
+    assert_eq!(
+        cache_cimd_snapshot(&fixture.server.db, CIMD_ID, &body, NOW, Some("max-age=60")).await,
+        Ok(NOW + 60)
+    );
+    fixture.consent_for(CIMD_ID).await;
+    let (url, state, verifier) = fixture.begin_for(CIMD_ID);
+    let code = fixture.code(url, state).await;
+    let pair = fixture.redeem_for(CIMD_ID, code, verifier).await.unwrap();
+    let mut changed: Value = serde_json::from_slice(&body).unwrap();
+    changed["client_name"] = json!("Different displayed identity");
+    let changed = serde_json::to_vec(&changed).unwrap();
+    assert_eq!(
+        cache_cimd_snapshot(
+            &fixture.server.db,
+            CIMD_ID,
+            &changed,
+            NOW + 1,
+            Some("max-age=300")
+        )
+        .await,
+        Err(SnapshotError::Conflict)
+    );
+    assert_eq!(
+        fixture.mcp(Some(&pair.access), initialize()).await.status(),
+        401
+    );
+    assert!(fixture.refresh_for(CIMD_ID, &pair.refresh).await.is_err());
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT name FROM oauth_clients WHERE id=?")
+            .bind(CIMD_ID)
+            .fetch_one(fixture.server.db.pool())
+            .await
+            .unwrap(),
+        "Untrusted fixture name"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, Vec<u8>>("SELECT body FROM oauth_cimd_snapshots WHERE client=?")
+            .bind(CIMD_ID)
+            .fetch_one(fixture.server.db.pool())
+            .await
+            .unwrap(),
+        body
+    );
+    let fixture = Fixture::new().await;
+    let body = cimd_document();
+    assert_eq!(
+        import_cimd_snapshot(&fixture.server.db, CIMD_ID, &body).await,
+        Ok(())
+    );
+    assert_eq!(
+        cache_cimd_snapshot(&fixture.server.db, CIMD_ID, &body, NOW, Some("max-age=30")).await,
+        Ok(NOW + 30)
+    );
+    sqlx::query("UPDATE oauth_cimd_snapshots SET digest=X'00' WHERE client=?")
+        .bind(CIMD_ID)
+        .execute(fixture.server.db.pool())
+        .await
+        .unwrap();
+    assert_eq!(
+        read_cimd_cache(&fixture.server.db, CIMD_ID, NOW).await,
+        Err(SnapshotError::Invalid)
+    );
+}
+
+#[test]
 fn metadata_resolution_requires_one_approved_public_ipv4_and_never_accepts_mixed_or_special_use_answers()
  {
     use std::net::IpAddr;
@@ -1117,10 +1535,11 @@ async fn pinned_https_metadata_with_verified_artificial_ca_feeds_import_but_neve
     )
     .await
     .unwrap();
-    assert_eq!(fetched, body);
+    assert_eq!(fetched.body, body);
+    assert_eq!(fetched.cache_control.as_deref(), Some("max-age=120"));
     assert_eq!(server.requests.load(std::sync::atomic::Ordering::SeqCst), 1);
     assert_eq!(
-        import_cimd_snapshot(&fixture.server.db, CIMD_ID, &fetched).await,
+        import_cimd_snapshot(&fixture.server.db, CIMD_ID, &fetched.body).await,
         Ok(())
     );
     assert_eq!(
@@ -1232,7 +1651,7 @@ async fn metadata_transport_success_cannot_bypass_document_id_validation_or_writ
     .await
     .unwrap();
     assert_eq!(
-        import_cimd_snapshot(&fixture.server.db, CIMD_ID, &fetched).await,
+        import_cimd_snapshot(&fixture.server.db, CIMD_ID, &fetched.body).await,
         Err(SnapshotError::Invalid)
     );
     assert_eq!(
@@ -1264,6 +1683,40 @@ async fn preapproved_cimd_snapshot_binds_url_and_requires_separate_consent_witho
     assert_eq!(
         import_cimd_snapshot(&fixture.server.db, CIMD_ID, &body).await,
         Ok(())
+    );
+    assert_eq!(
+        cache_cimd_snapshot(
+            &fixture.server.db,
+            CIMD_ID,
+            &body,
+            NOW,
+            Some("max-age=120, public")
+        )
+        .await,
+        Ok(NOW + 120)
+    );
+    assert_eq!(
+        read_cimd_cache(&fixture.server.db, CIMD_ID, NOW + 119)
+            .await
+            .unwrap(),
+        Some(body.clone())
+    );
+    assert_eq!(
+        read_cimd_cache(&fixture.server.db, CIMD_ID, NOW + 120)
+            .await
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        cache_cimd_snapshot(
+            &fixture.server.db,
+            CIMD_ID,
+            &body,
+            NOW,
+            Some("max-age=120, public")
+        )
+        .await,
+        Ok(NOW + 120)
     );
     let digest: Vec<u8> =
         sqlx::query_scalar("SELECT digest FROM oauth_cimd_snapshots WHERE client=?")

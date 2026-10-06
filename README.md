@@ -95,6 +95,8 @@ Snapshots locais de metadata CIMD pré-aprovada são validados por URL/client ID
 
 `tests/support/metadata_fetch.rs` exercita reqwest com TLS verificado, destino pinado, sem proxy/redirect/retry e corpo/tempo limitados. CA e servidor são artificiais em loopback; o caminho de política exige URL/IP aprovados e rejeita respostas de resolução mistas/especiais. Não é resolvedor DNS/SSRF de produto, cache remoto ou aceite de documentos/clientes reais.
 
+O fake MCP testa TTL de metadata controlado por `Cache-Control` e capped em 300s: expirado/no-cache/no-store não permite novo authorize, exchange, refresh ou chamadas MCP. Mudança do body invalida cliente, consentimentos, famílias e codes atomicamente; revalidação idêntica pode renovar o cache sem alterar identidade. Continua sendo fixture SQLite, não cache compartilhado ou manutenção de autorização em produção.
+
 Endpoints públicos deste spike: `/health/live` e `/health/ready`. Readiness retorna apenas `ready`/`not_ready`; não expõe caminhos, versão, usuários ou conteúdo.
 
 ## Plano e distribuição
