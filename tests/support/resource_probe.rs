@@ -292,18 +292,26 @@ pub async fn measure(issues: usize, objects: usize, writes: usize) -> Value {
         let indexed_documents: i64 = connection
             .query_row("SELECT count(*) FROM probe_issue_fts", [], |row| row.get(0))
             .unwrap();
-        let mut query = connection
-            .prepare(
-                "SELECT issue.project
+        // Preserve the MATCH-driven virtual-table scan. The equivalent INNER
+        // JOIN form made SQLite 3.51.3 choose membership/projects first, then
+        // probe FTS in the inner loop; see the Phase 0 planner diagnostic.
+        let search_sql = "SELECT issue.project
                  FROM probe_issue_fts
                  JOIN probe_issues AS issue ON issue.id = probe_issue_fts.rowid
-                 JOIN probe_memberships AS membership
-                   ON membership.project = issue.project AND membership.user = ?1
                  WHERE probe_issue_fts MATCH ?2
+                   AND EXISTS (SELECT 1 FROM probe_memberships AS membership
+                     WHERE membership.project = issue.project AND membership.user = ?1)
                  ORDER BY bm25(probe_issue_fts), issue.id
-                 LIMIT ?3",
-            )
+                 LIMIT ?3";
+        let mut explain = connection
+            .prepare(&format!("EXPLAIN QUERY PLAN {search_sql}"))
             .unwrap();
+        let query_plan = explain
+            .query_map((1_i64, "category0", 100_i64), |row| row.get::<_, String>(3))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        let mut query = connection.prepare(search_sql).unwrap();
         let mut timings = Vec::with_capacity(50);
         let mut returned_rows = 0_usize;
         let mut max_rows_per_query = 0_usize;
@@ -330,7 +338,7 @@ pub async fn measure(issues: usize, objects: usize, writes: usize) -> Value {
         json!({"query_count":timings.len(), "indexed_documents":indexed_documents,
             "returned_rows":returned_rows, "unauthorized_rows":unauthorized_rows,
             "max_rows_per_query":max_rows_per_query,"query_p95_ms":p95_ms,
-            "query_total_ms":timings.iter().sum::<f64>()})
+            "query_total_ms":timings.iter().sum::<f64>(),"query_plan":query_plan})
     })
     .await
     .unwrap();

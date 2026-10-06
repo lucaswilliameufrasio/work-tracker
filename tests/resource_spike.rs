@@ -15,5 +15,12 @@ async fn held_snapshot_retains_real_wal_until_reader_release_then_truncates() {
     assert_eq!(report["search"]["indexed_documents"], 2_000);
     assert_eq!(report["search"]["unauthorized_rows"], 0);
     assert!(report["search"]["max_rows_per_query"].as_u64().unwrap() <= 100);
-    assert!(report["search"]["returned_rows"].as_u64().unwrap() > 0);
+    assert_eq!(report["search"]["returned_rows"], 500);
+    assert!(
+        report["search"]["query_plan"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|line| line.as_str().unwrap().contains("VIRTUAL TABLE INDEX 0:M2"))
+    );
 }

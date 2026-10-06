@@ -140,6 +140,7 @@ console.log(
           maxRowsPerQuery: report.search.max_rows_per_query,
           queryP95Ms: report.search.query_p95_ms,
           queryTotalMs: report.search.query_total_ms,
+          queryPlan: report.search.query_plan,
         },
         processMemory: report.proc_status,
         cgroupMemoryPeakBytes: Number(report.cgroup_memory_peak),
