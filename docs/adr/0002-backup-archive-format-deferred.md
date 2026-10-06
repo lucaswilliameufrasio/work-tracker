@@ -2,7 +2,7 @@
 
 - **Status:** Deferred — security and product compatibility evidence required
 - **Date:** 2026-10-06
-- **Context:** `docs/development-plan.md`, backup sections 12.2–12.3 and Phase 0 evidence 6–8, 45–46, 49, 51–53, 56–57, 60–61
+- **Context:** `docs/development-plan.md`, backup sections 12.2–12.3 and Phase 0 evidence 6–8, 45–46, 49, 51–53, 56–57, 60–62
 
 ## Context
 
@@ -12,9 +12,9 @@ The existing complete-bundle tests are a Node Phase 0 harness, not production co
 
 ## Decision
 
-Do not select a production archive format or add `age`, `tar`, or compression/encryption dependencies to the product yet. Keep the current Node bundle harness experimental and retain all backup/restore requirements. Do not implement a custom general-purpose encryption/container protocol as a shortcut around the candidate's maturity status.
+The user requires a stable, mature format and dependency API; pre-1.0/beta encryption libraries are not acceptable for selection. Do not select a production archive format or add `age`, `tar`, or compression/encryption dependencies to the product yet. Keep the current Node bundle harness experimental and retain all backup/restore requirements. Do not implement a custom general-purpose encryption/container protocol as a shortcut around the candidate's maturity status.
 
-Before resuming, evaluate whether Puxiri accepts the age Rust crate's pre-1.0 API lifecycle and can pin/audit a reviewed release, or identify a maintained Rust implementation with a stable authenticated streaming format. Stream-level age v1 interoperability now has fixture evidence; the selected candidate must still pass recovery-key import/export, secure allowlisted TAR restoration, full SQLite snapshot plus pinned object round-trip, crash/disk-full behavior, atomic publication and cgroup resource bounds.
+The Rust `age` crate is excluded under the user's stability criterion. Sequoia OpenPGP 2.4.1/RFC 9580 is a possible research lead, not an approved candidate: OpenPGP is a stable IETF standard and Sequoia exposes streaming APIs, but Sequoia's published status states it has not been audited; its default crypto backend requires system Nettle, and LGPL-2.0-or-later distribution implications and backup-specific key/recovery ergonomics require review. No format or encryption dependency is selected. Any candidate must prove build/distribution compatibility, explicit modern authenticated-encryption profile, recovery-key import/export, secure allowlisted restoration, full SQLite snapshot plus pinned-object round-trip, crash/disk-full behavior, atomic publication and cgroup resource bounds before selection.
 
 ## Consequences
 
@@ -27,10 +27,12 @@ Before resuming, evaluate whether Puxiri accepts the age Rust crate's pre-1.0 AP
 - Evidence 56 rejects a one-byte-truncated completed archive when the Rust age stream is drained; this is not a matrix of truncation points or product staging/crash behavior.
 - Evidence 57 rejects one authenticated relative traversal path before opening an extracted file; it is a scratch allowlist probe, not a complete archive-path security review or product staging implementation.
 - Evidence 60 rejects a duplicate path in an authenticated scratch archive. Evidence 61 adds process-level staging cleanup after the tested path-traversal and duplicate-path rejections, with a regression that first failed against the scratch implementation before the guard was added. These do not establish cleanup after process death, resistance to local path races, or product restore safety.
+- Evidence 62 records the user's stable-only criterion and a source-level Sequoia review. This is candidate triage only; Sequoia is not audited per its published status page, and no archive or cryptographic profile is selected.
 - Phase 0 backup/restore and resource checkboxes remain open until the end-to-end contracts above are verified and recorded.
 - S3 remains optional; a backup's key custody and restored destination credentials remain separate from this format selection.
 
 ## Evidence
 
-- `docs/development-plan.md`, Phase 0 and evidence 6–8, 45–46, 49, 51–53, 56–57, 60–61.
-- Source links and the temporary probes' exact versions, limits and omissions are recorded in evidence 46, 49, 51–53, 56–57 and 60–61.
+- `docs/development-plan.md`, Phase 0 and evidence 6–8, 45–46, 49, 51–53, 56–57, 60–62.
+- Source links and the temporary probes' exact versions, limits and omissions are recorded in evidence 46, 49, 51–53, 56–57 and 60–62.
+- [RFC 9580](https://www.rfc-editor.org/rfc/rfc9580.html), [Sequoia README](https://gitlab.com/sequoia-pgp/sequoia/-/raw/main/README.md), [Sequoia status](https://sequoia-pgp.org/status), and [Sequoia 2.4.1 docs](https://docs.rs/sequoia-openpgp/2.4.1/sequoia_openpgp/).
