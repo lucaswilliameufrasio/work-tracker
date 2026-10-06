@@ -91,6 +91,8 @@ Registro de clientes nessa fixture é opcional/desabilitado por padrão, com red
 
 A fixture também admite o path explícito `/callback/fixture-server-id`, sem wildcard, e exercita respostas vinculadas ao issuer: metadata/`iss` coincidentes e validação local de issuer/state/destino antes de exchange. O helper não é callback de produto nem validação fornecida pelo SDK oauth2; fetch CIMD, TLS/browser e clientes reais permanecem pendentes.
 
+Snapshots locais de metadata CIMD pré-aprovada são validados por URL/client ID e pelo mesmo perfil público de redirects/grants. Importação create-only persiste cliente e digest atomicamente, sem consentimento implícito, sobrescrita ou reativação. Isso é pré-registro experimental a partir de bytes locais, não fetch HTTPS ou suporte CIMD dinâmico anunciado.
+
 Endpoints públicos deste spike: `/health/live` e `/health/ready`. Readiness retorna apenas `ready`/`not_ready`; não expõe caminhos, versão, usuários ou conteúdo.
 
 ## Plano e distribuição

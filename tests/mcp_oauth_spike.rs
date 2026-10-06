@@ -36,6 +36,7 @@ const REDIRECT: &str = "https://client.example.invalid/oauth/callback";
 const SCOPE: &str = "mcp:read";
 const BROWSER: &str = "fixture_browser=artificial-authenticated-user";
 const VERSION: &str = "2025-11-25";
+const CIMD_ID: &str = "https://client.example.invalid/oauth/client-metadata.json";
 #[derive(Clone)]
 struct Diagnostic;
 impl ServerHandler for Diagnostic {
@@ -101,6 +102,91 @@ struct Registration {
     response_types: Vec<String>,
     token_endpoint_auth_method: String,
 }
+fn valid_public_metadata(
+    name: &str,
+    redirects: &[String],
+    grants: &[String],
+    responses: &[String],
+    auth: &str,
+) -> bool {
+    !name.trim().is_empty()
+        && name.len() <= 120
+        && !name.chars().any(char::is_control)
+        && redirects.len() == 1
+        && redirects
+            .first()
+            .is_some_and(|uri| uri == REDIRECT || native_callback(uri).is_some())
+        && grants == ["authorization_code", "refresh_token"]
+        && responses == ["code"]
+        && auth == "none"
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CimdDocument {
+    client_id: String,
+    client_name: String,
+    redirect_uris: Vec<String>,
+    grant_types: Vec<String>,
+    response_types: Vec<String>,
+    token_endpoint_auth_method: String,
+}
+#[derive(Debug, PartialEq)]
+enum SnapshotError {
+    Invalid,
+    Conflict,
+    Unavailable,
+}
+// Explicit fixture setup only: no HTTP endpoint, discovery advertisement,
+// network fetch, automatic approval, update, or client reactivation.
+async fn import_cimd_snapshot(
+    db: &Database,
+    approved_url: &str,
+    body: &[u8],
+) -> Result<(), SnapshotError> {
+    if approved_url != CIMD_ID || body.len() > 8192 {
+        return Err(SnapshotError::Invalid);
+    }
+    let document: CimdDocument =
+        serde_json::from_slice(body).map_err(|_| SnapshotError::Invalid)?;
+    if document.client_id != approved_url
+        || !valid_public_metadata(
+            &document.client_name,
+            &document.redirect_uris,
+            &document.grant_types,
+            &document.response_types,
+            &document.token_endpoint_auth_method,
+        )
+    {
+        return Err(SnapshotError::Invalid);
+    }
+    let mut tx = db
+        .pool()
+        .begin_with("BEGIN IMMEDIATE")
+        .await
+        .map_err(|_| SnapshotError::Unavailable)?;
+    let existing: Option<String> = sqlx::query_scalar("SELECT id FROM oauth_clients WHERE id=?")
+        .bind(approved_url)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|_| SnapshotError::Unavailable)?;
+    if existing.is_some() {
+        return Err(SnapshotError::Conflict);
+    }
+    sqlx::query("INSERT INTO oauth_clients VALUES(?,?,?,1,0)")
+        .bind(approved_url)
+        .bind(&document.redirect_uris[0])
+        .bind(&document.client_name)
+        .execute(&mut *tx)
+        .await
+        .map_err(|_| SnapshotError::Unavailable)?;
+    sqlx::query("INSERT INTO oauth_cimd_snapshots VALUES(?,?)")
+        .bind(approved_url)
+        .bind(sha256(body).to_vec())
+        .execute(&mut *tx)
+        .await
+        .map_err(|_| SnapshotError::Unavailable)?;
+    tx.commit().await.map_err(|_| SnapshotError::Unavailable)
+}
 fn native_callback(uri: &str) -> Option<reqwest::Url> {
     let url = reqwest::Url::parse(uri).ok()?;
     (url.scheme() == "http"
@@ -133,18 +219,13 @@ async fn register(
         return error(StatusCode::BAD_REQUEST, "invalid_client_metadata");
     };
     // Approved host/path only. Native loopback port may vary; no URL is fetched.
-    if request.client_name.trim().is_empty()
-        || request.client_name.len() > 120
-        || request.client_name.chars().any(char::is_control)
-        || request.redirect_uris.len() != 1
-        || !request
-            .redirect_uris
-            .first()
-            .is_some_and(|uri| uri == REDIRECT || native_callback(uri).is_some())
-        || request.grant_types != ["authorization_code", "refresh_token"]
-        || request.response_types != ["code"]
-        || request.token_endpoint_auth_method != "none"
-    {
+    if !valid_public_metadata(
+        &request.client_name,
+        &request.redirect_uris,
+        &request.grant_types,
+        &request.response_types,
+        &request.token_endpoint_auth_method,
+    ) {
         return error(StatusCode::BAD_REQUEST, "invalid_client_metadata");
     }
     let mut tx = match server.db.pool().begin_with("BEGIN IMMEDIATE").await {
@@ -679,6 +760,7 @@ impl Fixture {
         sqlx::raw_sql("CREATE TABLE oauth_consent(id INTEGER PRIMARY KEY,client TEXT,resource TEXT,scope TEXT,active INTEGER); CREATE TABLE oauth_codes(digest BLOB PRIMARY KEY,client TEXT,redirect TEXT,resource TEXT,challenge TEXT,scope TEXT,expires INTEGER,consent INTEGER REFERENCES oauth_consent(id)); CREATE TABLE oauth_families(id TEXT PRIMARY KEY,consent INTEGER REFERENCES oauth_consent(id),expires INTEGER,revoked INTEGER,client TEXT NOT NULL); CREATE TABLE oauth_tokens(digest BLOB PRIMARY KEY,consent INTEGER REFERENCES oauth_consent(id),resource TEXT,scope TEXT,expires INTEGER,family TEXT REFERENCES oauth_families(id)); CREATE TABLE oauth_refresh(digest BLOB PRIMARY KEY,family TEXT REFERENCES oauth_families(id),client TEXT,resource TEXT,scope TEXT,expires INTEGER,used INTEGER);")
             .execute(db.pool()).await.unwrap();
         sqlx::raw_sql("CREATE TABLE oauth_clients(id TEXT PRIMARY KEY,redirect TEXT NOT NULL,name TEXT NOT NULL,active INTEGER NOT NULL,dynamic INTEGER NOT NULL); CREATE TABLE oauth_registration_policy(enabled INTEGER NOT NULL,max_clients INTEGER NOT NULL); INSERT INTO oauth_registration_policy VALUES(0,2)").execute(db.pool()).await.unwrap();
+        sqlx::query("CREATE TABLE oauth_cimd_snapshots(client TEXT PRIMARY KEY REFERENCES oauth_clients(id),digest BLOB NOT NULL)").execute(db.pool()).await.unwrap();
         sqlx::query("INSERT INTO oauth_clients VALUES(?,?,'Preregistered fixture',1,0)")
             .bind(CLIENT)
             .bind(REDIRECT)
@@ -964,6 +1046,294 @@ fn native_redirect_policy_rejects_parser_normalization_and_never_wildcards_host_
 }
 fn registration() -> Value {
     json!({"client_name":"Untrusted fixture name","redirect_uris":[REDIRECT],"grant_types":["authorization_code","refresh_token"],"response_types":["code"],"token_endpoint_auth_method":"none"})
+}
+fn cimd_document() -> Vec<u8> {
+    let mut document = registration();
+    document["client_id"] = json!(CIMD_ID);
+    serde_json::to_vec(&document).unwrap()
+}
+
+#[tokio::test]
+async fn preapproved_cimd_snapshot_binds_url_and_requires_separate_consent_without_advertising_fetch()
+ {
+    let mut fixture = Fixture::new().await;
+    let body = cimd_document();
+    let (url, _, _) = fixture.begin_for(CIMD_ID);
+    assert_eq!(
+        Fixture::http()
+            .get(url)
+            .header("cookie", BROWSER)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        400
+    );
+    assert_eq!(
+        import_cimd_snapshot(&fixture.server.db, CIMD_ID, &body).await,
+        Ok(())
+    );
+    let digest: Vec<u8> =
+        sqlx::query_scalar("SELECT digest FROM oauth_cimd_snapshots WHERE client=?")
+            .bind(CIMD_ID)
+            .fetch_one(fixture.server.db.pool())
+            .await
+            .unwrap();
+    assert_eq!(digest, sha256(&body));
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM oauth_consent")
+            .fetch_one(fixture.server.db.pool())
+            .await
+            .unwrap(),
+        0
+    );
+    let (url, _, _) = fixture.begin_for(CIMD_ID);
+    assert_eq!(
+        Fixture::http()
+            .get(url)
+            .header("cookie", BROWSER)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        403
+    );
+    let metadata: Value = Fixture::http()
+        .get(format!(
+            "{}/.well-known/oauth-authorization-server",
+            fixture.server.base
+        ))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        metadata
+            .get("client_id_metadata_document_supported")
+            .is_none()
+    );
+    assert!(metadata.get("registration_endpoint").is_none());
+    fixture.consent_for(CIMD_ID).await;
+    let (url, state, verifier) = fixture.begin_for(CIMD_ID);
+    let code = fixture.code(url, state).await;
+    let pair = fixture.redeem_for(CIMD_ID, code, verifier).await.unwrap();
+    let rotated = fixture.refresh_for(CIMD_ID, &pair.refresh).await.unwrap();
+    assert_eq!(
+        fixture
+            .mcp(Some(&rotated.access), initialize())
+            .await
+            .status(),
+        200
+    );
+    sqlx::query("UPDATE oauth_clients SET active=0 WHERE id=?")
+        .bind(CIMD_ID)
+        .execute(fixture.server.db.pool())
+        .await
+        .unwrap();
+    assert_eq!(
+        import_cimd_snapshot(&fixture.server.db, CIMD_ID, &body).await,
+        Err(SnapshotError::Conflict)
+    );
+    assert_eq!(
+        fixture
+            .mcp(Some(&rotated.access), initialize())
+            .await
+            .status(),
+        401
+    );
+    assert!(
+        fixture
+            .refresh_for(CIMD_ID, &rotated.refresh)
+            .await
+            .is_err()
+    );
+    fixture.task.abort();
+    let _ = (&mut fixture.task).await;
+    fixture.server.db.close().await;
+    let directory = std::mem::replace(&mut fixture._directory, TempDir::new().unwrap());
+    drop(fixture);
+    let db = Database::open(directory.path()).await.unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT active FROM oauth_clients WHERE id=?")
+            .bind(CIMD_ID)
+            .fetch_one(db.pool())
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, Vec<u8>>("SELECT digest FROM oauth_cimd_snapshots WHERE client=?")
+            .bind(CIMD_ID)
+            .fetch_one(db.pool())
+            .await
+            .unwrap(),
+        digest
+    );
+    db.close().await;
+}
+
+#[tokio::test]
+async fn cimd_snapshot_rejects_unapproved_sources_mismatched_ids_invalid_json_and_metadata_without_writes()
+ {
+    let fixture = Fixture::new().await;
+    let body = cimd_document();
+    for source in [
+        "http://client.example.invalid/oauth/client-metadata.json",
+        "https://client.example.invalid/",
+        "https://other.example.invalid/client.json",
+        "https://127.0.0.1/client.json",
+        "https://client.example.invalid/oauth/client-metadata.json?extra=1",
+        "https://client.example.invalid/oauth/client-metadata.json#fragment",
+        CLIENT,
+    ] {
+        assert_eq!(
+            import_cimd_snapshot(&fixture.server.db, source, &body).await,
+            Err(SnapshotError::Invalid)
+        );
+    }
+    for (field, value) in [
+        ("client_id", json!(CLIENT)),
+        ("client_id", json!(format!("{CIMD_ID}/"))),
+        ("client_name", json!("")),
+        (
+            "redirect_uris",
+            json!(["https://evil.example.invalid/callback"]),
+        ),
+        ("grant_types", json!(["client_credentials"])),
+        ("response_types", json!(["token"])),
+        ("token_endpoint_auth_method", json!("private_key_jwt")),
+        ("client_uri", json!("http://169.254.169.254/")),
+        ("logo_uri", json!("http://localhost/admin")),
+    ] {
+        let mut document: Value = serde_json::from_slice(&body).unwrap();
+        document[field] = value;
+        assert_eq!(
+            import_cimd_snapshot(
+                &fixture.server.db,
+                CIMD_ID,
+                &serde_json::to_vec(&document).unwrap()
+            )
+            .await,
+            Err(SnapshotError::Invalid)
+        );
+    }
+    for bytes in [
+        b"{}".to_vec(),
+        b"null".to_vec(),
+        b"not JSON".to_vec(),
+        vec![b' '; 8193],
+        vec![255],
+        format!(
+            "{{\"client_id\":\"{CIMD_ID}\",{}",
+            String::from_utf8(body).unwrap().trim_start_matches('{')
+        )
+        .into_bytes(),
+    ] {
+        assert_eq!(
+            import_cimd_snapshot(&fixture.server.db, CIMD_ID, &bytes).await,
+            Err(SnapshotError::Invalid)
+        );
+    }
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM oauth_clients")
+            .fetch_one(fixture.server.db.pool())
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM oauth_cimd_snapshots")
+            .fetch_one(fixture.server.db.pool())
+            .await
+            .unwrap(),
+        0
+    );
+}
+
+#[tokio::test]
+async fn cimd_snapshot_import_is_create_only_atomic_and_cannot_overwrite_redirect_or_client_status()
+{
+    let fixture = Fixture::new().await;
+    let body = cimd_document();
+    let (a, b) = tokio::join!(
+        import_cimd_snapshot(&fixture.server.db, CIMD_ID, &body),
+        import_cimd_snapshot(&fixture.server.db, CIMD_ID, &body)
+    );
+    assert!(matches!(
+        (a, b),
+        (Ok(()), Err(SnapshotError::Conflict)) | (Err(SnapshotError::Conflict), Ok(()))
+    ));
+    let mut changed: Value = serde_json::from_slice(&body).unwrap();
+    changed["redirect_uris"] = json!(["http://localhost/callback"]);
+    changed["client_name"] = json!("Different client");
+    assert_eq!(
+        import_cimd_snapshot(
+            &fixture.server.db,
+            CIMD_ID,
+            &serde_json::to_vec(&changed).unwrap()
+        )
+        .await,
+        Err(SnapshotError::Conflict)
+    );
+    let row: (String, String, i64, i64) =
+        sqlx::query_as("SELECT redirect,name,active,dynamic FROM oauth_clients WHERE id=?")
+            .bind(CIMD_ID)
+            .fetch_one(fixture.server.db.pool())
+            .await
+            .unwrap();
+    assert_eq!(
+        row,
+        (REDIRECT.into(), "Untrusted fixture name".into(), 1, 0)
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, Vec<u8>>("SELECT digest FROM oauth_cimd_snapshots")
+            .fetch_one(fixture.server.db.pool())
+            .await
+            .unwrap(),
+        sha256(&body)
+    );
+}
+
+#[tokio::test]
+async fn cimd_snapshot_second_insert_failure_rolls_back_client_and_database_unavailability_fails_closed()
+ {
+    let fixture = Fixture::new().await;
+    let body = cimd_document();
+    sqlx::raw_sql("CREATE TRIGGER fail_cimd_snapshot BEFORE INSERT ON oauth_cimd_snapshots BEGIN SELECT RAISE(ABORT,'fixture snapshot failure'); END").execute(fixture.server.db.pool()).await.unwrap();
+    assert_eq!(
+        import_cimd_snapshot(&fixture.server.db, CIMD_ID, &body).await,
+        Err(SnapshotError::Unavailable)
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM oauth_clients WHERE id=?")
+            .bind(CIMD_ID)
+            .fetch_one(fixture.server.db.pool())
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM oauth_cimd_snapshots")
+            .fetch_one(fixture.server.db.pool())
+            .await
+            .unwrap(),
+        0
+    );
+    sqlx::query("DROP TRIGGER fail_cimd_snapshot")
+        .execute(fixture.server.db.pool())
+        .await
+        .unwrap();
+    assert_eq!(
+        import_cimd_snapshot(&fixture.server.db, CIMD_ID, &body).await,
+        Ok(())
+    );
+    fixture.server.db.close().await;
+    assert_eq!(
+        import_cimd_snapshot(&fixture.server.db, CIMD_ID, &body).await,
+        Err(SnapshotError::Unavailable)
+    );
 }
 
 #[tokio::test]
