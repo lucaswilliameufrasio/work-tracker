@@ -1283,6 +1283,12 @@ Comparação descritiva pareada, no mesmo harness/filesystem local e sem alegaç
 
 Isso só demonstra que um hash artificial isolado e um bundle sintético moderado terminaram juntos neste host/limite. Não mede verificação PHC, handlers/rate limits, múltiplos hashes concorrentes, saturação/OOM, esquema/distribuição reais, storage dedicado ou hardware de produção. Não seleciona parâmetros Argon2, limite de concorrência, capacidade, RTO/RPO, nem fecha a checkbox de recursos/Fase 0. Nenhuma senha, chave persistida ou dado real foi usado; build release scratch e ambas as execuções passaram.
 
+#### Evidências da quinquagésima sexta fatia — truncamento no EOF do archive Rust
+
+No mesmo scratch externo, a execução em cgroup confirmado de 1 vCPU/1 GiB copiou o archive completo de 56.005.655 bytes para um arquivo separado, removeu o último byte e sincronizou-o. O decryptor age recebeu a identidade correta; o stream foi drenado até EOF exclusivamente para `io::sink()` e retornou erro de autenticação, portanto `truncated_archive_rejected=true` sem expor plaintext a uma extração. Na mesma execução, restore/integrity/10.000 hashes de objeto do bundle intacto passaram antes dos negativos; chave errada e ciphertext alterado também foram rejeitados. Pico total cgroup 665.640.960 bytes. `cargo build --release` scratch e execução passaram.
+
+É apenas um corte de um byte no fim do stream completo, não uma matriz de truncamentos em offsets/headers TAR/Gzip nem teste de crash durante escrita/publicação; não prova política de cleanup/staging do produto, chave de recuperação, estabilidade da crate beta ou segurança do formato. Scratch permaneceu em `/tmp/opencode`, sem dependências/código no repo, dados/segredos reais ou seleção de formato; ADR 0002, integração backup/restore e Fase 0 continuam abertos.
+
 ### Fase 1 — Fundação e identidade
 
 - [ ] Migrations, usuários/organização/settings e infraestrutura básica de outbox/jobs/leases necessária aos próximos fluxos.
