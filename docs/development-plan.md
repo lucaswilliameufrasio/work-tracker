@@ -639,7 +639,7 @@ Não tratar cada fase como um produto final seguro. A v1 completa inclui todos o
 
 Saída: esqueleto executável, contratos comprovados e relatório de compatibilidade/limitações, sem UI fictícia de integrações. Não remover requisitos silenciosamente se spike falhar: documentar bloqueio e discutir alternativa.
 
-#### Gates de saída ainda abertos — status após a septuagésima sétima fatia
+#### Gates de saída ainda abertos — status após a septuagésima oitava fatia
 
 - **OAuth/MCP remoto — protótipo in-house autorizado, produção não:** o usuário confirmou single-binary, rejeitou `oauth-as` pela confiança insuficiente e autorizou somente um protótipo isolado de core próprio. O scratch consulta estado de conta/papel em tabelas SQLite fixture em cada autorização, deriva a identidade de approval de sessão opaca do host em um fluxo experimental e exige CSRF token fixture ligado à sessão para gravar consent/code. Valida scopes por allowlist exata, subset entre consentimento e emissão, e matriz de read/write para as oito tools v1, além de consentimento por projeto, access/refresh token e reuse detection. Checklists browser/CSRF (fatias 75–76) não são implementação nem aprovação. Continua sem integração com sessão/cookie/Origin/Fetch-Metadata/CSRF/HTTP reais, tabelas reais, discovery, conformance, auditoria ou revisão independente. Não expor nem afirmar suporte dos quatro clientes; CIMD continua indisponível. Ver [ADR 0001](adr/0001-authorization-server-selection.md).
 - **Smoke SaaS/clientes — autorização e contas controladas necessárias:** testes atuais usam endpoints fake/loopback, certificados artificiais e credenciais sintéticas. Não provam envio/entitlement/TLS/provider account, webhook/queue real nem cadastro/consent/revogação nos quatro MCP clients. Nenhuma credencial real foi usada; smoke externo só após autorização explícita do operador e contas/domínios/destinatários controlados.
@@ -1453,7 +1453,13 @@ Os 23 testes SQLite passaram; `cargo fmt --check`, Clippy all-targets `-D warnin
 
 Ampliado o teste fixture de sessão: uma sessão expirada no instante da ação não pode criar consent; desativar a conta host invalida imediatamente ações novas apesar de a sessão bearer e o token CSRF continuarem corretos; reativar permite prosseguir no cenário de teste. Mantém também os casos de sessão revogada e CSRF forjado nas operações mutáveis. O comportamento vem do JOIN atual session→fixture_accounts (`active=1`) e comparação de `expires_at > now`, não de claims fornecidos pelo client.
 
-Os 23 testes SQLite totais passaram; `cargo fmt --check`, Clippy all-targets `-D warnings`, testes all-targets locked e release build passaram offline. Sem mudanças do produto. Ainda não cobre transação concorrente com revoke/deactivate, nem quer afirmar simultaneidade/linearização; esses pontos exigem teste com múltiplas conexões e modelo transacional antes de usar sessão real. OAuth/MCP de produção, review independente, Fase 0 e plano inteiro seguem abertos.
+Os 23 testes SQLite totais passaram; `cargo fmt --check`, Clippy all-targets `-D warnings`, testes all-targets locked e release build passaram offline. Sem mudanças do produto. Naquela fatia ainda não cobria transação concorrente com revoke/deactivate; isso foi tratado no scratch na fatia seguinte. OAuth/MCP de produção, review independente, Fase 0 e plano inteiro seguem abertos.
+
+#### Evidências da septuagésima oitava fatia — serialize host-session revoke vs consent/code writes
+
+Refatorado somente o scratch para que resolução de sessão+CSRF e escrita de consentimento sejam feitas na mesma transação SQLite `BEGIN IMMEDIATE`; code issuance por sessão também valida session/CSRF e insere code sob a mesma write transaction. Mudanças concorrentes de conta, membership ou revogação precisam serializar como writers SQLite. Teste com dois Stores/pools conectados ao mesmo arquivo executa consent creation e sessão revoke em `tokio::join!`, permite apenas os resultados de uma das ordens seriais, e confirma que toda tentativa posterior à conclusão da revogação falha como `InvalidGrant`.
+
+A regressão passa; 24 testes SQLite no total. `cargo fmt --check`, Clippy all-targets `-D warnings`, testes all-targets locked e release build passam offline. Isto exercita serialização do scratch SQLite, não valida comportamento do store/migration real nem chamadas de negócio completas. A sessão/account podem ser revogadas logo após a operação linearizada, como em qualquer autorização pontual; produto ainda precisa declarar quando revalida acesso e invalidar cache corretamente. Nenhuma mudança de código/schema/dependência/endpoint no produto; OAuth/MCP remoto, review, Fase 0 e plano completo continuam bloqueados.
 
 ### Fase 1 — Fundação e identidade
 
