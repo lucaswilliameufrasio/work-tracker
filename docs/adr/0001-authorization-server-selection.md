@@ -2,7 +2,7 @@
 
 - **Status:** Deferred — product/architecture decision required
 - **Date:** 2026-10-06
-- **Context:** `docs/development-plan.md`, sections 10.1–10.3 and Phase 0 evidence 37–41, 59, 62–68, 71–72
+- **Context:** `docs/development-plan.md`, sections 10.1–10.3 and Phase 0 evidence 37–41, 59, 62–68, 71–73
 
 ## Context
 
@@ -46,4 +46,4 @@ At the time of the initial review, this was considered a *spike candidate*, not 
 
 Do not spend more integration effort on `oauth-as` unless independent maintenance/security evidence materially changes or the user explicitly accepts its trust model. Any future upstream candidate must first pass provenance, governance, maintenance, security-review, protocol-surface, storage-conformance, and identity/session/consent checks. CIMD remains disabled pending its separate SSRF/cache/trust review. Four-client acceptance and any live-provider smoke remain separate gates, with live smoke requiring explicit authorization and controlled accounts.
 
-Sources: [crate/release metadata](https://crates.io/api/v1/crates/oauth-as/1.0.0), [API documentation](https://docs.rs/oauth-as/1.0.0/oauth_as/), [published source](https://docs.rs/crate/oauth-as/1.0.0/source/), and the reproducible compile-only details/limitations in development-plan evidence 59 and 62–68, 71–72.
+Sources: [crate/release metadata](https://crates.io/api/v1/crates/oauth-as/1.0.0), [API documentation](https://docs.rs/oauth-as/1.0.0/oauth_as/), [published source](https://docs.rs/crate/oauth-as/1.0.0/source/), and the reproducible compile-only details/limitations in development-plan evidence 59 and 62–68, 71–73.

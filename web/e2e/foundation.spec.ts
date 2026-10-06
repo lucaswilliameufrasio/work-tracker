@@ -2,12 +2,13 @@ import { expect, test } from '@playwright/test';
 
 test('embedded SPA checks the real server without pretending product features exist', async ({
   page,
-}) => {
+}, testInfo) => {
+  const expectedOrigin = new URL(testInfo.project.use.baseURL as string).origin;
   const consoleErrors: string[] = [];
   const externalRequests: string[] = [];
   page.on('pageerror', (error) => consoleErrors.push(error.message));
   page.on('request', (request) => {
-    if (new URL(request.url()).origin !== 'http://127.0.0.1:4174') {
+    if (new URL(request.url()).origin !== expectedOrigin) {
       externalRequests.push(request.url());
     }
   });
