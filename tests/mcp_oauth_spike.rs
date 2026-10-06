@@ -101,6 +101,28 @@ struct Registration {
     response_types: Vec<String>,
     token_endpoint_auth_method: String,
 }
+fn native_callback(uri: &str) -> Option<reqwest::Url> {
+    let url = reqwest::Url::parse(uri).ok()?;
+    (url.scheme() == "http"
+        && matches!(url.host_str(), Some("localhost" | "127.0.0.1"))
+        && url.path() == "/callback"
+        && url.query().is_none()
+        && url.fragment().is_none()
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.port() != Some(0)
+        && url.as_str() == uri)
+        .then_some(url)
+}
+fn redirect_matches(registered: &str, requested: &str) -> bool {
+    if registered == REDIRECT {
+        return requested == registered;
+    }
+    match (native_callback(registered), native_callback(requested)) {
+        (Some(registered), Some(requested)) => registered.host_str() == requested.host_str(),
+        _ => false,
+    }
+}
 async fn register(
     State(server): State<Arc<Server>>,
     body: Result<Json<Registration>, axum::extract::rejection::JsonRejection>,
@@ -108,11 +130,15 @@ async fn register(
     let Ok(Json(request)) = body else {
         return error(StatusCode::BAD_REQUEST, "invalid_client_metadata");
     };
-    // Explicit exact allowlist for this fixture; never fetch submitted URLs.
+    // Approved host/path only. Native loopback port may vary; no URL is fetched.
     if request.client_name.trim().is_empty()
         || request.client_name.len() > 120
         || request.client_name.chars().any(char::is_control)
-        || request.redirect_uris != [REDIRECT]
+        || request.redirect_uris.len() != 1
+        || !request
+            .redirect_uris
+            .first()
+            .is_some_and(|uri| uri == REDIRECT || native_callback(uri).is_some())
         || request.grant_types != ["authorization_code", "refresh_token"]
         || request.response_types != ["code"]
         || request.token_endpoint_auth_method != "none"
@@ -146,7 +172,7 @@ async fn register(
     let id = CsrfToken::new_random().secret().clone();
     if sqlx::query("INSERT INTO oauth_clients VALUES(?,?,?,1,1)")
         .bind(&id)
-        .bind(REDIRECT)
+        .bind(&request.redirect_uris[0])
         .bind(&request.client_name)
         .execute(&mut *tx)
         .await
@@ -438,7 +464,7 @@ async fn authorize(
             .fetch_optional(&mut *tx)
             .await;
     match registered {
-        Ok(Some(redirect)) if redirect == request.redirect_uri => {}
+        Ok(Some(redirect)) if redirect_matches(&redirect, &request.redirect_uri) => {}
         Ok(_) => return error(StatusCode::BAD_REQUEST, "invalid_client"),
         Err(_) => return error(StatusCode::SERVICE_UNAVAILABLE, "temporarily_unavailable"),
     };
@@ -486,7 +512,7 @@ async fn authorize(
     )
         .into_response()
 }
-type CodeRow = (String, String, String, String, String, i64, i64);
+type CodeRow = (String, String, String, String, String, i64, i64, String);
 async fn exchange(
     State(server): State<Arc<Server>>,
     headers: HeaderMap,
@@ -508,15 +534,16 @@ async fn exchange(
         Err(_) => return error(StatusCode::SERVICE_UNAVAILABLE, "temporarily_unavailable"),
     };
     let digest = sha256(request.code.as_bytes()).to_vec();
-    let row:Result<Option<CodeRow>,_>=sqlx::query_as("SELECT c.client,c.redirect,c.resource,c.challenge,c.scope,c.expires,c.consent FROM oauth_codes c JOIN oauth_consent g ON g.id=c.consent JOIN oauth_clients p ON p.id=c.client AND p.active=1 AND p.redirect=c.redirect WHERE c.digest=? AND g.active=1 AND g.client=c.client AND g.resource=c.resource AND g.scope=c.scope")
+    let row:Result<Option<CodeRow>,_>=sqlx::query_as("SELECT c.client,c.redirect,c.resource,c.challenge,c.scope,c.expires,c.consent,p.redirect FROM oauth_codes c JOIN oauth_consent g ON g.id=c.consent JOIN oauth_clients p ON p.id=c.client AND p.active=1 WHERE c.digest=? AND g.active=1 AND g.client=c.client AND g.resource=c.resource AND g.scope=c.scope")
         .bind(&digest).fetch_optional(&mut *tx).await;
-    let (client, redirect, resource, challenge, scope, expires, consent) = match row {
+    let (client, redirect, resource, challenge, scope, expires, consent, registered) = match row {
         Ok(Some(row)) => row,
         Ok(None) => return error(StatusCode::BAD_REQUEST, "invalid_grant"),
         Err(_) => return error(StatusCode::SERVICE_UNAVAILABLE, "temporarily_unavailable"),
     };
     let expected = URL_SAFE_NO_PAD.encode(sha256(request.code_verifier.as_bytes()));
     if client != request.client_id
+        || !redirect_matches(&registered, &redirect)
         || redirect != request.redirect_uri
         || resource != request.resource
         || resource != server.resource
@@ -835,8 +862,127 @@ impl Fixture {
 fn initialize() -> Value {
     json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":VERSION,"capabilities":{},"clientInfo":{"name":"oauth-fixture-not-a-product-client","version":"0"}}})
 }
+#[test]
+fn native_redirect_policy_rejects_parser_normalization_and_never_wildcards_host_path_or_https() {
+    for uri in [
+        "http://127.0.0.1/callback",
+        "http://localhost:1/callback",
+        "http://127.0.0.1:65535/callback",
+    ] {
+        assert!(native_callback(uri).is_some());
+    }
+    for uri in [
+        "http://127.1/callback",
+        "http://2130706433/callback",
+        "http://LOCALHOST/callback",
+        "http://localhost./callback",
+        "http://localhost:0/callback",
+        "http://localhost:65536/callback",
+        "http://localhost:80/callback",
+        "http://user@localhost/callback",
+        "http://user:password@127.0.0.1/callback",
+        "http://localhost/callback#fragment",
+        "http://localhost/callback?state=x",
+        "http://localhost/other/../callback",
+        "http://localhost/%63allback",
+        "http://[::1]/callback",
+        "https://localhost/callback",
+        "http://localhost\\evil.invalid/callback",
+        " http://localhost/callback",
+    ] {
+        assert!(native_callback(uri).is_none(), "accepted {uri}");
+    }
+    assert!(redirect_matches(
+        "http://localhost:43117/callback",
+        "http://localhost:43118/callback"
+    ));
+    assert!(!redirect_matches(
+        "http://localhost/callback",
+        "http://127.0.0.1:43117/callback"
+    ));
+    assert!(!redirect_matches(
+        REDIRECT,
+        "https://client.example.invalid:43117/callback"
+    ));
+}
 fn registration() -> Value {
     json!({"client_name":"Untrusted fixture name","redirect_uris":[REDIRECT],"grant_types":["authorization_code","refresh_token"],"response_types":["code"],"token_endpoint_auth_method":"none"})
+}
+
+#[tokio::test]
+async fn native_callback_allows_only_approved_loopback_host_path_and_code_exchange_keeps_exact_port()
+ {
+    for host in ["127.0.0.1", "localhost"] {
+        let fixture = Fixture::new().await;
+        enable_registration(&fixture).await;
+        let mut body = registration();
+        body["redirect_uris"] = json!([format!("http://{host}/callback")]);
+        let response = register_request(&fixture, body).await;
+        assert_eq!(response.status(), 201);
+        let registered: Value = response.json().await.unwrap();
+        let id = registered["client_id"].as_str().unwrap();
+        fixture.consent_for(id).await;
+        let (mut url, state, verifier) = fixture.begin_for(id);
+        let pairs: Vec<_> = url
+            .query_pairs()
+            .filter(|(key, _)| key != "redirect_uri")
+            .map(|(key, value)| (key.into_owned(), value.into_owned()))
+            .collect();
+        let redirect = format!("http://{host}:43117/callback");
+        url.set_query(None);
+        url.query_pairs_mut()
+            .extend_pairs(pairs)
+            .append_pair("redirect_uri", &redirect);
+        let code = fixture.code(url, state).await;
+        let fields = vec![
+            ("grant_type", "authorization_code".into()),
+            ("client_id", id.into()),
+            ("redirect_uri", format!("http://{host}:43118/callback")),
+            ("code", code.clone()),
+            ("resource", fixture.server.resource.clone()),
+            ("code_verifier", verifier.secret().clone()),
+        ];
+        assert_eq!(fixture.raw(fields.clone()).await.status(), 400);
+        let mut correct = fields;
+        correct[2].1 = redirect;
+        let response = fixture.raw(correct).await;
+        assert_eq!(response.status(), 200);
+        let pair: Value = response.json().await.unwrap();
+        assert_eq!(
+            fixture
+                .mcp(Some(pair["access_token"].as_str().unwrap()), initialize())
+                .await
+                .status(),
+            200
+        );
+        for unapproved in [
+            "http://127.0.0.2:43117/callback",
+            "http://localhost.evil.invalid:43117/callback",
+            "http://localhost:43117/other",
+            "http://localhost:43117/callback?extra=1",
+        ] {
+            let (mut url, _, _) = fixture.begin_for(id);
+            let pairs: Vec<_> = url
+                .query_pairs()
+                .filter(|(key, _)| key != "redirect_uri")
+                .map(|(key, value)| (key.into_owned(), value.into_owned()))
+                .collect();
+            url.set_query(None);
+            url.query_pairs_mut()
+                .extend_pairs(pairs)
+                .append_pair("redirect_uri", unapproved);
+            assert_eq!(
+                Fixture::http()
+                    .get(url)
+                    .header("cookie", BROWSER)
+                    .send()
+                    .await
+                    .unwrap()
+                    .status(),
+                400
+            );
+        }
+    }
 }
 async fn register_request(fixture: &Fixture, body: Value) -> reqwest::Response {
     Fixture::http()
@@ -976,7 +1122,7 @@ async fn registration_rejects_unapproved_redirects_extra_metadata_and_unsupporte
             "redirect_uris",
             json!(["https://evil.example.invalid/callback"]),
         ),
-        ("redirect_uris", json!(["http://127.0.0.1:9/callback"])),
+        ("redirect_uris", json!(["http://127.0.0.1:9/unapproved"])),
         ("redirect_uris", json!(["javascript:alert(1)"])),
         ("redirect_uris", json!([REDIRECT, REDIRECT])),
         ("grant_types", json!(["client_credentials"])),

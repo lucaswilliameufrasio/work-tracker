@@ -120,10 +120,14 @@ async fn tampered_migration_checksum_prevents_startup() {
         .unwrap();
     database.close().await;
     drop(database);
-    assert!(matches!(
-        Database::open(directory.path()).await,
-        Err(puxiri::db::OpenError::Migration(_))
-    ));
+    let error = Database::open(directory.path())
+        .await
+        .err()
+        .expect("tampered migration must prevent startup");
+    assert!(
+        matches!(error, puxiri::db::OpenError::Migration(_)),
+        "unexpected startup error: {error:?}"
+    );
 }
 
 #[tokio::test]

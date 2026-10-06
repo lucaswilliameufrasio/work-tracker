@@ -28,6 +28,15 @@ pub struct Database {
     _directory_lock: File,
 }
 
+impl Drop for Database {
+    fn drop(&mut self) {
+        // Explicit unlock also releases this open file description's lock
+        // when a forked child's inherited descriptor has not reached exec yet.
+        // Merely closing our descriptor waits for all duplicates to close.
+        let _ = self._directory_lock.unlock();
+    }
+}
+
 impl Database {
     pub async fn open(data_dir: &Path) -> Result<Self, OpenError> {
         let directory_lock = lock_directory(data_dir)?;
@@ -84,5 +93,37 @@ fn lock_directory(data_dir: &Path) -> Result<File, OpenError> {
         Ok(()) => Ok(lock),
         Err(TryLockError::WouldBlock) => Err(OpenError::AlreadyRunning),
         Err(TryLockError::Error(error)) => Err(error.into()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn dropping_database_releases_lock_even_when_a_duplicate_descriptor_survives() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let database = Database::open(directory.path()).await.unwrap();
+        // A duplicate shares the open file description, as an inherited Unix
+        // descriptor does between fork and exec. No unsafe fork is needed.
+        let inherited = database._directory_lock.try_clone().unwrap();
+        database.close().await;
+        assert!(matches!(
+            Database::open(directory.path()).await.err(),
+            Some(OpenError::AlreadyRunning)
+        ));
+        drop(database);
+        let reopened = Database::open(directory.path()).await.unwrap();
+        assert!(matches!(
+            Database::open(directory.path()).await.err(),
+            Some(OpenError::AlreadyRunning)
+        ));
+        drop(inherited);
+        // Closing the old duplicate must not unlock the new owner's lock.
+        assert!(matches!(
+            Database::open(directory.path()).await.err(),
+            Some(OpenError::AlreadyRunning)
+        ));
+        reopened.close().await;
     }
 }
