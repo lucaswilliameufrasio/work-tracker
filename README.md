@@ -97,6 +97,8 @@ Snapshots locais de metadata CIMD pré-aprovada são validados por URL/client ID
 
 O fake MCP testa TTL de metadata controlado por `Cache-Control` e capped em 300s: expirado/no-cache/no-store não permite novo authorize, exchange, refresh ou chamadas MCP. Mudança do body invalida cliente, consentimentos, famílias e codes atomicamente; revalidação idêntica pode renovar o cache sem alterar identidade. Continua sendo fixture SQLite, não cache compartilhado ou manutenção de autorização em produção.
 
+A fixture separa também trust review administrativo do snapshot e do consentimento: sem review não há code; metadata/nome/domínio continuam dados não confiáveis, callback loopback recebe warning e projetos não são escolhidos implicitamente. É só um view-model de teste, sem UI/admin real ou encoder HTML.
+
 Endpoints públicos deste spike: `/health/live` e `/health/ready`. Readiness retorna apenas `ready`/`not_ready`; não expõe caminhos, versão, usuários ou conteúdo.
 
 ## Plano e distribuição
