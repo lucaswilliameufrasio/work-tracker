@@ -2,7 +2,7 @@
 
 - **Status:** Deferred — security and product compatibility evidence required
 - **Date:** 2026-10-06
-- **Context:** `docs/development-plan.md`, backup sections 12.2–12.3 and Phase 0 evidence 6–8, 45–46, 49, 51–53, 56–57, 60–62
+- **Context:** `docs/development-plan.md`, backup sections 12.2–12.3 and Phase 0 evidence 6–8, 45–46, 49, 51–53, 56–57, 60–62, 69
 
 ## Context
 
@@ -28,11 +28,15 @@ The Rust `age` crate is excluded under the user's stability criterion. Sequoia O
 - Evidence 57 rejects one authenticated relative traversal path before opening an extracted file; it is a scratch allowlist probe, not a complete archive-path security review or product staging implementation.
 - Evidence 60 rejects a duplicate path in an authenticated scratch archive. Evidence 61 adds process-level staging cleanup after the tested path-traversal and duplicate-path rejections, with a regression that first failed against the scratch implementation before the guard was added. These do not establish cleanup after process death, resistance to local path races, or product restore safety.
 - Evidence 62 records the user's stable-only criterion and a source-level Sequoia review. This is candidate triage only; Sequoia is not audited per its published status page, and no archive or cryptographic profile is selected.
+- Evidence 69 compares CMS/OpenSSL, libsodium secretstream, libarchive2 and TAR. No candidate meets the complete stable, audited, bounded-memory, self-hosted and recovery-kit requirements. The prior external scratch TAR pin 0.4.44 was upgraded to patched 0.4.46 after RustSec advisories CVE-2026-33055/33056; the scratch's custom extractor did not call the specifically vulnerable `unpack_in` helper, but the old parser version still fell below the upstream fix floor. The isolated 0.4.46 round-trip/security-fixture run passes; this is not a product dependency approval.
+- CMS is a mature standards-track format but the documented Rust `openssl` 0.10.81 wrapper encrypts from a byte slice and decrypts into a `Vec`; OpenSSL documents that its CMS BIO API has streaming encoding but no corresponding inverse streaming decoder. A custom low-level bridge would add unsafe/native integration and patched-runtime obligations; CVE-2026-34182 affected OpenSSL CMS AuthEnvelopedData in supported branches until their fixed releases. CMS therefore remains a research lead, not a selected backup format.
+- Libsodium's C `secretstream` API is established (introduced in 1.0.14) and streaming/AEAD, but it is a primitive/wire stream rather than the complete backup/archive and recovery-key format. `libsodium-rs` 0.2.4 is a recent Rust wrapper and requires assessment of its native libsodium build/distribution path; no Puxiri framing or key-kit profile is approved. `libarchive2` 0.2.1 binds mature libarchive but is a young Rust binding and introduces system-library/build and broad-format attack-surface questions.
 - Phase 0 backup/restore and resource checkboxes remain open until the end-to-end contracts above are verified and recorded.
 - S3 remains optional; a backup's key custody and restored destination credentials remain separate from this format selection.
 
 ## Evidence
 
-- `docs/development-plan.md`, Phase 0 and evidence 6–8, 45–46, 49, 51–53, 56–57, 60–62.
-- Source links and the temporary probes' exact versions, limits and omissions are recorded in evidence 46, 49, 51–53, 56–57 and 60–62.
+- `docs/development-plan.md`, Phase 0 and evidence 6–8, 45–46, 49, 51–53, 56–57, 60–62, 69.
+- Source links and temporary probes' exact versions, limits and omissions are recorded in evidence 46, 49, 51–53, 56–57, 60–62 and 69.
 - [RFC 9580](https://www.rfc-editor.org/rfc/rfc9580.html), [Sequoia README](https://gitlab.com/sequoia-pgp/sequoia/-/raw/main/README.md), [Sequoia status](https://sequoia-pgp.org/status), and [Sequoia 2.4.1 docs](https://docs.rs/sequoia-openpgp/2.4.1/sequoia_openpgp/).
+- [OpenSSL CMS streaming BIO](https://docs.openssl.org/3.2/man3/BIO_new_CMS/), [OpenSSL CMS encrypt](https://docs.openssl.org/3.2/man3/CMS_encrypt/), [`openssl` 0.10.81 CMS API](https://docs.rs/openssl/0.10.81/openssl/cms/struct.CmsContentInfo.html), [OpenSSL 2026-06-09 advisory](https://openssl-library.org/news/secadv/20260609.txt), [RustSec tar advisory](https://rustsec.org/advisories/RUSTSEC-2026-0067), [libsodium secretstream specification](https://doc.libsodium.org/secret-key_cryptography/secretstream), [`libsodium-rs` 0.2.4 registry metadata](https://crates.io/api/v1/crates/libsodium-rs/0.2.4), [`libarchive2` 0.2.1 registry metadata](https://crates.io/api/v1/crates/libarchive2/0.2.1).
