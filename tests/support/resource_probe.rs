@@ -25,17 +25,73 @@ pub async fn measure(issues: usize, objects: usize, writes: usize) -> Value {
     tokio::task::spawn_blocking(move || {
         let mut connection = Connection::open(seed_path).unwrap();
         connection.execute_batch("PRAGMA foreign_keys=ON; PRAGMA synchronous=FULL;
-            CREATE TABLE probe_issues (id INTEGER PRIMARY KEY, project INTEGER NOT NULL,
-                body TEXT NOT NULL, revision INTEGER NOT NULL DEFAULT 0);
+            CREATE TABLE probe_projects (id INTEGER PRIMARY KEY, name TEXT NOT NULL);
+            CREATE TABLE probe_issues (id INTEGER PRIMARY KEY, project INTEGER NOT NULL REFERENCES probe_projects(id),
+                title TEXT NOT NULL, body TEXT NOT NULL, status TEXT NOT NULL,
+                revision INTEGER NOT NULL DEFAULT 0);
+            CREATE INDEX probe_issues_by_project ON probe_issues(project, id);
+            CREATE TABLE probe_field_values (issue INTEGER NOT NULL REFERENCES probe_issues(id),
+                field TEXT NOT NULL, value TEXT NOT NULL, PRIMARY KEY(issue, field));
+            CREATE TABLE probe_comments (id INTEGER PRIMARY KEY, issue INTEGER NOT NULL REFERENCES probe_issues(id),
+                body TEXT NOT NULL, created_at INTEGER NOT NULL);
+            CREATE INDEX probe_comments_by_issue ON probe_comments(issue, id);
+            CREATE TABLE probe_events (id INTEGER PRIMARY KEY, issue INTEGER NOT NULL REFERENCES probe_issues(id),
+                kind TEXT NOT NULL, old_value TEXT, new_value TEXT, created_at INTEGER NOT NULL);
+            CREATE INDEX probe_events_by_issue ON probe_events(issue, id);
             CREATE TABLE probe_objects (id INTEGER PRIMARY KEY);
             CREATE TABLE probe_refs (issue INTEGER PRIMARY KEY, object INTEGER NOT NULL REFERENCES probe_objects(id));
             CREATE TABLE probe_pins (run TEXT NOT NULL, object INTEGER NOT NULL REFERENCES probe_objects(id),
                 PRIMARY KEY(run, object));").unwrap();
         let transaction = connection.transaction().unwrap();
         {
-            let body = "synthetic issue text ".repeat(24);
-            let mut insert = transaction.prepare("INSERT INTO probe_issues (id, project, body) VALUES (?, ?, ?)").unwrap();
-            for id in 1..=issues { insert.execute((id as i64, (id % 20) as i64, &body)).unwrap(); }
+            let mut project = transaction
+                .prepare("INSERT INTO probe_projects (id, name) VALUES (?, ?)")
+                .unwrap();
+            for id in 1..=20 {
+                project
+                    .execute((id, format!("Synthetic project {id}")))
+                    .unwrap();
+            }
+            let mut issue = transaction.prepare("INSERT INTO probe_issues
+                (id, project, title, body, status) VALUES (?, ?, ?, ?, ?)").unwrap();
+            let mut field = transaction
+                .prepare("INSERT INTO probe_field_values (issue, field, value) VALUES (?, ?, ?)")
+                .unwrap();
+            let mut comment = transaction
+                .prepare("INSERT INTO probe_comments (id, issue, body, created_at) VALUES (?, ?, ?, ?)")
+                .unwrap();
+            let mut event = transaction.prepare("INSERT INTO probe_events
+                (id, issue, kind, old_value, new_value, created_at) VALUES (?, ?, ?, ?, ?, ?)").unwrap();
+            let mut comment_id = 0_i64;
+            let mut event_id = 0_i64;
+            for id in 1..=issues {
+                let project_id = (id % 20 + 1) as i64;
+                let status = match id % 4 {
+                    0 => "done",
+                    1 => "backlog",
+                    2 => "in_progress",
+                    _ => "review",
+                };
+                issue.execute((id as i64, project_id,
+                    format!("Synthetic issue {id}"),
+                    format!("Issue {id} description. {}", "Synthetic product description text. ".repeat(12)),
+                    status)).unwrap();
+                field.execute((id as i64, "priority", format!("P{}", id % 4))).unwrap();
+                field.execute((id as i64, "estimate", (id % 13).to_string())).unwrap();
+                if id % 3 == 0 {
+                    comment_id += 1;
+                    comment.execute((comment_id, id as i64,
+                        format!("Comment for issue {id}. {}", "Synthetic discussion text. ".repeat(8)),
+                        id as i64)).unwrap();
+                }
+                for ordinal in 0..2 {
+                    event_id += 1;
+                    event.execute((event_id, id as i64, "status_changed",
+                        if ordinal == 0 { "backlog" } else { "in_progress" },
+                        if ordinal == 0 { "in_progress" } else { status },
+                        id as i64 * 2 + ordinal)).unwrap();
+                }
+            }
             let mut object = transaction.prepare("INSERT INTO probe_objects (id) VALUES (?)").unwrap();
             let mut reference = transaction.prepare("INSERT INTO probe_refs (issue, object) VALUES (?, ?)").unwrap();
             for id in 1..=objects {
@@ -176,6 +232,20 @@ pub async fn measure(issues: usize, objects: usize, writes: usize) -> Value {
             .query_row("SELECT count(*) FROM probe_issues", [], |row| row.get(0))
             .unwrap();
         assert_eq!(count, issues as i64);
+        let field_values: i64 = connection
+            .query_row("SELECT count(*) FROM probe_field_values", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(field_values, (issues * 2) as i64);
+        let comments: i64 = connection
+            .query_row("SELECT count(*) FROM probe_comments", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(comments, (issues / 3) as i64);
+        let events: i64 = connection
+            .query_row("SELECT count(*) FROM probe_events", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(events, (issues * 2) as i64);
         let revisions: i64 = connection
             .query_row("SELECT sum(revision) FROM probe_issues", [], |row| {
                 row.get(0)
@@ -204,8 +274,9 @@ pub async fn measure(issues: usize, objects: usize, writes: usize) -> Value {
     let p95 = latencies
         .get((latencies.len() * 95).div_ceil(100).saturating_sub(1))
         .copied();
-    let report = json!({"workload":"synthetic SQLite snapshot/pins, NOT product capacity",
-        "issues":issues,"objects":objects,"commits_while_reader_held":writes,
+    let report = json!({"workload":"synthetic SQLite snapshot/pins with projects, custom fields, comments and history; NOT product capacity",
+        "issues":issues,"projects":20,"field_values":issues * 2,"comments":issues / 3,
+        "events":issues * 2,"objects":objects,"commits_while_reader_held":writes,
         "source_db_bytes":source_bytes,"wal_baseline_bytes":baseline_wal,"wal_held_bytes":held_wal,
         "snapshot_db_bytes":snapshot_bytes,
         "wal_after_reader_release_bytes":released_wal,"held_checkpoint":{"busy":checkpoint.0,
