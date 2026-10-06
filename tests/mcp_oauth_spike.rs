@@ -1,5 +1,7 @@
 //! Local protocol fake, NOT a production OAuth server or browser consent UI.
 //! Maintained oauth2 client drives S256/resource requests against real SQLite.
+#[path = "support/metadata_fetch.rs"]
+mod metadata_fetch;
 use axum::{
     Form, Json, Router,
     extract::{DefaultBodyLimit, Query, Request, State},
@@ -1051,6 +1053,196 @@ fn cimd_document() -> Vec<u8> {
     let mut document = registration();
     document["client_id"] = json!(CIMD_ID);
     serde_json::to_vec(&document).unwrap()
+}
+
+#[test]
+fn metadata_resolution_requires_one_approved_public_ipv4_and_never_accepts_mixed_or_special_use_answers()
+ {
+    use std::net::IpAddr;
+    let public: IpAddr = "93.184.215.14".parse().unwrap();
+    assert!(metadata_fetch::PinnedTarget::approve(CIMD_ID, &[public], &[public]).is_ok());
+    assert!(metadata_fetch::PinnedTarget::approve(CIMD_ID, &[], &[public]).is_err());
+    assert!(metadata_fetch::PinnedTarget::approve(CIMD_ID, &[public], &[]).is_err());
+    for address in [
+        "0.0.0.0",
+        "10.1.2.3",
+        "100.64.0.1",
+        "127.0.0.1",
+        "169.254.169.254",
+        "172.16.0.1",
+        "192.168.1.1",
+        "192.0.0.9",
+        "192.0.2.1",
+        "192.88.99.1",
+        "198.18.0.1",
+        "198.51.100.1",
+        "203.0.113.1",
+        "224.0.0.1",
+        "255.255.255.255",
+        "::1",
+        "::ffff:127.0.0.1",
+        "2001:4860:4860::8888",
+    ] {
+        let ip = address.parse().unwrap();
+        assert!(metadata_fetch::PinnedTarget::approve(CIMD_ID, &[ip], &[ip]).is_err());
+        assert!(
+            metadata_fetch::PinnedTarget::approve(CIMD_ID, &[public, ip], &[public, ip]).is_err()
+        );
+    }
+    for url in [
+        "http://client.example.invalid/oauth/client-metadata.json",
+        "https://client.example.invalid/other",
+        "https://user@client.example.invalid/oauth/client-metadata.json",
+        "https://client.example.invalid:444/oauth/client-metadata.json",
+        "https://client.example.invalid/oauth/client-metadata.json?x=1",
+    ] {
+        assert!(metadata_fetch::PinnedTarget::approve(url, &[public], &[public]).is_err());
+    }
+    assert!(metadata_fetch::PinnedTarget::laboratory("10.0.0.1:443".parse().unwrap()).is_err());
+    assert!(metadata_fetch::PinnedTarget::laboratory("127.0.0.1:0".parse().unwrap()).is_err());
+}
+
+#[tokio::test]
+async fn pinned_https_metadata_with_verified_artificial_ca_feeds_import_but_never_consent() {
+    let fixture = Fixture::new().await;
+    let body = cimd_document();
+    let server = metadata_fetch::laboratory::Server::start(
+        metadata_fetch::laboratory::json_response(&body),
+        "client.example.invalid",
+        Duration::ZERO,
+    );
+    let fetched = metadata_fetch::fetch(
+        metadata_fetch::PinnedTarget::laboratory(server.address).unwrap(),
+        &server.root,
+    )
+    .await
+    .unwrap();
+    assert_eq!(fetched, body);
+    assert_eq!(server.requests.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(
+        import_cimd_snapshot(&fixture.server.db, CIMD_ID, &fetched).await,
+        Ok(())
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM oauth_consent")
+            .fetch_one(fixture.server.db.pool())
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM oauth_tokens")
+            .fetch_one(fixture.server.db.pool())
+            .await
+            .unwrap(),
+        0
+    );
+}
+
+#[tokio::test]
+async fn metadata_https_rejects_wrong_hostname_and_untrusted_ca_before_http_request() {
+    let wrong_host = metadata_fetch::laboratory::Server::start(
+        metadata_fetch::laboratory::json_response(b"{}"),
+        "other.example.invalid",
+        Duration::ZERO,
+    );
+    assert_eq!(
+        metadata_fetch::fetch(
+            metadata_fetch::PinnedTarget::laboratory(wrong_host.address).unwrap(),
+            &wrong_host.root
+        )
+        .await,
+        Err(metadata_fetch::FetchError::Transport)
+    );
+    assert_eq!(
+        wrong_host
+            .requests
+            .load(std::sync::atomic::Ordering::SeqCst),
+        0
+    );
+    let untrusted = metadata_fetch::laboratory::Server::start(
+        metadata_fetch::laboratory::json_response(b"{}"),
+        "client.example.invalid",
+        Duration::ZERO,
+    );
+    assert_eq!(
+        metadata_fetch::fetch(
+            metadata_fetch::PinnedTarget::laboratory(untrusted.address).unwrap(),
+            &wrong_host.root
+        )
+        .await,
+        Err(metadata_fetch::FetchError::Transport)
+    );
+    assert_eq!(
+        untrusted.requests.load(std::sync::atomic::Ordering::SeqCst),
+        0
+    );
+    assert_eq!(
+        metadata_fetch::fetch(
+            metadata_fetch::PinnedTarget::laboratory(untrusted.address).unwrap(),
+            b"not a CA"
+        )
+        .await,
+        Err(metadata_fetch::FetchError::Policy)
+    );
+}
+
+#[tokio::test]
+async fn metadata_transport_rejects_redirects_non_json_encoded_and_oversized_responses_without_retry()
+ {
+    use metadata_fetch::{FetchError, laboratory::Server};
+    let mut chunked=b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n2001\r\n".to_vec();
+    chunked.extend(vec![b'x'; 8193]);
+    chunked.extend_from_slice(b"\r\n0\r\n\r\n");
+    for (response,error) in [
+        (format!("HTTP/1.1 302 Found\r\nLocation: {CIMD_ID}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").into_bytes(),FetchError::Response),
+        (b"HTTP/1.1 503 Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec(),FetchError::Response),
+        (b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}".to_vec(),FetchError::Response),
+        (b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Encoding: gzip\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}".to_vec(),FetchError::Response),
+        (metadata_fetch::laboratory::json_response(&vec![b'x';8193]),FetchError::TooLarge),
+        (chunked,FetchError::TooLarge),
+    ] {
+        let server=Server::start(response,"client.example.invalid",Duration::ZERO);assert_eq!(metadata_fetch::fetch(metadata_fetch::PinnedTarget::laboratory(server.address).unwrap(),&server.root).await,Err(error));assert_eq!(server.requests.load(std::sync::atomic::Ordering::SeqCst),1);
+    }
+}
+
+#[tokio::test]
+async fn metadata_timeout_and_truncated_body_never_return_partial_bytes_or_retry() {
+    for (response,delay) in [(metadata_fetch::laboratory::json_response(b"{}"),Duration::from_millis(700)),(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 20\r\nConnection: close\r\n\r\n{}".to_vec(),Duration::ZERO)] {
+        let server=metadata_fetch::laboratory::Server::start(response,"client.example.invalid",delay);assert_eq!(metadata_fetch::fetch(metadata_fetch::PinnedTarget::laboratory(server.address).unwrap(),&server.root).await,Err(metadata_fetch::FetchError::Transport));assert_eq!(server.requests.load(std::sync::atomic::Ordering::SeqCst),1);
+    }
+}
+
+#[tokio::test]
+async fn metadata_transport_success_cannot_bypass_document_id_validation_or_write_invalid_snapshot()
+{
+    let fixture = Fixture::new().await;
+    let mut document: Value = serde_json::from_slice(&cimd_document()).unwrap();
+    document["client_id"] = json!("https://other.example.invalid/client.json");
+    let body = serde_json::to_vec(&document).unwrap();
+    let server = metadata_fetch::laboratory::Server::start(
+        metadata_fetch::laboratory::json_response(&body),
+        "client.example.invalid",
+        Duration::ZERO,
+    );
+    let fetched = metadata_fetch::fetch(
+        metadata_fetch::PinnedTarget::laboratory(server.address).unwrap(),
+        &server.root,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        import_cimd_snapshot(&fixture.server.db, CIMD_ID, &fetched).await,
+        Err(SnapshotError::Invalid)
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM oauth_clients WHERE id=?")
+            .bind(CIMD_ID)
+            .fetch_one(fixture.server.db.pool())
+            .await
+            .unwrap(),
+        0
+    );
 }
 
 #[tokio::test]

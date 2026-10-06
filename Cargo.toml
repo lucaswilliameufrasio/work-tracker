@@ -31,7 +31,7 @@ base64 = "=0.22.1"
 openssl = "=0.10.81"
 time = { version = "=0.3.55", features = ["parsing"] }
 p256 = { version = "=0.14.0", default-features = false, features = ["ecdsa", "pkcs8", "std"] }
-reqwest = { version = "=0.13.5", default-features = false, features = ["json"] }
+reqwest = { version = "=0.13.5", default-features = false, features = ["json", "rustls"] }
 rusqlite = { version = "=0.39.0", features = ["backup", "bundled"] }
 tempfile = "3.27.0"
 standardwebhooks = "=1.0.1"

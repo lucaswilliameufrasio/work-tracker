@@ -93,6 +93,8 @@ A fixture também admite o path explícito `/callback/fixture-server-id`, sem wi
 
 Snapshots locais de metadata CIMD pré-aprovada são validados por URL/client ID e pelo mesmo perfil público de redirects/grants. Importação create-only persiste cliente e digest atomicamente, sem consentimento implícito, sobrescrita ou reativação. Isso é pré-registro experimental a partir de bytes locais, não fetch HTTPS ou suporte CIMD dinâmico anunciado.
 
+`tests/support/metadata_fetch.rs` exercita reqwest com TLS verificado, destino pinado, sem proxy/redirect/retry e corpo/tempo limitados. CA e servidor são artificiais em loopback; o caminho de política exige URL/IP aprovados e rejeita respostas de resolução mistas/especiais. Não é resolvedor DNS/SSRF de produto, cache remoto ou aceite de documentos/clientes reais.
+
 Endpoints públicos deste spike: `/health/live` e `/health/ready`. Readiness retorna apenas `ready`/`not_ready`; não expõe caminhos, versão, usuários ou conteúdo.
 
 ## Plano e distribuição
