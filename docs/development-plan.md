@@ -1171,6 +1171,14 @@ Conclusão: requisitos e fixtures locais de callback/code-exchange/verificação
 
 Criado `docs/adr/0001-authorization-server-selection.md`, status **Deferred — product/architecture decision required**. Registra que nenhuma candidata avaliada foi aprovada, mantém o OAuth de produção/CIMD fora do escopo imediato e oferece três caminhos explícitos para uma decisão futura; reafirma que autorização de recursos continua na aplicação Puxiri e que scopes/claims não substituem membership. ADR referencia evidências e limites em vez de promover o probe RustAuth a decisão. A checkbox coletiva de ADRs da Fase 0 segue aberta, assim como MCP/OAuth, smoke real e o plano completo; este registro não é a escolha da arquitetura.
 
+#### Evidências da quadragésima terceira fatia — calibração experimental de Argon2id
+
+Benchmark descartável em `/tmp/opencode/argon2-benchmark`, usando `argon2` 0.5.3 `hash_password_into`, senha/salt artificiais fixos, release build e 50 hashes por combinação. Host de execução AMD Ryzen 9 7900; `systemd-run --user --scope -p MemoryMax=1G -p CPUQuota=100%` aplicou cgroup confirmado pelo próprio processo como `cpu.max=100000 100000` e `memory.max=1073741824`; toolchain `rustc 1.98.1`. Isso prova apenas a carga sintética sob uma CPU quota e um limite de memória nesta máquina, não o custo/latência do hardware alvo 1 vCPU nem do app completo. Sem dependência, configuração ou hash de produto alterados.
+
+Na repetição formatada final, `m=19 MiB,t=2,p=1`: mediana 15.92 ms/p95 21.81 ms. `m=19 MiB,t=3,p=1`: 18.98/21.41 ms; `m=32 MiB,t=2,p=1`: 23.46/36.32 ms; `m=64 MiB,t=3,p=1`: 73.94/96.08 ms. Com oito hashes 64 MiB/t=3 paralelos, batch levou 1.06 s e VmHWM de todo o processo foi 545,060 kB (oito lanes × 64 MiB + runtime), sob cgroup de 1 GiB. Isso ilustra custo de concorrência, não define rate limit apropriado. Benchmark não teve warmup explícito e não inclui fluxo PHC completo/verify/HTTP/logging; CPU virtualizada/host compartilhado ainda pode influenciar p95.
+
+Nenhum parâmetro foi selecionado: Argon2id precisa passar calibração no hardware 1 vCPU/1 GB real ou ambiente controlado representativo, incluir verify/PHC e concorrência/rate limits/cold-start, e escolher margem que preserve memória para app/SQLite. Hashes sequenciais não provam resistência/segurança global nem throughput; oito hashes 64 MiB usaram ~52% do limite de memória do processo antes de somar outros serviços (que também devem caber no cgroup quando medidos juntos). Checkbox de recursos da Fase 0 permanece aberta; backup/bundle realista e carga integrada de produto seguem pendentes.
+
 ### Fase 1 — Fundação e identidade
 
 - [ ] Migrations, usuários/organização/settings e infraestrutura básica de outbox/jobs/leases necessária aos próximos fluxos.
