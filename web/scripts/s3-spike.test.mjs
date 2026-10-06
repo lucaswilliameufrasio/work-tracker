@@ -221,6 +221,183 @@ test('private bucket rejects anonymous reads/listing; signed access works for fo
   }
 });
 
+test('destination migration is create-only, checksum verified, retryable, and retains the source', async () => {
+  const destinationBucket = `puxiri-migration-${randomUUID()}`;
+  await client.send(new CreateBucketCommand({ Bucket: destinationBucket }));
+  const fixture = [
+    {
+      key: `images/objects/${randomUUID()}`,
+      body: Buffer.alloc(5 * 1024 * 1024, 0x5a),
+    },
+    {
+      key: `avatars/objects/${randomUUID()}`,
+      body: Buffer.alloc(2 * 1024 * 1024, 0xa5),
+    },
+  ];
+  const conflictedKey = `images/objects/${randomUUID()}`;
+  const conflictedSource = Buffer.from(
+    'preserve source when destination conflicts',
+  );
+  const conflictingTarget = Buffer.from(
+    'never overwrite this existing destination',
+  );
+  const optOutKey = `avatars/objects/${randomUUID()}`;
+  const optOutBody = Buffer.from('do not migrate when the operator opts out');
+  const digest = (body) => createHash('sha256').update(body).digest('base64');
+
+  for (const { key, body } of fixture) {
+    await client.send(
+      new PutObjectCommand({
+        Bucket: bucket,
+        Key: key,
+        Body: body,
+        ContentLength: body.length,
+        ChecksumSHA256: digest(body),
+        IfNoneMatch: '*',
+      }),
+    );
+  }
+  await client.send(
+    new PutObjectCommand({
+      Bucket: bucket,
+      Key: conflictedKey,
+      Body: conflictedSource,
+      ContentLength: conflictedSource.length,
+      ChecksumSHA256: digest(conflictedSource),
+      IfNoneMatch: '*',
+    }),
+  );
+  await client.send(
+    new PutObjectCommand({
+      Bucket: destinationBucket,
+      Key: conflictedKey,
+      Body: conflictingTarget,
+      ContentLength: conflictingTarget.length,
+      ChecksumSHA256: digest(conflictingTarget),
+      IfNoneMatch: '*',
+    }),
+  );
+  await client.send(
+    new PutObjectCommand({
+      Bucket: bucket,
+      Key: optOutKey,
+      Body: optOutBody,
+      ContentLength: optOutBody.length,
+      ChecksumSHA256: digest(optOutBody),
+      IfNoneMatch: '*',
+    }),
+  );
+
+  async function readBytes(objectBucket, objectKey) {
+    const response = await client.send(
+      new GetObjectCommand({ Bucket: objectBucket, Key: objectKey }),
+    );
+    const chunks = [];
+    for await (const chunk of response.Body) chunks.push(Buffer.from(chunk));
+    return Buffer.concat(chunks);
+  }
+
+  async function verifyDestination(key, expectedBytes) {
+    assert.equal(await destinationMatches(key, expectedBytes), true);
+  }
+
+  async function destinationMatches(key, expectedBytes) {
+    let head;
+    try {
+      head = await client.send(
+        new HeadObjectCommand({
+          Bucket: destinationBucket,
+          Key: key,
+          ChecksumMode: 'ENABLED',
+        }),
+      );
+    } catch (error) {
+      if (error.$metadata?.httpStatusCode === 404) return false;
+      throw error;
+    }
+    if (
+      head.ContentLength !== expectedBytes.length ||
+      head.ChecksumSHA256 !== digest(expectedBytes)
+    )
+      return false;
+    return (await readBytes(destinationBucket, key)).equals(expectedBytes);
+  }
+
+  async function migrate(key, expectedBytes) {
+    const sourceHead = await client.send(
+      new HeadObjectCommand({
+        Bucket: bucket,
+        Key: key,
+        ChecksumMode: 'ENABLED',
+      }),
+    );
+    assert.equal(sourceHead.ContentLength, expectedBytes.length);
+    assert.equal(sourceHead.ChecksumSHA256, digest(expectedBytes));
+
+    let sourceBody;
+    try {
+      const source = await client.send(
+        new GetObjectCommand({ Bucket: bucket, Key: key }),
+      );
+      sourceBody = source.Body;
+      await client.send(
+        new PutObjectCommand({
+          Bucket: destinationBucket,
+          Key: key,
+          Body: sourceBody,
+          ContentLength: sourceHead.ContentLength,
+          ChecksumSHA256: sourceHead.ChecksumSHA256,
+          IfNoneMatch: '*',
+        }),
+      );
+    } catch (error) {
+      // A failed create-only PUT can leave the source response unread when the
+      // destination already exists. Close that HTTP body before handling 412.
+      sourceBody?.destroy?.();
+      if (error.$metadata?.httpStatusCode !== 412) throw error;
+      // A retry may find the exact object from a prior successful PUT; only
+      // adopt it after readback. Different bytes remain an explicit conflict.
+      if (!(await destinationMatches(key, expectedBytes))) {
+        const conflict = new Error(
+          'migration destination conflicts with source',
+        );
+        conflict.code = 'DESTINATION_CONFLICT';
+        throw conflict;
+      }
+      return 'already-verified';
+    }
+
+    await verifyDestination(key, expectedBytes);
+    return 'copied-and-verified';
+  }
+
+  for (const { key, body } of fixture) {
+    assert.equal(await migrate(key, body), 'copied-and-verified');
+    assert.equal(await migrate(key, body), 'already-verified');
+    assert.deepEqual(await readBytes(bucket, key), body);
+  }
+
+  await assert.rejects(
+    migrate(conflictedKey, conflictedSource),
+    (error) => error.code === 'DESTINATION_CONFLICT',
+  );
+  assert.deepEqual(await readBytes(bucket, conflictedKey), conflictedSource);
+  assert.deepEqual(
+    await readBytes(destinationBucket, conflictedKey),
+    conflictingTarget,
+  );
+
+  // Explicit no-migrate choice keeps the old object available and creates no
+  // destination copy; this test has no product metadata/cutover implementation.
+  assert.deepEqual(await readBytes(bucket, optOutKey), optOutBody);
+  await assert.rejects(
+    client.send(
+      new HeadObjectCommand({ Bucket: destinationBucket, Key: optOutKey }),
+    ),
+    (error) => error.$metadata?.httpStatusCode === 404,
+  );
+});
+
 test('expired or key-tampered URLs are rejected by the real destination', async () => {
   const key = `images/${randomUUID()}`;
   const body = Buffer.from('expiry fixture');
