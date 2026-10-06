@@ -94,6 +94,71 @@ struct Authorize {
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct Registration {
+    client_name: String,
+    redirect_uris: Vec<String>,
+    grant_types: Vec<String>,
+    response_types: Vec<String>,
+    token_endpoint_auth_method: String,
+}
+async fn register(
+    State(server): State<Arc<Server>>,
+    body: Result<Json<Registration>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    let Ok(Json(request)) = body else {
+        return error(StatusCode::BAD_REQUEST, "invalid_client_metadata");
+    };
+    // Explicit exact allowlist for this fixture; never fetch submitted URLs.
+    if request.client_name.trim().is_empty()
+        || request.client_name.len() > 120
+        || request.client_name.chars().any(char::is_control)
+        || request.redirect_uris != [REDIRECT]
+        || request.grant_types != ["authorization_code", "refresh_token"]
+        || request.response_types != ["code"]
+        || request.token_endpoint_auth_method != "none"
+    {
+        return error(StatusCode::BAD_REQUEST, "invalid_client_metadata");
+    }
+    let mut tx = match server.db.pool().begin_with("BEGIN IMMEDIATE").await {
+        Ok(tx) => tx,
+        Err(_) => return error(StatusCode::SERVICE_UNAVAILABLE, "temporarily_unavailable"),
+    };
+    let policy: Result<(i64, i64), _> =
+        sqlx::query_as("SELECT enabled,max_clients FROM oauth_registration_policy")
+            .fetch_one(&mut *tx)
+            .await;
+    let (enabled, limit) = match policy {
+        Ok(policy) => policy,
+        Err(_) => return error(StatusCode::SERVICE_UNAVAILABLE, "temporarily_unavailable"),
+    };
+    if enabled != 1 {
+        return error(StatusCode::FORBIDDEN, "registration_disabled");
+    }
+    let count: Result<i64, _> =
+        sqlx::query_scalar("SELECT count(*) FROM oauth_clients WHERE dynamic=1")
+            .fetch_one(&mut *tx)
+            .await;
+    match count {
+        Ok(count) if count < limit => {}
+        Ok(_) => return error(StatusCode::FORBIDDEN, "registration_limit"),
+        Err(_) => return error(StatusCode::SERVICE_UNAVAILABLE, "temporarily_unavailable"),
+    };
+    let id = CsrfToken::new_random().secret().clone();
+    if sqlx::query("INSERT INTO oauth_clients VALUES(?,?,?,1,1)")
+        .bind(&id)
+        .bind(REDIRECT)
+        .bind(&request.client_name)
+        .execute(&mut *tx)
+        .await
+        .is_err()
+        || tx.commit().await.is_err()
+    {
+        return error(StatusCode::SERVICE_UNAVAILABLE, "temporarily_unavailable");
+    }
+    (StatusCode::CREATED,[("cache-control","no-store")],Json(json!({"client_id":id,"client_id_issued_at":NOW,"client_name":request.client_name,"redirect_uris":request.redirect_uris,"grant_types":request.grant_types,"response_types":request.response_types,"token_endpoint_auth_method":"none"}))).into_response()
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Exchange {
     client_id: String,
     redirect_uri: String,
@@ -204,6 +269,7 @@ async fn insert_pair(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     consent: i64,
     family: &str,
+    client: &str,
     resource: &str,
     scope: &str,
     family_expires: i64,
@@ -224,7 +290,7 @@ async fn insert_pair(
     sqlx::query("INSERT INTO oauth_refresh VALUES(?,?,?,?,?,?,0)")
         .bind(sha256(credentials.refresh.as_bytes()).to_vec())
         .bind(family)
-        .bind(CLIENT)
+        .bind(client)
         .bind(resource)
         .bind(scope)
         .bind(family_expires)
@@ -268,7 +334,7 @@ async fn rotate(
         Err(_) => return error(StatusCode::SERVICE_UNAVAILABLE, "temporarily_unavailable"),
     };
     let digest = sha256(refresh.as_bytes()).to_vec();
-    let row:Result<Option<RefreshRow>,_>=sqlx::query_as("SELECT r.family,r.client,r.resource,r.scope,r.expires,r.used,f.consent,f.revoked,f.expires AS family_expires,c.active,c.client AS consent_client,c.resource AS consent_resource,c.scope AS consent_scope FROM oauth_refresh r JOIN oauth_families f ON f.id=r.family JOIN oauth_consent c ON c.id=f.consent WHERE r.digest=?")
+    let row:Result<Option<RefreshRow>,_>=sqlx::query_as("SELECT r.family,r.client,r.resource,r.scope,r.expires,r.used,f.consent,f.revoked,f.expires AS family_expires,c.active,c.client AS consent_client,c.resource AS consent_resource,c.scope AS consent_scope FROM oauth_refresh r JOIN oauth_families f ON f.id=r.family JOIN oauth_consent c ON c.id=f.consent JOIN oauth_clients p ON p.id=r.client AND p.active=1 WHERE r.digest=? AND f.client=r.client")
         .bind(&digest).fetch_optional(&mut *tx).await;
     let row = match row {
         Ok(Some(row)) => row,
@@ -277,7 +343,6 @@ async fn rotate(
     };
     // Wrong client/resource cannot use a stolen token to revoke its family.
     if row.client != client
-        || client != CLIENT
         || row.resource != resource
         || resource != server.resource
         || row.consent_client != client
@@ -317,6 +382,7 @@ async fn rotate(
         &mut tx,
         row.consent,
         &row.family,
+        &row.client,
         &row.resource,
         &row.scope,
         row.family_expires,
@@ -348,8 +414,8 @@ async fn authorize(
     if cookies.len() != 1 || cookies[0].to_str().ok() != Some(BROWSER) {
         return error(StatusCode::UNAUTHORIZED, "login_required");
     }
-    if request.client_id != CLIENT
-        || request.redirect_uri != REDIRECT
+    if request.client_id.is_empty()
+        || request.client_id.len() > 256
         || request.response_type != "code"
         || request.scope != SCOPE
         || request.resource != server.resource
@@ -366,10 +432,20 @@ async fn authorize(
         Ok(tx) => tx,
         Err(_) => return error(StatusCode::SERVICE_UNAVAILABLE, "temporarily_unavailable"),
     };
+    let registered: Result<Option<String>, _> =
+        sqlx::query_scalar("SELECT redirect FROM oauth_clients WHERE id=? AND active=1")
+            .bind(&request.client_id)
+            .fetch_optional(&mut *tx)
+            .await;
+    match registered {
+        Ok(Some(redirect)) if redirect == request.redirect_uri => {}
+        Ok(_) => return error(StatusCode::BAD_REQUEST, "invalid_client"),
+        Err(_) => return error(StatusCode::SERVICE_UNAVAILABLE, "temporarily_unavailable"),
+    };
     let consent: Result<Option<i64>, _> = sqlx::query_scalar(
         "SELECT id FROM oauth_consent WHERE client=? AND resource=? AND scope=? AND active=1",
     )
-    .bind(CLIENT)
+    .bind(&request.client_id)
     .bind(&server.resource)
     .bind(SCOPE)
     .fetch_optional(&mut *tx)
@@ -382,8 +458,8 @@ async fn authorize(
     let code = CsrfToken::new_random().secret().clone();
     if sqlx::query("INSERT INTO oauth_codes VALUES(?,?,?,?,?,?,?,?)")
         .bind(sha256(code.as_bytes()).to_vec())
-        .bind(CLIENT)
-        .bind(REDIRECT)
+        .bind(&request.client_id)
+        .bind(&request.redirect_uri)
         .bind(&server.resource)
         .bind(request.code_challenge)
         .bind(SCOPE)
@@ -396,7 +472,7 @@ async fn authorize(
     {
         return error(StatusCode::SERVICE_UNAVAILABLE, "temporarily_unavailable");
     }
-    let mut target = reqwest::Url::parse(REDIRECT).unwrap();
+    let mut target = reqwest::Url::parse(&request.redirect_uri).unwrap();
     target
         .query_pairs_mut()
         .append_pair("code", &code)
@@ -432,7 +508,7 @@ async fn exchange(
         Err(_) => return error(StatusCode::SERVICE_UNAVAILABLE, "temporarily_unavailable"),
     };
     let digest = sha256(request.code.as_bytes()).to_vec();
-    let row:Result<Option<CodeRow>,_>=sqlx::query_as("SELECT c.client,c.redirect,c.resource,c.challenge,c.scope,c.expires,c.consent FROM oauth_codes c JOIN oauth_consent g ON g.id=c.consent WHERE c.digest=? AND g.active=1 AND g.client=c.client AND g.resource=c.resource AND g.scope=c.scope")
+    let row:Result<Option<CodeRow>,_>=sqlx::query_as("SELECT c.client,c.redirect,c.resource,c.challenge,c.scope,c.expires,c.consent FROM oauth_codes c JOIN oauth_consent g ON g.id=c.consent JOIN oauth_clients p ON p.id=c.client AND p.active=1 AND p.redirect=c.redirect WHERE c.digest=? AND g.active=1 AND g.client=c.client AND g.resource=c.resource AND g.scope=c.scope")
         .bind(&digest).fetch_optional(&mut *tx).await;
     let (client, redirect, resource, challenge, scope, expires, consent) = match row {
         Ok(Some(row)) => row,
@@ -456,21 +532,31 @@ async fn exchange(
         .execute(&mut *tx)
         .await
         .is_err()
-        || sqlx::query("INSERT INTO oauth_families VALUES(?,?,?,0)")
+        || sqlx::query("INSERT INTO oauth_families VALUES(?,?,?,0,?)")
             .bind(&family)
             .bind(consent)
             .bind(NOW + 3600)
+            .bind(&client)
             .execute(&mut *tx)
             .await
             .is_err()
     {
         return error(StatusCode::SERVICE_UNAVAILABLE, "temporarily_unavailable");
     }
-    let credentials =
-        match insert_pair(&mut tx, consent, &family, &resource, &scope, NOW + 3600).await {
-            Ok(credentials) => credentials,
-            Err(_) => return error(StatusCode::SERVICE_UNAVAILABLE, "temporarily_unavailable"),
-        };
+    let credentials = match insert_pair(
+        &mut tx,
+        consent,
+        &family,
+        &client,
+        &resource,
+        &scope,
+        NOW + 3600,
+    )
+    .await
+    {
+        Ok(credentials) => credentials,
+        Err(_) => return error(StatusCode::SERVICE_UNAVAILABLE, "temporarily_unavailable"),
+    };
     if tx.commit().await.is_err() {
         return error(StatusCode::SERVICE_UNAVAILABLE, "temporarily_unavailable");
     }
@@ -512,7 +598,7 @@ async fn token_gate(State(server): State<Arc<Server>>, request: Request, next: N
     {
         return challenge(&server, StatusCode::UNAUTHORIZED, "invalid_token");
     }
-    let row:Result<Option<TokenRow>,_>=sqlx::query_as("SELECT t.resource,t.scope,t.expires,c.active,c.resource,c.scope,c.client,f.revoked,f.expires FROM oauth_tokens t JOIN oauth_consent c ON c.id=t.consent JOIN oauth_families f ON f.id=t.family WHERE t.digest=?")
+    let row:Result<Option<TokenRow>,_>=sqlx::query_as("SELECT t.resource,t.scope,t.expires,c.active,c.resource,c.scope,c.client,f.revoked,f.expires FROM oauth_tokens t JOIN oauth_consent c ON c.id=t.consent JOIN oauth_families f ON f.id=t.family JOIN oauth_clients p ON p.id=c.client AND p.active=1 WHERE t.digest=? AND f.client=c.client")
         .bind(sha256(token.as_bytes()).to_vec()).fetch_optional(server.db.pool()).await;
     let (
         resource,
@@ -531,7 +617,7 @@ async fn token_gate(State(server): State<Arc<Server>>, request: Request, next: N
     };
     if resource != server.resource
         || consent_resource != resource
-        || consent_client != CLIENT
+        || consent_client.is_empty()
         || expires <= NOW
         || active != 1
         || family_revoked != 0
@@ -560,8 +646,15 @@ impl Fixture {
     async fn new() -> Self {
         let directory = TempDir::new().unwrap();
         let db = Arc::new(Database::open(directory.path()).await.unwrap());
-        sqlx::raw_sql("CREATE TABLE oauth_consent(id INTEGER PRIMARY KEY,client TEXT,resource TEXT,scope TEXT,active INTEGER); CREATE TABLE oauth_codes(digest BLOB PRIMARY KEY,client TEXT,redirect TEXT,resource TEXT,challenge TEXT,scope TEXT,expires INTEGER,consent INTEGER REFERENCES oauth_consent(id)); CREATE TABLE oauth_families(id TEXT PRIMARY KEY,consent INTEGER REFERENCES oauth_consent(id),expires INTEGER,revoked INTEGER); CREATE TABLE oauth_tokens(digest BLOB PRIMARY KEY,consent INTEGER REFERENCES oauth_consent(id),resource TEXT,scope TEXT,expires INTEGER,family TEXT REFERENCES oauth_families(id)); CREATE TABLE oauth_refresh(digest BLOB PRIMARY KEY,family TEXT REFERENCES oauth_families(id),client TEXT,resource TEXT,scope TEXT,expires INTEGER,used INTEGER);")
+        sqlx::raw_sql("CREATE TABLE oauth_consent(id INTEGER PRIMARY KEY,client TEXT,resource TEXT,scope TEXT,active INTEGER); CREATE TABLE oauth_codes(digest BLOB PRIMARY KEY,client TEXT,redirect TEXT,resource TEXT,challenge TEXT,scope TEXT,expires INTEGER,consent INTEGER REFERENCES oauth_consent(id)); CREATE TABLE oauth_families(id TEXT PRIMARY KEY,consent INTEGER REFERENCES oauth_consent(id),expires INTEGER,revoked INTEGER,client TEXT NOT NULL); CREATE TABLE oauth_tokens(digest BLOB PRIMARY KEY,consent INTEGER REFERENCES oauth_consent(id),resource TEXT,scope TEXT,expires INTEGER,family TEXT REFERENCES oauth_families(id)); CREATE TABLE oauth_refresh(digest BLOB PRIMARY KEY,family TEXT REFERENCES oauth_families(id),client TEXT,resource TEXT,scope TEXT,expires INTEGER,used INTEGER);")
             .execute(db.pool()).await.unwrap();
+        sqlx::raw_sql("CREATE TABLE oauth_clients(id TEXT PRIMARY KEY,redirect TEXT NOT NULL,name TEXT NOT NULL,active INTEGER NOT NULL,dynamic INTEGER NOT NULL); CREATE TABLE oauth_registration_policy(enabled INTEGER NOT NULL,max_clients INTEGER NOT NULL); INSERT INTO oauth_registration_policy VALUES(0,2)").execute(db.pool()).await.unwrap();
+        sqlx::query("INSERT INTO oauth_clients VALUES(?,?,'Preregistered fixture',1,0)")
+            .bind(CLIENT)
+            .bind(REDIRECT)
+            .execute(db.pool())
+            .await
+            .unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
         let server = Arc::new(Server {
@@ -583,9 +676,12 @@ impl Fixture {
         let protected = Router::new()
             .nest_service("/mcp", service)
             .layer(middleware::from_fn_with_state(server.clone(), token_gate));
-        let app=Router::new().route("/authorize",get(authorize)).route("/token",post(token_endpoint))
+        let app=Router::new().route("/authorize",get(authorize)).route("/token",post(token_endpoint)).route("/register",post(register))
             .route("/.well-known/oauth-protected-resource/mcp",get(move ||{let s=resource_metadata.clone();async move {Json(json!({"resource":s.resource,"authorization_servers":[s.base],"scopes_supported":[SCOPE],"bearer_methods_supported":["header"]}))}}))
-            .route("/.well-known/oauth-authorization-server",get(move ||{let s=metadata.clone();async move {Json(json!({"issuer":s.base,"authorization_endpoint":format!("{}/authorize",s.base),"token_endpoint":format!("{}/token",s.base),"response_types_supported":["code"],"grant_types_supported":["authorization_code","refresh_token"],"token_endpoint_auth_methods_supported":["none"],"code_challenge_methods_supported":["S256"],"scopes_supported":[SCOPE]}))}}))
+            .route("/.well-known/oauth-authorization-server",get(move ||{let s=metadata.clone();async move {
+                let mut document=json!({"issuer":s.base,"authorization_endpoint":format!("{}/authorize",s.base),"token_endpoint":format!("{}/token",s.base),"response_types_supported":["code"],"grant_types_supported":["authorization_code","refresh_token"],"token_endpoint_auth_methods_supported":["none"],"code_challenge_methods_supported":["S256"],"scopes_supported":[SCOPE]});
+                if sqlx::query_scalar::<_,i64>("SELECT enabled FROM oauth_registration_policy").fetch_one(s.db.pool()).await.ok()==Some(1) {document["registration_endpoint"]=json!(format!("{}/register",s.base));}Json(document)
+            }}))
             .with_state(server.clone()).merge(protected).layer(DefaultBodyLimit::max(8192));
         let task = tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
@@ -597,8 +693,11 @@ impl Fixture {
         }
     }
     async fn consent(&self) {
-        sqlx::query("INSERT INTO oauth_consent VALUES(1,?,?,?,1)")
-            .bind(CLIENT)
+        self.consent_for(CLIENT).await;
+    }
+    async fn consent_for(&self, client: &str) {
+        sqlx::query("INSERT INTO oauth_consent VALUES(NULL,?,?,?,1)")
+            .bind(client)
             .bind(&self.server.resource)
             .bind(SCOPE)
             .execute(self.server.db.pool())
@@ -606,7 +705,10 @@ impl Fixture {
             .unwrap();
     }
     fn begin(&self) -> (reqwest::Url, CsrfToken, PkceCodeVerifier) {
-        let client = BasicClient::new(ClientId::new(CLIENT.into()))
+        self.begin_for(CLIENT)
+    }
+    fn begin_for(&self, id: &str) -> (reqwest::Url, CsrfToken, PkceCodeVerifier) {
+        let client = BasicClient::new(ClientId::new(id.into()))
             .set_auth_uri(AuthUrl::new(format!("{}/authorize", self.server.base)).unwrap())
             .set_redirect_uri(RedirectUrl::new(REDIRECT.into()).unwrap());
         let (challenge, verifier) = PkceCodeChallenge::new_random_sha256();
@@ -652,11 +754,19 @@ impl Fixture {
         code: String,
         verifier: PkceCodeVerifier,
     ) -> Result<Credentials, ()> {
+        self.redeem_for(CLIENT, code, verifier).await
+    }
+    async fn redeem_for(
+        &self,
+        id: &str,
+        code: String,
+        verifier: PkceCodeVerifier,
+    ) -> Result<Credentials, ()> {
         let endpoint = format!("{}/token", self.server.base);
         let http = Self::http();
         let adapter =
             |request: oauth2::HttpRequest| transport(request, endpoint.clone(), http.clone());
-        let client = BasicClient::new(ClientId::new(CLIENT.into()))
+        let client = BasicClient::new(ClientId::new(id.into()))
             .set_token_uri(TokenUrl::new(endpoint.clone()).unwrap())
             .set_redirect_uri(RedirectUrl::new(REDIRECT.into()).unwrap());
         client
@@ -676,10 +786,13 @@ impl Fixture {
             })
     }
     async fn refresh(&self, raw: &str) -> Result<Credentials, ()> {
+        self.refresh_for(CLIENT, raw).await
+    }
+    async fn refresh_for(&self, id: &str, raw: &str) -> Result<Credentials, ()> {
         let endpoint = format!("{}/token", self.server.base);
         let http = Self::http();
         let adapter = |request| transport(request, endpoint.clone(), http.clone());
-        let client = BasicClient::new(ClientId::new(CLIENT.into()))
+        let client = BasicClient::new(ClientId::new(id.into()))
             .set_token_uri(TokenUrl::new(endpoint.clone()).unwrap());
         client
             .exchange_refresh_token(&RefreshToken::new(raw.into()))
@@ -721,6 +834,253 @@ impl Fixture {
 }
 fn initialize() -> Value {
     json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":VERSION,"capabilities":{},"clientInfo":{"name":"oauth-fixture-not-a-product-client","version":"0"}}})
+}
+fn registration() -> Value {
+    json!({"client_name":"Untrusted fixture name","redirect_uris":[REDIRECT],"grant_types":["authorization_code","refresh_token"],"response_types":["code"],"token_endpoint_auth_method":"none"})
+}
+async fn register_request(fixture: &Fixture, body: Value) -> reqwest::Response {
+    Fixture::http()
+        .post(format!("{}/register", fixture.server.base))
+        .json(&body)
+        .send()
+        .await
+        .unwrap()
+}
+async fn enable_registration(fixture: &Fixture) {
+    sqlx::query("UPDATE oauth_registration_policy SET enabled=1")
+        .execute(fixture.server.db.pool())
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn controlled_registration_never_grants_consent_and_disabled_client_blocks_code_refresh_and_mcp()
+ {
+    let fixture = Fixture::new().await;
+    assert_eq!(
+        register_request(&fixture, registration()).await.status(),
+        403
+    );
+    enable_registration(&fixture).await;
+    let metadata: Value = Fixture::http()
+        .get(format!(
+            "{}/.well-known/oauth-authorization-server",
+            fixture.server.base
+        ))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        metadata["registration_endpoint"],
+        format!("{}/register", fixture.server.base)
+    );
+    assert!(
+        metadata
+            .get("client_id_metadata_document_supported")
+            .is_none()
+    );
+    let response = register_request(&fixture, registration()).await;
+    assert_eq!(response.status(), 201);
+    assert_eq!(response.headers()["cache-control"], "no-store");
+    let document: Value = response.json().await.unwrap();
+    let id = document["client_id"].as_str().unwrap();
+    assert_ne!(id, CLIENT);
+    assert!(document.get("client_secret").is_none());
+    assert!(document.get("access_token").is_none());
+    assert_eq!(document["redirect_uris"], json!([REDIRECT]));
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM oauth_consent")
+            .fetch_one(fixture.server.db.pool())
+            .await
+            .unwrap(),
+        0
+    );
+    let (url, _, _) = fixture.begin_for(id);
+    assert_eq!(
+        Fixture::http()
+            .get(url)
+            .header("cookie", BROWSER)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        403
+    );
+    fixture.consent_for(id).await;
+    let (url, state, verifier) = fixture.begin_for(id);
+    let code = fixture.code(url, state).await;
+    let pair = fixture.redeem_for(id, code, verifier).await.unwrap();
+    let rotated = fixture.refresh_for(id, &pair.refresh).await.unwrap();
+    assert_eq!(
+        fixture
+            .mcp(Some(&rotated.access), initialize())
+            .await
+            .status(),
+        200
+    );
+    sqlx::query("UPDATE oauth_consent SET client=? WHERE client=?")
+        .bind(CLIENT)
+        .bind(id)
+        .execute(fixture.server.db.pool())
+        .await
+        .unwrap();
+    assert_eq!(
+        fixture
+            .mcp(Some(&rotated.access), initialize())
+            .await
+            .status(),
+        401
+    );
+    sqlx::query("UPDATE oauth_consent SET client=? WHERE client=?")
+        .bind(id)
+        .bind(CLIENT)
+        .execute(fixture.server.db.pool())
+        .await
+        .unwrap();
+    sqlx::query("UPDATE oauth_clients SET active=0 WHERE id=?")
+        .bind(id)
+        .execute(fixture.server.db.pool())
+        .await
+        .unwrap();
+    assert_eq!(
+        fixture
+            .mcp(Some(&rotated.access), initialize())
+            .await
+            .status(),
+        401
+    );
+    assert!(fixture.refresh_for(id, &rotated.refresh).await.is_err());
+    let (url, _, _) = fixture.begin_for(id);
+    assert_eq!(
+        Fixture::http()
+            .get(url)
+            .header("cookie", BROWSER)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        400
+    );
+}
+
+#[tokio::test]
+async fn registration_rejects_unapproved_redirects_extra_metadata_and_unsupported_credentials_without_fetching_urls()
+ {
+    let fixture = Fixture::new().await;
+    enable_registration(&fixture).await;
+    for (field, value) in [
+        (
+            "redirect_uris",
+            json!(["https://evil.example.invalid/callback"]),
+        ),
+        ("redirect_uris", json!(["http://127.0.0.1:9/callback"])),
+        ("redirect_uris", json!(["javascript:alert(1)"])),
+        ("redirect_uris", json!([REDIRECT, REDIRECT])),
+        ("grant_types", json!(["client_credentials"])),
+        ("response_types", json!(["token"])),
+        ("token_endpoint_auth_method", json!("client_secret_basic")),
+        ("client_name", json!("")),
+        ("client_uri", json!("http://169.254.169.254/")),
+        ("client_id", json!(CLIENT)),
+    ] {
+        let mut body = registration();
+        body[field] = value;
+        assert_eq!(
+            register_request(&fixture, body).await.status(),
+            400,
+            "accepted {field}"
+        );
+    }
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM oauth_clients WHERE dynamic=1")
+            .fetch_one(fixture.server.db.pool())
+            .await
+            .unwrap(),
+        0
+    );
+}
+
+#[tokio::test]
+async fn registration_quota_is_atomic_under_concurrency_and_turning_policy_off_blocks_new_registrations()
+ {
+    let fixture = Fixture::new().await;
+    enable_registration(&fixture).await;
+    sqlx::query("UPDATE oauth_registration_policy SET max_clients=1")
+        .execute(fixture.server.db.pool())
+        .await
+        .unwrap();
+    let (a, b) = tokio::join!(
+        register_request(&fixture, registration()),
+        register_request(&fixture, registration())
+    );
+    assert!(matches!(
+        (a.status().as_u16(), b.status().as_u16()),
+        (201, 403) | (403, 201)
+    ));
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM oauth_clients WHERE dynamic=1")
+            .fetch_one(fixture.server.db.pool())
+            .await
+            .unwrap(),
+        1
+    );
+    sqlx::query("UPDATE oauth_registration_policy SET enabled=0")
+        .execute(fixture.server.db.pool())
+        .await
+        .unwrap();
+    assert_eq!(
+        register_request(&fixture, registration()).await.status(),
+        403
+    );
+    let metadata: Value = Fixture::http()
+        .get(format!(
+            "{}/.well-known/oauth-authorization-server",
+            fixture.server.base
+        ))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(metadata.get("registration_endpoint").is_none());
+}
+
+#[tokio::test]
+async fn registration_failure_has_no_partial_client_and_unavailable_registry_fails_closed() {
+    let fixture = Fixture::new().await;
+    enable_registration(&fixture).await;
+    sqlx::raw_sql("CREATE TRIGGER fail_registration BEFORE INSERT ON oauth_clients BEGIN SELECT RAISE(ABORT,'fixture registration failure'); END").execute(fixture.server.db.pool()).await.unwrap();
+    assert_eq!(
+        register_request(&fixture, registration()).await.status(),
+        503
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM oauth_clients WHERE dynamic=1")
+            .fetch_one(fixture.server.db.pool())
+            .await
+            .unwrap(),
+        0
+    );
+    sqlx::query("DROP TRIGGER fail_registration")
+        .execute(fixture.server.db.pool())
+        .await
+        .unwrap();
+    assert_eq!(
+        register_request(&fixture, registration()).await.status(),
+        201
+    );
+    sqlx::query("DROP TABLE oauth_clients")
+        .execute(fixture.server.db.pool())
+        .await
+        .unwrap();
+    assert_eq!(
+        register_request(&fixture, registration()).await.status(),
+        503
+    );
 }
 
 #[tokio::test]

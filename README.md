@@ -87,6 +87,8 @@ As quatro projeções agora alimentam uma política **comum nas fixtures** por e
 
 A mesma fixture agora exercita refresh rotation com digests, prazo absoluto da família e detecção estrita de reutilização. Reuse revoga a família inclusive credenciais recém-emitidas em corrida; rollback/reopen e consentimento são testados. Não implementa renovação automática do cliente, política operacional de recuperação ou aceite dos quatro clientes.
 
+Registro de clientes nessa fixture é opcional/desabilitado por padrão, com redirect exato permitido e quota transacional; não concede consentimento. Clientes desativados e troca do client ID do consentimento bloqueiam tokens/codes/refresh. Não é DCR de produto, CIMD ou compatibilidade comprovada com os quatro clientes.
+
 Endpoints públicos deste spike: `/health/live` e `/health/ready`. Readiness retorna apenas `ready`/`not_ready`; não expõe caminhos, versão, usuários ou conteúdo.
 
 ## Plano e distribuição
