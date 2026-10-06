@@ -11,7 +11,7 @@ use axum::{
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use oauth2::{
     AuthUrl, AuthorizationCode, ClientId, CsrfToken, PkceCodeChallenge, PkceCodeVerifier,
-    RedirectUrl, Scope, TokenResponse, TokenUrl, basic::BasicClient,
+    RedirectUrl, RefreshToken, Scope, TokenResponse, TokenUrl, basic::BasicClient,
 };
 use openssl::{memcmp, sha::sha256};
 use puxiri::db::Database;
@@ -101,6 +101,235 @@ struct Exchange {
     code: String,
     resource: String,
     code_verifier: String,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TokenRequest {
+    client_id: String,
+    resource: String,
+    grant_type: String,
+    redirect_uri: Option<String>,
+    code: Option<String>,
+    code_verifier: Option<String>,
+    refresh_token: Option<String>,
+    scope: Option<String>,
+}
+async fn token_endpoint(
+    State(server): State<Arc<Server>>,
+    headers: HeaderMap,
+    Form(request): Form<TokenRequest>,
+) -> Response {
+    if headers.contains_key("authorization") {
+        return error(StatusCode::BAD_REQUEST, "invalid_request");
+    }
+    match request.grant_type.as_str() {
+        "authorization_code" if request.refresh_token.is_none() && request.scope.is_none() => {
+            let (Some(redirect_uri), Some(code), Some(code_verifier)) =
+                (request.redirect_uri, request.code, request.code_verifier)
+            else {
+                return error(StatusCode::BAD_REQUEST, "invalid_request");
+            };
+            exchange(
+                State(server),
+                headers,
+                Form(Exchange {
+                    client_id: request.client_id,
+                    redirect_uri,
+                    code,
+                    code_verifier,
+                    grant_type: request.grant_type,
+                    resource: request.resource,
+                }),
+            )
+            .await
+        }
+        "refresh_token"
+            if request.redirect_uri.is_none()
+                && request.code.is_none()
+                && request.code_verifier.is_none() =>
+        {
+            let Some(refresh) = request.refresh_token else {
+                return error(StatusCode::BAD_REQUEST, "invalid_request");
+            };
+            rotate(
+                server,
+                request.client_id,
+                request.resource,
+                refresh,
+                request.scope,
+            )
+            .await
+        }
+        _ => error(StatusCode::BAD_REQUEST, "invalid_request"),
+    }
+}
+struct Credentials {
+    access: String,
+    refresh: String,
+}
+#[derive(Debug, thiserror::Error)]
+#[error("transport failed")]
+struct Transport;
+async fn transport(
+    request: oauth2::HttpRequest,
+    endpoint: String,
+    http: reqwest::Client,
+) -> Result<oauth2::HttpResponse, Transport> {
+    if request.uri().to_string() != endpoint {
+        return Err(Transport);
+    }
+    let (parts, body) = request.into_parts();
+    let mut response = http
+        .request(parts.method, &endpoint)
+        .headers(parts.headers)
+        .body(body)
+        .send()
+        .await
+        .map_err(|_| Transport)?;
+    let mut builder = oauth2::http::Response::builder().status(response.status());
+    *builder.headers_mut().unwrap() = response.headers().clone();
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|_| Transport)? {
+        if bytes.len() + chunk.len() > 65536 {
+            return Err(Transport);
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    builder.body(bytes).map_err(|_| Transport)
+}
+fn token_response(credentials: Credentials, scope: String, expires: i64) -> Response {
+    ([("cache-control","no-store"),("pragma","no-cache")],Json(json!({"access_token":credentials.access,"refresh_token":credentials.refresh,"token_type":"Bearer","expires_in":expires-NOW,"scope":scope}))).into_response()
+}
+async fn insert_pair(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    consent: i64,
+    family: &str,
+    resource: &str,
+    scope: &str,
+    family_expires: i64,
+) -> Result<Credentials, sqlx::Error> {
+    let credentials = Credentials {
+        access: CsrfToken::new_random().secret().clone(),
+        refresh: CsrfToken::new_random().secret().clone(),
+    };
+    sqlx::query("INSERT INTO oauth_tokens VALUES(?,?,?,?,?,?)")
+        .bind(sha256(credentials.access.as_bytes()).to_vec())
+        .bind(consent)
+        .bind(resource)
+        .bind(scope)
+        .bind((NOW + 300).min(family_expires))
+        .bind(family)
+        .execute(&mut **tx)
+        .await?;
+    sqlx::query("INSERT INTO oauth_refresh VALUES(?,?,?,?,?,?,0)")
+        .bind(sha256(credentials.refresh.as_bytes()).to_vec())
+        .bind(family)
+        .bind(CLIENT)
+        .bind(resource)
+        .bind(scope)
+        .bind(family_expires)
+        .execute(&mut **tx)
+        .await?;
+    Ok(credentials)
+}
+#[derive(sqlx::FromRow)]
+struct RefreshRow {
+    family: String,
+    client: String,
+    resource: String,
+    scope: String,
+    expires: i64,
+    used: i64,
+    consent: i64,
+    revoked: i64,
+    family_expires: i64,
+    active: i64,
+    consent_client: String,
+    consent_resource: String,
+    consent_scope: String,
+}
+async fn rotate(
+    server: Arc<Server>,
+    client: String,
+    resource: String,
+    refresh: String,
+    scope: Option<String>,
+) -> Response {
+    if refresh.is_empty()
+        || refresh.len() > 512
+        || !refresh
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"-_".contains(&b))
+    {
+        return error(StatusCode::BAD_REQUEST, "invalid_request");
+    }
+    let mut tx = match server.db.pool().begin_with("BEGIN IMMEDIATE").await {
+        Ok(tx) => tx,
+        Err(_) => return error(StatusCode::SERVICE_UNAVAILABLE, "temporarily_unavailable"),
+    };
+    let digest = sha256(refresh.as_bytes()).to_vec();
+    let row:Result<Option<RefreshRow>,_>=sqlx::query_as("SELECT r.family,r.client,r.resource,r.scope,r.expires,r.used,f.consent,f.revoked,f.expires AS family_expires,c.active,c.client AS consent_client,c.resource AS consent_resource,c.scope AS consent_scope FROM oauth_refresh r JOIN oauth_families f ON f.id=r.family JOIN oauth_consent c ON c.id=f.consent WHERE r.digest=?")
+        .bind(&digest).fetch_optional(&mut *tx).await;
+    let row = match row {
+        Ok(Some(row)) => row,
+        Ok(None) => return error(StatusCode::BAD_REQUEST, "invalid_grant"),
+        Err(_) => return error(StatusCode::SERVICE_UNAVAILABLE, "temporarily_unavailable"),
+    };
+    // Wrong client/resource cannot use a stolen token to revoke its family.
+    if row.client != client
+        || client != CLIENT
+        || row.resource != resource
+        || resource != server.resource
+        || row.consent_client != client
+        || row.consent_resource != resource
+        || row.active != 1
+        || row.revoked != 0
+        || row.expires <= NOW
+        || row.family_expires <= NOW
+        || row.consent_scope != row.scope
+    {
+        return error(StatusCode::BAD_REQUEST, "invalid_grant");
+    }
+    if row.used != 0 {
+        if sqlx::query("UPDATE oauth_families SET revoked=1 WHERE id=?")
+            .bind(&row.family)
+            .execute(&mut *tx)
+            .await
+            .is_err()
+            || tx.commit().await.is_err()
+        {
+            return error(StatusCode::SERVICE_UNAVAILABLE, "temporarily_unavailable");
+        }
+        return error(StatusCode::BAD_REQUEST, "invalid_grant");
+    }
+    if scope.as_ref().is_some_and(|scope| scope != &row.scope) {
+        return error(StatusCode::BAD_REQUEST, "invalid_scope");
+    }
+    if sqlx::query("UPDATE oauth_refresh SET used=1 WHERE digest=? AND used=0")
+        .bind(digest)
+        .execute(&mut *tx)
+        .await
+        .is_err()
+    {
+        return error(StatusCode::SERVICE_UNAVAILABLE, "temporarily_unavailable");
+    }
+    let credentials = match insert_pair(
+        &mut tx,
+        row.consent,
+        &row.family,
+        &row.resource,
+        &row.scope,
+        row.family_expires,
+    )
+    .await
+    {
+        Ok(credentials) => credentials,
+        Err(_) => return error(StatusCode::SERVICE_UNAVAILABLE, "temporarily_unavailable"),
+    };
+    if tx.commit().await.is_err() {
+        return error(StatusCode::SERVICE_UNAVAILABLE, "temporarily_unavailable");
+    }
+    token_response(credentials, row.scope, (NOW + 300).min(row.family_expires))
 }
 fn error(status: StatusCode, code: &str) -> Response {
     (
@@ -221,35 +450,36 @@ async fn exchange(
     {
         return error(StatusCode::BAD_REQUEST, "invalid_grant");
     }
-    let token = CsrfToken::new_random().secret().clone();
+    let family = CsrfToken::new_random().secret().clone();
     if sqlx::query("DELETE FROM oauth_codes WHERE digest=?")
         .bind(digest)
         .execute(&mut *tx)
         .await
         .is_err()
-        || sqlx::query("INSERT INTO oauth_tokens VALUES(?,?,?,?,?)")
-            .bind(sha256(token.as_bytes()).to_vec())
+        || sqlx::query("INSERT INTO oauth_families VALUES(?,?,?,0)")
+            .bind(&family)
             .bind(consent)
-            .bind(resource)
-            .bind(&scope)
-            .bind(NOW + 300)
+            .bind(NOW + 3600)
             .execute(&mut *tx)
             .await
             .is_err()
-        || tx.commit().await.is_err()
     {
         return error(StatusCode::SERVICE_UNAVAILABLE, "temporarily_unavailable");
     }
-    (
-        [("cache-control", "no-store"), ("pragma", "no-cache")],
-        Json(json!({"access_token":token,"token_type":"Bearer","expires_in":300,"scope":scope})),
-    )
-        .into_response()
+    let credentials =
+        match insert_pair(&mut tx, consent, &family, &resource, &scope, NOW + 3600).await {
+            Ok(credentials) => credentials,
+            Err(_) => return error(StatusCode::SERVICE_UNAVAILABLE, "temporarily_unavailable"),
+        };
+    if tx.commit().await.is_err() {
+        return error(StatusCode::SERVICE_UNAVAILABLE, "temporarily_unavailable");
+    }
+    token_response(credentials, scope, NOW + 300)
 }
 fn challenge(server: &Server, status: StatusCode, error: &str) -> Response {
     (status,[("www-authenticate",format!("Bearer error=\"{error}\", resource_metadata=\"{}/.well-known/oauth-protected-resource/mcp\", scope=\"{SCOPE}\"",server.base)),("cache-control","no-store".into())]).into_response()
 }
-type TokenRow = (String, String, i64, i64, String, String, String);
+type TokenRow = (String, String, i64, i64, String, String, String, i64, i64);
 async fn token_gate(State(server): State<Arc<Server>>, request: Request, next: Next) -> Response {
     if request.uri().query().is_some() {
         return StatusCode::BAD_REQUEST.into_response();
@@ -282,19 +512,30 @@ async fn token_gate(State(server): State<Arc<Server>>, request: Request, next: N
     {
         return challenge(&server, StatusCode::UNAUTHORIZED, "invalid_token");
     }
-    let row:Result<Option<TokenRow>,_>=sqlx::query_as("SELECT t.resource,t.scope,t.expires,c.active,c.resource,c.scope,c.client FROM oauth_tokens t JOIN oauth_consent c ON c.id=t.consent WHERE t.digest=?")
+    let row:Result<Option<TokenRow>,_>=sqlx::query_as("SELECT t.resource,t.scope,t.expires,c.active,c.resource,c.scope,c.client,f.revoked,f.expires FROM oauth_tokens t JOIN oauth_consent c ON c.id=t.consent JOIN oauth_families f ON f.id=t.family WHERE t.digest=?")
         .bind(sha256(token.as_bytes()).to_vec()).fetch_optional(server.db.pool()).await;
-    let (resource, scope, expires, active, consent_resource, consent_scope, consent_client) =
-        match row {
-            Ok(Some(row)) => row,
-            Ok(None) => return challenge(&server, StatusCode::UNAUTHORIZED, "invalid_token"),
-            Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
-        };
+    let (
+        resource,
+        scope,
+        expires,
+        active,
+        consent_resource,
+        consent_scope,
+        consent_client,
+        family_revoked,
+        family_expires,
+    ) = match row {
+        Ok(Some(row)) => row,
+        Ok(None) => return challenge(&server, StatusCode::UNAUTHORIZED, "invalid_token"),
+        Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+    };
     if resource != server.resource
         || consent_resource != resource
         || consent_client != CLIENT
         || expires <= NOW
         || active != 1
+        || family_revoked != 0
+        || family_expires <= NOW
     {
         return challenge(&server, StatusCode::UNAUTHORIZED, "invalid_token");
     }
@@ -319,7 +560,7 @@ impl Fixture {
     async fn new() -> Self {
         let directory = TempDir::new().unwrap();
         let db = Arc::new(Database::open(directory.path()).await.unwrap());
-        sqlx::raw_sql("CREATE TABLE oauth_consent(id INTEGER PRIMARY KEY,client TEXT,resource TEXT,scope TEXT,active INTEGER); CREATE TABLE oauth_codes(digest BLOB PRIMARY KEY,client TEXT,redirect TEXT,resource TEXT,challenge TEXT,scope TEXT,expires INTEGER,consent INTEGER REFERENCES oauth_consent(id)); CREATE TABLE oauth_tokens(digest BLOB PRIMARY KEY,consent INTEGER REFERENCES oauth_consent(id),resource TEXT,scope TEXT,expires INTEGER);")
+        sqlx::raw_sql("CREATE TABLE oauth_consent(id INTEGER PRIMARY KEY,client TEXT,resource TEXT,scope TEXT,active INTEGER); CREATE TABLE oauth_codes(digest BLOB PRIMARY KEY,client TEXT,redirect TEXT,resource TEXT,challenge TEXT,scope TEXT,expires INTEGER,consent INTEGER REFERENCES oauth_consent(id)); CREATE TABLE oauth_families(id TEXT PRIMARY KEY,consent INTEGER REFERENCES oauth_consent(id),expires INTEGER,revoked INTEGER); CREATE TABLE oauth_tokens(digest BLOB PRIMARY KEY,consent INTEGER REFERENCES oauth_consent(id),resource TEXT,scope TEXT,expires INTEGER,family TEXT REFERENCES oauth_families(id)); CREATE TABLE oauth_refresh(digest BLOB PRIMARY KEY,family TEXT REFERENCES oauth_families(id),client TEXT,resource TEXT,scope TEXT,expires INTEGER,used INTEGER);")
             .execute(db.pool()).await.unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
@@ -342,9 +583,9 @@ impl Fixture {
         let protected = Router::new()
             .nest_service("/mcp", service)
             .layer(middleware::from_fn_with_state(server.clone(), token_gate));
-        let app=Router::new().route("/authorize",get(authorize)).route("/token",post(exchange))
+        let app=Router::new().route("/authorize",get(authorize)).route("/token",post(token_endpoint))
             .route("/.well-known/oauth-protected-resource/mcp",get(move ||{let s=resource_metadata.clone();async move {Json(json!({"resource":s.resource,"authorization_servers":[s.base],"scopes_supported":[SCOPE],"bearer_methods_supported":["header"]}))}}))
-            .route("/.well-known/oauth-authorization-server",get(move ||{let s=metadata.clone();async move {Json(json!({"issuer":s.base,"authorization_endpoint":format!("{}/authorize",s.base),"token_endpoint":format!("{}/token",s.base),"response_types_supported":["code"],"grant_types_supported":["authorization_code"],"token_endpoint_auth_methods_supported":["none"],"code_challenge_methods_supported":["S256"],"scopes_supported":[SCOPE]}))}}))
+            .route("/.well-known/oauth-authorization-server",get(move ||{let s=metadata.clone();async move {Json(json!({"issuer":s.base,"authorization_endpoint":format!("{}/authorize",s.base),"token_endpoint":format!("{}/token",s.base),"response_types_supported":["code"],"grant_types_supported":["authorization_code","refresh_token"],"token_endpoint_auth_methods_supported":["none"],"code_challenge_methods_supported":["S256"],"scopes_supported":[SCOPE]}))}}))
             .with_state(server.clone()).merge(protected).layer(DefaultBodyLimit::max(8192));
         let task = tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
@@ -402,38 +643,19 @@ impl Fixture {
         fields["code"].clone()
     }
     async fn redeem(&self, code: String, verifier: PkceCodeVerifier) -> Result<String, ()> {
-        #[derive(Debug, thiserror::Error)]
-        #[error("transport failed")]
-        struct Transport;
+        self.redeem_pair(code, verifier)
+            .await
+            .map(|credentials| credentials.access)
+    }
+    async fn redeem_pair(
+        &self,
+        code: String,
+        verifier: PkceCodeVerifier,
+    ) -> Result<Credentials, ()> {
         let endpoint = format!("{}/token", self.server.base);
         let http = Self::http();
-        let adapter = |request: oauth2::HttpRequest| {
-            let endpoint = endpoint.clone();
-            let http = http.clone();
-            async move {
-                if request.uri().to_string() != endpoint {
-                    return Err(Transport);
-                }
-                let (parts, body) = request.into_parts();
-                let mut response = http
-                    .request(parts.method, &endpoint)
-                    .headers(parts.headers)
-                    .body(body)
-                    .send()
-                    .await
-                    .map_err(|_| Transport)?;
-                let mut builder = oauth2::http::Response::builder().status(response.status());
-                *builder.headers_mut().unwrap() = response.headers().clone();
-                let mut bytes = Vec::new();
-                while let Some(chunk) = response.chunk().await.map_err(|_| Transport)? {
-                    if bytes.len() + chunk.len() > 65536 {
-                        return Err(Transport);
-                    }
-                    bytes.extend_from_slice(&chunk);
-                }
-                builder.body(bytes).map_err(|_| Transport)
-            }
-        };
+        let adapter =
+            |request: oauth2::HttpRequest| transport(request, endpoint.clone(), http.clone());
         let client = BasicClient::new(ClientId::new(CLIENT.into()))
             .set_token_uri(TokenUrl::new(endpoint.clone()).unwrap())
             .set_redirect_uri(RedirectUrl::new(REDIRECT.into()).unwrap());
@@ -443,8 +665,36 @@ impl Fixture {
             .add_extra_param("resource", self.server.resource.clone())
             .request_async(&adapter)
             .await
-            .map(|r| r.access_token().secret().clone())
             .map_err(|_| ())
+            .and_then(|r| {
+                r.refresh_token()
+                    .map(|refresh| Credentials {
+                        access: r.access_token().secret().clone(),
+                        refresh: refresh.secret().clone(),
+                    })
+                    .ok_or(())
+            })
+    }
+    async fn refresh(&self, raw: &str) -> Result<Credentials, ()> {
+        let endpoint = format!("{}/token", self.server.base);
+        let http = Self::http();
+        let adapter = |request| transport(request, endpoint.clone(), http.clone());
+        let client = BasicClient::new(ClientId::new(CLIENT.into()))
+            .set_token_uri(TokenUrl::new(endpoint.clone()).unwrap());
+        client
+            .exchange_refresh_token(&RefreshToken::new(raw.into()))
+            .add_extra_param("resource", self.server.resource.clone())
+            .request_async(&adapter)
+            .await
+            .map_err(|_| ())
+            .and_then(|r| {
+                r.refresh_token()
+                    .map(|refresh| Credentials {
+                        access: r.access_token().secret().clone(),
+                        refresh: refresh.secret().clone(),
+                    })
+                    .ok_or(())
+            })
     }
     async fn raw(&self, fields: Vec<(&str, String)>) -> reqwest::Response {
         let mut encoded = reqwest::Url::parse("https://fixture.invalid").unwrap();
@@ -471,6 +721,232 @@ impl Fixture {
 }
 fn initialize() -> Value {
     json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":VERSION,"capabilities":{},"clientInfo":{"name":"oauth-fixture-not-a-product-client","version":"0"}}})
+}
+
+#[tokio::test]
+async fn maintained_refresh_client_rotates_digests_and_reuse_revokes_entire_family_persistently() {
+    let mut fixture = Fixture::new().await;
+    fixture.consent().await;
+    let (url, state, verifier) = fixture.begin();
+    let code = fixture.code(url, state).await;
+    let original = fixture.redeem_pair(code, verifier).await.unwrap();
+    let first = fixture.refresh(&original.refresh).await.unwrap();
+    let second = fixture.refresh(&first.refresh).await.unwrap();
+    assert_ne!(original.refresh, first.refresh);
+    assert_ne!(first.refresh, second.refresh);
+    assert_ne!(first.access, second.access);
+    assert_eq!(
+        fixture
+            .mcp(Some(&second.access), initialize())
+            .await
+            .status(),
+        200
+    );
+    let expiry: i64 = sqlx::query_scalar("SELECT expires FROM oauth_families")
+        .fetch_one(fixture.server.db.pool())
+        .await
+        .unwrap();
+    assert_eq!(expiry, NOW + 3600);
+    let digests: Vec<Vec<u8>> = sqlx::query_scalar("SELECT digest FROM oauth_refresh")
+        .fetch_all(fixture.server.db.pool())
+        .await
+        .unwrap();
+    assert_eq!(digests.len(), 3);
+    assert!(digests.contains(&sha256(second.refresh.as_bytes()).to_vec()));
+    assert!(!digests.contains(&second.refresh.as_bytes().to_vec()));
+    let (url, state, verifier) = fixture.begin();
+    let code = fixture.code(url, state).await;
+    let unrelated = fixture.redeem_pair(code, verifier).await.unwrap();
+    assert!(fixture.refresh(&original.refresh).await.is_err()); // Reuse is not an ordinary refresh retry.
+    for access in [&original.access, &first.access, &second.access] {
+        assert_eq!(fixture.mcp(Some(access), initialize()).await.status(), 401);
+    }
+    assert!(fixture.refresh(&second.refresh).await.is_err());
+    assert_eq!(
+        fixture
+            .mcp(Some(&unrelated.access), initialize())
+            .await
+            .status(),
+        200
+    ); // Reuse fences this family, not unrelated grants.
+    fixture.task.abort();
+    let _ = (&mut fixture.task).await;
+    fixture.server.db.close().await;
+    let directory = std::mem::replace(&mut fixture._directory, TempDir::new().unwrap());
+    drop(fixture);
+    let db = Database::open(directory.path()).await.unwrap();
+    assert_eq!(sqlx::query_scalar::<_,i64>("SELECT revoked FROM oauth_families WHERE id=(SELECT family FROM oauth_refresh WHERE digest=?)").bind(sha256(original.refresh.as_bytes()).to_vec()).fetch_one(db.pool()).await.unwrap(),1);
+    db.close().await;
+}
+
+#[tokio::test]
+async fn concurrent_refresh_has_one_rotation_but_reuse_detection_invalidates_even_the_winners_credentials()
+ {
+    let fixture = Fixture::new().await;
+    fixture.consent().await;
+    let (url, state, verifier) = fixture.begin();
+    let code = fixture.code(url, state).await;
+    let original = fixture.redeem_pair(code, verifier).await.unwrap();
+    let (a, b) = tokio::join!(
+        fixture.refresh(&original.refresh),
+        fixture.refresh(&original.refresh)
+    );
+    assert_ne!(a.is_ok(), b.is_ok());
+    let winner = a.or(b).unwrap();
+    assert_eq!(
+        fixture
+            .mcp(Some(&winner.access), initialize())
+            .await
+            .status(),
+        401
+    );
+    assert!(fixture.refresh(&winner.refresh).await.is_err());
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM oauth_refresh")
+            .fetch_one(fixture.server.db.pool())
+            .await
+            .unwrap(),
+        2
+    );
+}
+
+#[tokio::test]
+async fn wrong_refresh_bindings_or_scope_cannot_consume_or_revoke_and_consent_or_expiry_cannot_be_bypassed()
+ {
+    let fixture = Fixture::new().await;
+    fixture.consent().await;
+    let (url, state, verifier) = fixture.begin();
+    let code = fixture.code(url, state).await;
+    let original = fixture.redeem_pair(code, verifier).await.unwrap();
+    let fields = [
+        ("grant_type", "refresh_token".to_string()),
+        ("client_id", CLIENT.into()),
+        ("resource", fixture.server.resource.clone()),
+        ("refresh_token", original.refresh.clone()),
+    ];
+    for (key, value) in [
+        ("client_id", "other-client"),
+        ("resource", "https://other.example.invalid/mcp"),
+    ] {
+        let changed = fields
+            .iter()
+            .map(|(k, v)| (*k, if *k == key { value.into() } else { v.clone() }))
+            .collect();
+        assert_eq!(fixture.raw(changed).await.status(), 400);
+    }
+    let mut elevated = fields.to_vec();
+    elevated.push(("scope", "mcp:write".into()));
+    let response = fixture.raw(elevated).await;
+    assert_eq!(response.status(), 400);
+    let error: Value = response.json().await.unwrap();
+    assert_eq!(error["error"], "invalid_scope");
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT used FROM oauth_refresh")
+            .fetch_one(fixture.server.db.pool())
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT revoked FROM oauth_families")
+            .fetch_one(fixture.server.db.pool())
+            .await
+            .unwrap(),
+        0
+    );
+    let rotated = fixture.refresh(&original.refresh).await.unwrap();
+    assert_eq!(
+        fixture
+            .mcp(Some(&rotated.access), initialize())
+            .await
+            .status(),
+        200
+    );
+    sqlx::query("UPDATE oauth_consent SET active=0")
+        .execute(fixture.server.db.pool())
+        .await
+        .unwrap();
+    assert!(fixture.refresh(&rotated.refresh).await.is_err());
+    assert_eq!(
+        fixture
+            .mcp(Some(&rotated.access), initialize())
+            .await
+            .status(),
+        401
+    );
+    for expired_table in ["oauth_refresh", "oauth_families"] {
+        let fixture = Fixture::new().await;
+        fixture.consent().await;
+        let (url, state, verifier) = fixture.begin();
+        let code = fixture.code(url, state).await;
+        let original = fixture.redeem_pair(code, verifier).await.unwrap();
+        let sql = if expired_table == "oauth_refresh" {
+            "UPDATE oauth_refresh SET expires=?"
+        } else {
+            "UPDATE oauth_families SET expires=?"
+        };
+        sqlx::query(sql)
+            .bind(NOW)
+            .execute(fixture.server.db.pool())
+            .await
+            .unwrap();
+        assert!(fixture.refresh(&original.refresh).await.is_err());
+        if expired_table == "oauth_families" {
+            assert_eq!(
+                fixture
+                    .mcp(Some(&original.access), initialize())
+                    .await
+                    .status(),
+                401
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn failed_successor_insert_rolls_back_used_flag_and_access_insert_without_hidden_retry() {
+    let fixture = Fixture::new().await;
+    fixture.consent().await;
+    let (url, state, verifier) = fixture.begin();
+    let code = fixture.code(url, state).await;
+    let original = fixture.redeem_pair(code, verifier).await.unwrap();
+    sqlx::raw_sql("CREATE TRIGGER fail_successor BEFORE INSERT ON oauth_refresh BEGIN SELECT RAISE(ABORT,'fixture successor failure'); END").execute(fixture.server.db.pool()).await.unwrap();
+    assert!(fixture.refresh(&original.refresh).await.is_err());
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM oauth_tokens")
+            .fetch_one(fixture.server.db.pool())
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM oauth_refresh")
+            .fetch_one(fixture.server.db.pool())
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT used FROM oauth_refresh")
+            .fetch_one(fixture.server.db.pool())
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT revoked FROM oauth_families")
+            .fetch_one(fixture.server.db.pool())
+            .await
+            .unwrap(),
+        0
+    );
+    // Harness observes actual rollback. A real client with ambiguous timeout
+    // cannot infer rollback and must NOT blindly retry the old refresh token.
+    sqlx::query("DROP TRIGGER fail_successor")
+        .execute(fixture.server.db.pool())
+        .await
+        .unwrap();
+    assert!(fixture.refresh(&original.refresh).await.is_ok());
 }
 
 #[tokio::test]

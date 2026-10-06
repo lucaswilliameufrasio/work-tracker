@@ -83,7 +83,9 @@ As quatro projeções agora alimentam uma política **comum nas fixtures** por e
 
 `tests/mcp_http_spike.rs` usa rmcp 3.5.1 dev-only em Streamable HTTP loopback: metadata/challenge, grants opacos inseridos pelo teste, recurso/scope/expiração/revogação/banimento e initialize/list/call de ferramenta diagnóstica. Não emite OAuth, não serve conteúdo real e não comprova OpenCode/Claude Code/Claude Desktop/Codex remotos.
 
-`tests/mcp_oauth_spike.rs` exercita cliente oauth2 mantido contra AS artificial com metadata/S256/resource, consentimento pré-inserido, código de uso único e token opaco em SQLite. O token emitido agora autoriza initialize/list/call no rmcp da mesma fixture; consentimento atual e revogação são revalidados por request. Não é AS de produto ou consent UI; refresh e quatro clientes reais continuam pendentes.
+`tests/mcp_oauth_spike.rs` exercita cliente oauth2 mantido contra AS artificial com metadata/S256/resource, consentimento pré-inserido, código de uso único e token opaco em SQLite. O token emitido agora autoriza initialize/list/call no rmcp da mesma fixture; consentimento atual e revogação são revalidados por request. Não é AS de produto ou consent UI; renovação de produto e quatro clientes reais continuam pendentes.
+
+A mesma fixture agora exercita refresh rotation com digests, prazo absoluto da família e detecção estrita de reutilização. Reuse revoga a família inclusive credenciais recém-emitidas em corrida; rollback/reopen e consentimento são testados. Não implementa renovação automática do cliente, política operacional de recuperação ou aceite dos quatro clientes.
 
 Endpoints públicos deste spike: `/health/live` e `/health/ready`. Readiness retorna apenas `ready`/`not_ready`; não expõe caminhos, versão, usuários ou conteúdo.
 
