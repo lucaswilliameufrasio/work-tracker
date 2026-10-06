@@ -2,7 +2,7 @@
 
 - **Status:** Deferred — security and product compatibility evidence required
 - **Date:** 2026-10-06
-- **Context:** `docs/development-plan.md`, backup sections 12.2–12.3 and Phase 0 evidence 6–8, 45–46, 49, 51–53, 56
+- **Context:** `docs/development-plan.md`, backup sections 12.2–12.3 and Phase 0 evidence 6–8, 45–46, 49, 51–53, 56–57
 
 ## Context
 
@@ -25,10 +25,11 @@ Before resuming, evaluate whether Puxiri accepts the age Rust crate's pre-1.0 AP
 - Evidence 52 rejects a wrong identity and a modified final ciphertext byte in that scratch archive; it does not approve the Rust crate or product publication/recovery behavior.
 - Evidence 53 uploads/downloads the synthetic archive with an explicit checksum to disposable local MinIO and restores the downloaded bytes; it does not test presigned/browser flow, S3-provider compatibility, Puxiri pins, or a production manifest.
 - Evidence 56 rejects a one-byte-truncated completed archive when the Rust age stream is drained; this is not a matrix of truncation points or product staging/crash behavior.
+- Evidence 57 rejects one authenticated relative traversal path before opening an extracted file; it is a scratch allowlist probe, not a complete archive-path security review or product staging implementation.
 - Phase 0 backup/restore and resource checkboxes remain open until the end-to-end contracts above are verified and recorded.
 - S3 remains optional; a backup's key custody and restored destination credentials remain separate from this format selection.
 
 ## Evidence
 
-- `docs/development-plan.md`, Phase 0 and evidence 6–8, 45–46, 49, 51–53, 56.
-- Source links and the temporary probes' exact versions, limits and omissions are recorded in evidence 46, 49, 51–53 and 56.
+- `docs/development-plan.md`, Phase 0 and evidence 6–8, 45–46, 49, 51–53, 56–57.
+- Source links and the temporary probes' exact versions, limits and omissions are recorded in evidence 46, 49, 51–53 and 56–57.
