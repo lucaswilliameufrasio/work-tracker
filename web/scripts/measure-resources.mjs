@@ -126,6 +126,21 @@ console.log(
         writeP95Ms: report.write_transaction_ms.p95,
         walHeldBytes: report.wal_held_bytes,
         walAfterReleaseBytes: report.wal_after_reader_release_bytes,
+        dataset: {
+          issues: report.issues,
+          fieldValues: report.field_values,
+          comments: report.comments,
+          events: report.events,
+          indexedDocuments: report.fts_documents,
+        },
+        search: {
+          queryCount: report.search.query_count,
+          returnedRows: report.search.returned_rows,
+          unauthorizedRows: report.search.unauthorized_rows,
+          maxRowsPerQuery: report.search.max_rows_per_query,
+          queryP95Ms: report.search.query_p95_ms,
+          queryTotalMs: report.search.query_total_ms,
+        },
         processMemory: report.proc_status,
         cgroupMemoryPeakBytes: Number(report.cgroup_memory_peak),
         argon2id: {
