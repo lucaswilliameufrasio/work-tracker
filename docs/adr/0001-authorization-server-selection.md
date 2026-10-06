@@ -2,7 +2,7 @@
 
 - **Status:** Deferred — product/architecture decision required
 - **Date:** 2026-10-06
-- **Context:** `docs/development-plan.md`, sections 10.1–10.3 and Phase 0 evidence 37–41, 59, 62
+- **Context:** `docs/development-plan.md`, sections 10.1–10.3 and Phase 0 evidence 37–41, 59, 62–63
 
 ## Context
 
@@ -14,10 +14,10 @@ The candidate review and RustAuth 0.3.0 probes are recorded in the development p
 
 The authorization server must remain embeddable in the existing single Rust/Axum binary and use Puxiri's SQLite and identity/session/consent domain. Do not select or add an authorization-server dependency yet. Do not implement production OAuth endpoints or enable CIMD. Preserve this as an explicit blocker rather than inferring that an OAuth client library, test server, fixture, or MCP resource-server helper is an authorization server.
 
-The user has ruled out a separate authorization-server service. The remaining acceptable route is:
+The user has ruled out a separate authorization-server service and explicitly authorized a bounded, isolated in-house prototype. This authorizes prototype work only, not a production OAuth server, endpoints, dependency/schema changes, external exposure, or client acceptance. The remaining acceptable route is:
 
 1. A sufficiently maintained and reviewed OAuth core library plus a narrowly scoped MCP authorization profile, with a reviewed storage/identity/consent boundary and no hand-rolled general OAuth protocol; or
-2. A new explicit product decision authorizing a narrowly scoped in-house implementation if no acceptable embeddable upstream core can be established.
+2. The now-authorized prototype of a narrowly scoped in-house implementation if no acceptable embeddable upstream core can be established; production adoption still requires a separate reviewed decision.
 
 No current candidate meets the evidence bar. `oauth-as` remains unselected: its modular shape is promising, but the reviewed release is recent and effectively single-maintainer, and no independent security review or mature governance/release record was established. Download counts and successful compilation are not evidence of security. This is a trust/evidence gap, not a claim that the crate is vulnerable.
 
@@ -30,6 +30,8 @@ Regardless of the choice, Puxiri's application layer remains authoritative for c
 - A future choice requires a new ADR amendment/decision and isolated security, migration, and client-compatibility evidence before product integration.
 - This ADR does not approve the RustAuth spike for production and does not modify product dependencies, schema, endpoints or credentials.
 - A separate authorization-server service is not authorized; single-binary deployment remains a product requirement.
+- The prototype authorization is restricted to isolated state-machine/storage evidence; no production routes or OAuth claims are implied.
+- Independent protocol/security review is required before production exposure, in addition to full persistence, consent, identity, interoperability, and recovery gates.
 
 ## Evidence
 
@@ -44,4 +46,4 @@ At the time of the initial review, this was considered a *spike candidate*, not 
 
 Do not spend more integration effort on `oauth-as` unless independent maintenance/security evidence materially changes or the user explicitly accepts its trust model. Any future upstream candidate must first pass provenance, governance, maintenance, security-review, protocol-surface, storage-conformance, and identity/session/consent checks. CIMD remains disabled pending its separate SSRF/cache/trust review. Four-client acceptance and any live-provider smoke remain separate gates, with live smoke requiring explicit authorization and controlled accounts.
 
-Sources: [crate/release metadata](https://crates.io/api/v1/crates/oauth-as/1.0.0), [API documentation](https://docs.rs/oauth-as/1.0.0/oauth_as/), [published source](https://docs.rs/crate/oauth-as/1.0.0/source/), and the reproducible compile-only details/limitations in development-plan evidence 59 and 62.
+Sources: [crate/release metadata](https://crates.io/api/v1/crates/oauth-as/1.0.0), [API documentation](https://docs.rs/oauth-as/1.0.0/oauth_as/), [published source](https://docs.rs/crate/oauth-as/1.0.0/source/), and the reproducible compile-only details/limitations in development-plan evidence 59 and 62–63.
