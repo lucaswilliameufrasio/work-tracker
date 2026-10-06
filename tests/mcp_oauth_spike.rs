@@ -105,7 +105,7 @@ fn native_callback(uri: &str) -> Option<reqwest::Url> {
     let url = reqwest::Url::parse(uri).ok()?;
     (url.scheme() == "http"
         && matches!(url.host_str(), Some("localhost" | "127.0.0.1"))
-        && url.path() == "/callback"
+        && matches!(url.path(), "/callback" | "/callback/fixture-server-id")
         && url.query().is_none()
         && url.fragment().is_none()
         && url.username().is_empty()
@@ -119,7 +119,9 @@ fn redirect_matches(registered: &str, requested: &str) -> bool {
         return requested == registered;
     }
     match (native_callback(registered), native_callback(requested)) {
-        (Some(registered), Some(requested)) => registered.host_str() == requested.host_str(),
+        (Some(registered), Some(requested)) => {
+            registered.host_str() == requested.host_str() && registered.path() == requested.path()
+        }
         _ => false,
     }
 }
@@ -502,7 +504,8 @@ async fn authorize(
     target
         .query_pairs_mut()
         .append_pair("code", &code)
-        .append_pair("state", &request.state);
+        .append_pair("state", &request.state)
+        .append_pair("iss", &server.base);
     (
         StatusCode::FOUND,
         [
@@ -706,7 +709,7 @@ impl Fixture {
         let app=Router::new().route("/authorize",get(authorize)).route("/token",post(token_endpoint)).route("/register",post(register))
             .route("/.well-known/oauth-protected-resource/mcp",get(move ||{let s=resource_metadata.clone();async move {Json(json!({"resource":s.resource,"authorization_servers":[s.base],"scopes_supported":[SCOPE],"bearer_methods_supported":["header"]}))}}))
             .route("/.well-known/oauth-authorization-server",get(move ||{let s=metadata.clone();async move {
-                let mut document=json!({"issuer":s.base,"authorization_endpoint":format!("{}/authorize",s.base),"token_endpoint":format!("{}/token",s.base),"response_types_supported":["code"],"grant_types_supported":["authorization_code","refresh_token"],"token_endpoint_auth_methods_supported":["none"],"code_challenge_methods_supported":["S256"],"scopes_supported":[SCOPE]});
+                let mut document=json!({"issuer":s.base,"authorization_response_iss_parameter_supported":true,"authorization_endpoint":format!("{}/authorize",s.base),"token_endpoint":format!("{}/token",s.base),"response_types_supported":["code"],"grant_types_supported":["authorization_code","refresh_token"],"token_endpoint_auth_methods_supported":["none"],"code_challenge_methods_supported":["S256"],"scopes_supported":[SCOPE]});
                 if sqlx::query_scalar::<_,i64>("SELECT enabled FROM oauth_registration_policy").fetch_one(s.db.pool()).await.ok()==Some(1) {document["registration_endpoint"]=json!(format!("{}/register",s.base));}Json(document)
             }}))
             .with_state(server.clone()).merge(protected).layer(DefaultBodyLimit::max(8192));
@@ -757,6 +760,12 @@ impl Fixture {
             .unwrap()
     }
     async fn code(&self, url: reqwest::Url, state: CsrfToken) -> String {
+        let expected = url
+            .query_pairs()
+            .find(|(key, _)| key == "redirect_uri")
+            .unwrap()
+            .1
+            .into_owned();
         let response = Self::http()
             .get(url)
             .header("cookie", BROWSER)
@@ -764,12 +773,13 @@ impl Fixture {
             .await
             .unwrap();
         assert_eq!(response.status(), 302);
-        let redirect =
-            reqwest::Url::parse(response.headers()["location"].to_str().unwrap()).unwrap();
-        let fields: std::collections::BTreeMap<_, _> =
-            redirect.query_pairs().into_owned().collect();
-        assert_eq!(fields["state"], *state.secret());
-        fields["code"].clone()
+        issued_code(
+            response.headers()["location"].to_str().unwrap(),
+            &expected,
+            state.secret(),
+            &self.server.base,
+        )
+        .unwrap()
     }
     async fn redeem(&self, code: String, verifier: PkceCodeVerifier) -> Result<String, ()> {
         self.redeem_pair(code, verifier)
@@ -862,6 +872,53 @@ impl Fixture {
 fn initialize() -> Value {
     json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":VERSION,"capabilities":{},"clientInfo":{"name":"oauth-fixture-not-a-product-client","version":"0"}}})
 }
+
+// Fixture client boundary, not oauth2's built-in validation or a vendor client.
+fn issued_code(
+    location: &str,
+    expected_redirect: &str,
+    state: &str,
+    issuer: &str,
+) -> Result<String, ()> {
+    if location.len() > 4096 || issuer.is_empty() || state.is_empty() {
+        return Err(());
+    }
+    let mut redirect = reqwest::Url::parse(location).map_err(|_| ())?;
+    if redirect.fragment().is_some() {
+        return Err(());
+    }
+    let mut fields = std::collections::BTreeMap::new();
+    for (key, value) in redirect.query_pairs() {
+        if !matches!(key.as_ref(), "state" | "code" | "iss")
+            || fields
+                .insert(key.into_owned(), value.into_owned())
+                .is_some()
+        {
+            return Err(());
+        }
+    }
+    redirect.set_query(None);
+    if redirect.as_str() != expected_redirect || fields.len() != 3 {
+        return Err(());
+    }
+    let returned_state = fields.get("state").ok_or(())?;
+    if returned_state.len() != state.len()
+        || !memcmp::eq(returned_state.as_bytes(), state.as_bytes())
+        || fields.get("iss").ok_or(())? != issuer
+    {
+        return Err(());
+    }
+    let code = fields.remove("code").ok_or(())?;
+    if code.is_empty()
+        || code.len() > 256
+        || !code
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"-_".contains(&b))
+    {
+        return Err(());
+    }
+    Ok(code)
+}
 #[test]
 fn native_redirect_policy_rejects_parser_normalization_and_never_wildcards_host_path_or_https() {
     for uri in [
@@ -907,6 +964,243 @@ fn native_redirect_policy_rejects_parser_normalization_and_never_wildcards_host_
 }
 fn registration() -> Value {
     json!({"client_name":"Untrusted fixture name","redirect_uris":[REDIRECT],"grant_types":["authorization_code","refresh_token"],"response_types":["code"],"token_endpoint_auth_method":"none"})
+}
+
+#[tokio::test]
+async fn issuer_bound_authorization_advertises_support_and_emits_exact_issuer() {
+    let fixture = Fixture::new().await;
+    fixture.consent().await;
+    let metadata: Value = Fixture::http()
+        .get(format!(
+            "{}/.well-known/oauth-authorization-server",
+            fixture.server.base
+        ))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        metadata["authorization_response_iss_parameter_supported"],
+        true
+    );
+    let (url, state, verifier) = fixture.begin();
+    let code = fixture.code(url, state).await;
+    assert!(fixture.redeem(code, verifier).await.is_ok());
+}
+
+#[tokio::test]
+async fn invalid_issuer_state_or_callback_response_never_reaches_code_exchange() {
+    let fixture = Fixture::new().await;
+    fixture.consent().await;
+    let (url, state, verifier) = fixture.begin();
+    let response = Fixture::http()
+        .get(url)
+        .header("cookie", BROWSER)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 302);
+    let location = response.headers()["location"].to_str().unwrap();
+    let redirect = reqwest::Url::parse(location).unwrap();
+    let code = issued_code(location, REDIRECT, state.secret(), &fixture.server.base).unwrap();
+    for key in ["iss", "state", "code"] {
+        let pairs: Vec<_> = redirect
+            .query_pairs()
+            .filter(|(k, _)| k != key)
+            .map(|(k, v)| (k.into_owned(), v.into_owned()))
+            .collect();
+        let mut missing = redirect.clone();
+        missing.set_query(None);
+        missing.query_pairs_mut().extend_pairs(pairs.clone());
+        assert!(
+            issued_code(
+                missing.as_str(),
+                REDIRECT,
+                state.secret(),
+                &fixture.server.base
+            )
+            .is_err()
+        );
+        let mut changed = missing.clone();
+        changed.query_pairs_mut().append_pair(key, "other-value");
+        // A different opaque code still passes local shape checks; it cannot
+        // authorize an exchange without a matching server-side code/PKCE row.
+        if key != "code" {
+            assert!(
+                issued_code(
+                    changed.as_str(),
+                    REDIRECT,
+                    state.secret(),
+                    &fixture.server.base
+                )
+                .is_err()
+            );
+        }
+        let mut duplicate = redirect.clone();
+        let value = redirect
+            .query_pairs()
+            .find(|(k, _)| k == key)
+            .unwrap()
+            .1
+            .into_owned();
+        duplicate.query_pairs_mut().append_pair(key, &value);
+        assert!(
+            issued_code(
+                duplicate.as_str(),
+                REDIRECT,
+                state.secret(),
+                &fixture.server.base
+            )
+            .is_err()
+        );
+    }
+    for suffix in [
+        "&error=access_denied",
+        "&%69ss=unexpected",
+        "&extra=value",
+        "#fragment",
+    ] {
+        assert!(
+            issued_code(
+                &format!("{location}{suffix}"),
+                REDIRECT,
+                state.secret(),
+                &fixture.server.base
+            )
+            .is_err()
+        );
+    }
+    for expected in [
+        "https://other.example.invalid/oauth/callback",
+        "https://client.example.invalid/other",
+        "https://client.example.invalid:43117/oauth/callback",
+    ] {
+        assert!(issued_code(location, expected, state.secret(), &fixture.server.base).is_err());
+    }
+    assert!(
+        issued_code(
+            location,
+            REDIRECT,
+            state.secret(),
+            &format!("{}/", fixture.server.base)
+        )
+        .is_err()
+    );
+    assert!(issued_code(location, REDIRECT, state.secret(), "").is_err());
+    assert!(issued_code(location, REDIRECT, "", &fixture.server.base).is_err());
+    assert!(
+        issued_code(
+            &"x".repeat(4097),
+            REDIRECT,
+            state.secret(),
+            &fixture.server.base
+        )
+        .is_err()
+    );
+    assert!(issued_code("not a URL", REDIRECT, state.secret(), &fixture.server.base).is_err());
+    for invalid in ["".to_string(), "a".repeat(257), "code+with space".into()] {
+        let mut changed = redirect.clone();
+        let pairs: Vec<_> = redirect
+            .query_pairs()
+            .filter(|(key, _)| key != "code")
+            .map(|(k, v)| (k.into_owned(), v.into_owned()))
+            .collect();
+        changed.set_query(None);
+        changed
+            .query_pairs_mut()
+            .extend_pairs(pairs)
+            .append_pair("code", &invalid);
+        assert!(
+            issued_code(
+                changed.as_str(),
+                REDIRECT,
+                state.secret(),
+                &fixture.server.base
+            )
+            .is_err()
+        );
+    }
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM oauth_tokens")
+            .fetch_one(fixture.server.db.pool())
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM oauth_codes")
+            .fetch_one(fixture.server.db.pool())
+            .await
+            .unwrap(),
+        1
+    );
+    assert!(fixture.redeem(code, verifier).await.is_ok());
+}
+
+#[tokio::test]
+async fn explicit_callback_id_registration_does_not_authorize_other_paths_and_exchange_remains_exact()
+ {
+    let fixture = Fixture::new().await;
+    enable_registration(&fixture).await;
+    let template = "http://127.0.0.1/callback/fixture-server-id";
+    let mut body = registration();
+    body["redirect_uris"] = json!([template]);
+    let response = register_request(&fixture, body).await;
+    assert_eq!(response.status(), 201);
+    let registered: Value = response.json().await.unwrap();
+    let id = registered["client_id"].as_str().unwrap();
+    fixture.consent_for(id).await;
+    for path in [
+        "/callback",
+        "/callback/other-server-id",
+        "/callback/fixture-server-id/extra",
+    ] {
+        let (mut url, _, _) = fixture.begin_for(id);
+        replace_redirect(&mut url, &format!("http://127.0.0.1:43117{path}"));
+        assert_eq!(
+            Fixture::http()
+                .get(url)
+                .header("cookie", BROWSER)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            400
+        );
+    }
+    let (mut url, state, verifier) = fixture.begin_for(id);
+    let redirect = "http://127.0.0.1:43117/callback/fixture-server-id";
+    replace_redirect(&mut url, redirect);
+    let code = fixture.code(url, state).await;
+    let fields = vec![
+        ("grant_type", "authorization_code".into()),
+        ("client_id", id.into()),
+        (
+            "redirect_uri",
+            "http://127.0.0.1:43118/callback/fixture-server-id".into(),
+        ),
+        ("code", code),
+        ("resource", fixture.server.resource.clone()),
+        ("code_verifier", verifier.secret().clone()),
+    ];
+    assert_eq!(fixture.raw(fields.clone()).await.status(), 400);
+    let mut correct = fields;
+    correct[2].1 = redirect.into();
+    assert_eq!(fixture.raw(correct).await.status(), 200);
+}
+
+fn replace_redirect(url: &mut reqwest::Url, redirect: &str) {
+    let pairs: Vec<_> = url
+        .query_pairs()
+        .filter(|(key, _)| key != "redirect_uri")
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect();
+    url.set_query(None);
+    url.query_pairs_mut()
+        .extend_pairs(pairs)
+        .append_pair("redirect_uri", redirect);
 }
 
 #[tokio::test]

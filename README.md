@@ -89,6 +89,8 @@ A mesma fixture agora exercita refresh rotation com digests, prazo absoluto da f
 
 Registro de clientes nessa fixture é opcional/desabilitado por padrão, com redirect HTTPS exato ou loopback aprovado (`localhost`/`127.0.0.1`, `/callback`, porta variável) e quota transacional; não concede consentimento. A troca de código exige o redirect exato usado na autorização. Clientes desativados e troca do client ID do consentimento bloqueiam tokens/codes/refresh. Não é DCR de produto, CIMD ou compatibilidade comprovada com os quatro clientes.
 
+A fixture também admite o path explícito `/callback/fixture-server-id`, sem wildcard, e exercita respostas vinculadas ao issuer: metadata/`iss` coincidentes e validação local de issuer/state/destino antes de exchange. O helper não é callback de produto nem validação fornecida pelo SDK oauth2; fetch CIMD, TLS/browser e clientes reais permanecem pendentes.
+
 Endpoints públicos deste spike: `/health/live` e `/health/ready`. Readiness retorna apenas `ready`/`not_ready`; não expõe caminhos, versão, usuários ou conteúdo.
 
 ## Plano e distribuição
