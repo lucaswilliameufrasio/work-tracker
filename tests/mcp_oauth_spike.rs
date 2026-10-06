@@ -2,8 +2,9 @@
 //! Maintained oauth2 client drives S256/resource requests against real SQLite.
 use axum::{
     Form, Json, Router,
-    extract::{DefaultBodyLimit, Query, State},
+    extract::{DefaultBodyLimit, Query, Request, State},
     http::{HeaderMap, StatusCode},
+    middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
@@ -14,6 +15,17 @@ use oauth2::{
 };
 use openssl::{memcmp, sha::sha256};
 use puxiri::db::Database;
+use rmcp::{
+    ErrorData, ServerHandler,
+    model::{
+        CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, ListToolsResult,
+        PaginatedRequestParams, ServerCapabilities, ServerConfig, Tool,
+    },
+    service::RequestContext,
+    transport::streamable_http_server::{
+        StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
+    },
+};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{sync::Arc, time::Duration};
@@ -23,6 +35,46 @@ const CLIENT: &str = "preregistered-public-fixture";
 const REDIRECT: &str = "https://client.example.invalid/oauth/callback";
 const SCOPE: &str = "mcp:read";
 const BROWSER: &str = "fixture_browser=artificial-authenticated-user";
+const VERSION: &str = "2025-11-25";
+#[derive(Clone)]
+struct Diagnostic;
+impl ServerHandler for Diagnostic {
+    fn get_info(&self) -> ServerConfig {
+        ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
+    }
+    async fn list_tools(
+        &self,
+        _: Option<PaginatedRequestParams>,
+        _: RequestContext<rmcp::RoleServer>,
+    ) -> Result<ListToolsResult, ErrorData> {
+        Ok(ListToolsResult {
+            tools: vec![Tool::new(
+                "diagnostic",
+                "OAuth-connected local fixture",
+                Arc::new(
+                    json!({"type":"object","properties":{},"additionalProperties":false})
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                ),
+            )],
+            ..Default::default()
+        })
+    }
+    async fn call_tool(
+        &self,
+        request: CallToolRequestParams,
+        _: RequestContext<rmcp::RoleServer>,
+    ) -> Result<CallToolResponse, ErrorData> {
+        if request.name != "diagnostic" {
+            return Err(ErrorData::invalid_params("unknown diagnostic tool", None));
+        }
+        Ok(CallToolResult::success(vec![ContentBlock::text(
+            "issued token accepted; fixture only",
+        )])
+        .into())
+    }
+}
 struct Server {
     db: Arc<Database>,
     base: String,
@@ -151,7 +203,7 @@ async fn exchange(
         Err(_) => return error(StatusCode::SERVICE_UNAVAILABLE, "temporarily_unavailable"),
     };
     let digest = sha256(request.code.as_bytes()).to_vec();
-    let row:Result<Option<CodeRow>,_>=sqlx::query_as("SELECT c.client,c.redirect,c.resource,c.challenge,c.scope,c.expires,c.consent FROM oauth_codes c JOIN oauth_consent g ON g.id=c.consent WHERE c.digest=? AND g.active=1")
+    let row:Result<Option<CodeRow>,_>=sqlx::query_as("SELECT c.client,c.redirect,c.resource,c.challenge,c.scope,c.expires,c.consent FROM oauth_codes c JOIN oauth_consent g ON g.id=c.consent WHERE c.digest=? AND g.active=1 AND g.client=c.client AND g.resource=c.resource AND g.scope=c.scope")
         .bind(&digest).fetch_optional(&mut *tx).await;
     let (client, redirect, resource, challenge, scope, expires, consent) = match row {
         Ok(Some(row)) => row,
@@ -194,25 +246,64 @@ async fn exchange(
     )
         .into_response()
 }
-async fn probe(State(server): State<Arc<Server>>, headers: HeaderMap) -> Response {
+fn challenge(server: &Server, status: StatusCode, error: &str) -> Response {
+    (status,[("www-authenticate",format!("Bearer error=\"{error}\", resource_metadata=\"{}/.well-known/oauth-protected-resource/mcp\", scope=\"{SCOPE}\"",server.base)),("cache-control","no-store".into())]).into_response()
+}
+type TokenRow = (String, String, i64, i64, String, String, String);
+async fn token_gate(State(server): State<Arc<Server>>, request: Request, next: Next) -> Response {
+    if request.uri().query().is_some() {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    let headers = request.headers();
+    let origins: Vec<_> = headers.get_all("origin").iter().collect();
+    if origins.len() > 1
+        || origins
+            .first()
+            .is_some_and(|value| value.to_str().ok() != Some(server.base.as_str()))
+    {
+        return StatusCode::FORBIDDEN.into_response();
+    }
     let values: Vec<_> = headers.get_all("authorization").iter().collect();
     if values.len() != 1 {
-        return StatusCode::UNAUTHORIZED.into_response();
+        return challenge(&server, StatusCode::UNAUTHORIZED, "invalid_token");
     }
     let Some(token) = values[0]
         .to_str()
         .ok()
         .and_then(|v| v.strip_prefix("Bearer "))
     else {
-        return StatusCode::UNAUTHORIZED.into_response();
+        return challenge(&server, StatusCode::UNAUTHORIZED, "invalid_token");
     };
-    let allowed:Result<i64,_>=sqlx::query_scalar("SELECT count(*) FROM oauth_tokens t JOIN oauth_consent c ON c.id=t.consent WHERE t.digest=? AND t.resource=? AND t.scope=? AND t.expires>? AND c.active=1")
-        .bind(sha256(token.as_bytes()).to_vec()).bind(&server.resource).bind(SCOPE).bind(NOW).fetch_one(server.db.pool()).await;
-    match allowed {
-        Ok(1) => StatusCode::OK.into_response(),
-        Ok(_) => StatusCode::UNAUTHORIZED.into_response(),
-        Err(_) => StatusCode::SERVICE_UNAVAILABLE.into_response(),
+    if token.is_empty()
+        || token.len() > 512
+        || !token
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"-_".contains(&b))
+    {
+        return challenge(&server, StatusCode::UNAUTHORIZED, "invalid_token");
     }
+    let row:Result<Option<TokenRow>,_>=sqlx::query_as("SELECT t.resource,t.scope,t.expires,c.active,c.resource,c.scope,c.client FROM oauth_tokens t JOIN oauth_consent c ON c.id=t.consent WHERE t.digest=?")
+        .bind(sha256(token.as_bytes()).to_vec()).fetch_optional(server.db.pool()).await;
+    let (resource, scope, expires, active, consent_resource, consent_scope, consent_client) =
+        match row {
+            Ok(Some(row)) => row,
+            Ok(None) => return challenge(&server, StatusCode::UNAUTHORIZED, "invalid_token"),
+            Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+        };
+    if resource != server.resource
+        || consent_resource != resource
+        || consent_client != CLIENT
+        || expires <= NOW
+        || active != 1
+    {
+        return challenge(&server, StatusCode::UNAUTHORIZED, "invalid_token");
+    }
+    if !scope.split_ascii_whitespace().any(|s| s == SCOPE)
+        || !consent_scope.split_ascii_whitespace().any(|s| s == SCOPE)
+    {
+        return challenge(&server, StatusCode::FORBIDDEN, "insufficient_scope");
+    }
+    next.run(request).await
 }
 struct Fixture {
     _directory: TempDir,
@@ -238,9 +329,23 @@ impl Fixture {
             base,
         });
         let metadata = server.clone();
-        let app=Router::new().route("/authorize",get(authorize)).route("/token",post(exchange)).route("/mcp",get(probe))
+        let resource_metadata = server.clone();
+        let service: StreamableHttpService<Diagnostic, LocalSessionManager> =
+            StreamableHttpService::new(
+                || Ok(Diagnostic),
+                Default::default(),
+                StreamableHttpServerConfig::default()
+                    .with_legacy_session_mode(false)
+                    .with_json_response(true)
+                    .with_sse_keep_alive(None),
+            );
+        let protected = Router::new()
+            .nest_service("/mcp", service)
+            .layer(middleware::from_fn_with_state(server.clone(), token_gate));
+        let app=Router::new().route("/authorize",get(authorize)).route("/token",post(exchange))
+            .route("/.well-known/oauth-protected-resource/mcp",get(move ||{let s=resource_metadata.clone();async move {Json(json!({"resource":s.resource,"authorization_servers":[s.base],"scopes_supported":[SCOPE],"bearer_methods_supported":["header"]}))}}))
             .route("/.well-known/oauth-authorization-server",get(move ||{let s=metadata.clone();async move {Json(json!({"issuer":s.base,"authorization_endpoint":format!("{}/authorize",s.base),"token_endpoint":format!("{}/token",s.base),"response_types_supported":["code"],"grant_types_supported":["authorization_code"],"token_endpoint_auth_methods_supported":["none"],"code_challenge_methods_supported":["S256"],"scopes_supported":[SCOPE]}))}}))
-            .layer(DefaultBodyLimit::max(8192)).with_state(server.clone());
+            .with_state(server.clone()).merge(protected).layer(DefaultBodyLimit::max(8192));
         let task = tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
@@ -352,6 +457,238 @@ impl Fixture {
             .await
             .unwrap()
     }
+    async fn mcp(&self, token: Option<&str>, body: Value) -> reqwest::Response {
+        let mut request = Self::http()
+            .post(&self.server.resource)
+            .header("accept", "application/json, text/event-stream")
+            .header("mcp-protocol-version", VERSION)
+            .json(&body);
+        if let Some(token) = token {
+            request = request.bearer_auth(token);
+        }
+        request.send().await.unwrap()
+    }
+}
+fn initialize() -> Value {
+    json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":VERSION,"capabilities":{},"clientInfo":{"name":"oauth-fixture-not-a-product-client","version":"0"}}})
+}
+
+#[tokio::test]
+async fn discovery_to_code_exchange_to_official_mcp_tool_call_uses_one_issued_token_until_consent_revocation()
+ {
+    let fixture = Fixture::new().await;
+    let unauthorized = fixture.mcp(None, initialize()).await;
+    assert_eq!(unauthorized.status(), 401);
+    let challenge = unauthorized.headers()["www-authenticate"].to_str().unwrap();
+    let metadata_url = format!(
+        "{}/.well-known/oauth-protected-resource/mcp",
+        fixture.server.base
+    );
+    assert!(challenge.contains(&format!("resource_metadata=\"{metadata_url}\"")));
+    let resource: Value = Fixture::http()
+        .get(metadata_url)
+        .header("host", "evil.example.invalid")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(resource["resource"], fixture.server.resource);
+    assert_eq!(
+        resource["authorization_servers"],
+        json!([fixture.server.base])
+    );
+    let issuer = resource["authorization_servers"][0].as_str().unwrap();
+    let metadata: Value = Fixture::http()
+        .get(format!("{issuer}/.well-known/oauth-authorization-server"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(metadata["issuer"], issuer);
+    assert_eq!(
+        metadata["code_challenge_methods_supported"],
+        json!(["S256"])
+    );
+    fixture.consent().await;
+    let (url, state, verifier) = fixture.begin();
+    assert_eq!(
+        format!("{}{}", url.origin().ascii_serialization(), url.path()),
+        metadata["authorization_endpoint"].as_str().unwrap()
+    );
+    let code = fixture.code(url, state).await;
+    let token = fixture.redeem(code, verifier).await.unwrap();
+    let initialized = fixture.mcp(Some(&token), initialize()).await;
+    assert_eq!(initialized.status(), 200);
+    let initialized: Value = initialized.json().await.unwrap();
+    assert_eq!(initialized["result"]["protocolVersion"], VERSION);
+    let listed = fixture
+        .mcp(
+            Some(&token),
+            json!({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}),
+        )
+        .await;
+    assert_eq!(listed.status(), 200);
+    let listed: Value = listed.json().await.unwrap();
+    assert_eq!(listed["result"]["tools"][0]["name"], "diagnostic");
+    let operation = json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"diagnostic","arguments":{}}});
+    let called = fixture.mcp(Some(&token), operation.clone()).await;
+    assert_eq!(called.status(), 200);
+    let called: Value = called.json().await.unwrap();
+    assert_eq!(
+        called["result"]["content"][0]["text"],
+        "issued token accepted; fixture only"
+    );
+    sqlx::query("UPDATE oauth_consent SET active=0")
+        .execute(fixture.server.db.pool())
+        .await
+        .unwrap();
+    let denied = fixture.mcp(Some(&token), operation).await;
+    assert_eq!(denied.status(), 401);
+    assert!(
+        !denied.headers()["www-authenticate"]
+            .to_str()
+            .unwrap()
+            .contains(&token)
+    );
+    assert_eq!(fixture.mcp(None, initialize()).await.status(), 401);
+}
+
+#[tokio::test]
+async fn issued_token_cannot_gain_other_resource_scope_or_lifetime_and_database_failure_denies_mcp()
+{
+    let fixture = Fixture::new().await;
+    fixture.consent().await;
+    let (url, state, verifier) = fixture.begin();
+    let code = fixture.code(url, state).await;
+    let token = fixture.redeem(code, verifier).await.unwrap();
+    sqlx::query("UPDATE oauth_consent SET scope='mcp:write'")
+        .execute(fixture.server.db.pool())
+        .await
+        .unwrap();
+    assert_eq!(fixture.mcp(Some(&token), initialize()).await.status(), 403);
+    sqlx::query("UPDATE oauth_consent SET scope=?")
+        .bind(SCOPE)
+        .execute(fixture.server.db.pool())
+        .await
+        .unwrap();
+    sqlx::query("UPDATE oauth_consent SET client='another-client'")
+        .execute(fixture.server.db.pool())
+        .await
+        .unwrap();
+    assert_eq!(fixture.mcp(Some(&token), initialize()).await.status(), 401);
+    sqlx::query("UPDATE oauth_consent SET client=?,resource='https://other.example.invalid/mcp'")
+        .bind(CLIENT)
+        .execute(fixture.server.db.pool())
+        .await
+        .unwrap();
+    assert_eq!(fixture.mcp(Some(&token), initialize()).await.status(), 401);
+    sqlx::query("UPDATE oauth_consent SET resource=?")
+        .bind(&fixture.server.resource)
+        .execute(fixture.server.db.pool())
+        .await
+        .unwrap();
+    sqlx::query("UPDATE oauth_tokens SET resource='https://other.example.invalid/mcp'")
+        .execute(fixture.server.db.pool())
+        .await
+        .unwrap();
+    assert_eq!(fixture.mcp(Some(&token), initialize()).await.status(), 401);
+    sqlx::query("UPDATE oauth_tokens SET resource=?,scope='mcp:read-all'")
+        .bind(&fixture.server.resource)
+        .execute(fixture.server.db.pool())
+        .await
+        .unwrap();
+    let denied = fixture.mcp(Some(&token), initialize()).await;
+    assert_eq!(denied.status(), 403);
+    assert!(
+        denied.headers()["www-authenticate"]
+            .to_str()
+            .unwrap()
+            .contains("insufficient_scope")
+    );
+    sqlx::query("UPDATE oauth_tokens SET scope=?,expires=?")
+        .bind(SCOPE)
+        .bind(NOW)
+        .execute(fixture.server.db.pool())
+        .await
+        .unwrap();
+    assert_eq!(fixture.mcp(Some(&token), initialize()).await.status(), 401);
+    sqlx::query("DROP TABLE oauth_tokens")
+        .execute(fixture.server.db.pool())
+        .await
+        .unwrap();
+    assert_eq!(fixture.mcp(Some(&token), initialize()).await.status(), 503);
+}
+
+#[tokio::test]
+async fn issued_token_is_required_on_each_http_method_and_query_duplicate_auth_or_untrusted_origin_never_bypasses_gate()
+ {
+    let fixture = Fixture::new().await;
+    fixture.consent().await;
+    let (url, state, verifier) = fixture.begin();
+    let code = fixture.code(url, state).await;
+    let token = fixture.redeem(code, verifier).await.unwrap();
+    assert_eq!(
+        Fixture::http()
+            .get(&fixture.server.resource)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        401
+    );
+    assert_eq!(
+        Fixture::http()
+            .delete(&fixture.server.resource)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        401
+    );
+    let operation = json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"diagnostic","arguments":{}}});
+    assert_eq!(fixture.mcp(None, operation.clone()).await.status(), 401);
+    assert_eq!(
+        fixture
+            .mcp(
+                Some("external-oidc-provider-access-token"),
+                operation.clone()
+            )
+            .await
+            .status(),
+        401
+    );
+    let denied = Fixture::http()
+        .post(format!("{}?access_token={token}", fixture.server.resource))
+        .bearer_auth(&token)
+        .json(&operation)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(denied.status(), 400);
+    let denied = Fixture::http()
+        .post(&fixture.server.resource)
+        .bearer_auth(&token)
+        .header("origin", "https://evil.example.invalid")
+        .json(&operation)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(denied.status(), 403);
+    let mut headers = HeaderMap::new();
+    headers.append("authorization", format!("Bearer {token}").parse().unwrap());
+    headers.append("authorization", format!("Bearer {token}").parse().unwrap());
+    let denied = Fixture::http()
+        .post(&fixture.server.resource)
+        .headers(headers)
+        .json(&operation)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(denied.status(), 401);
 }
 
 #[tokio::test]
@@ -382,16 +719,7 @@ async fn maintained_public_client_uses_s256_resource_and_exact_redirect_with_per
     let (url, state, verifier) = fixture.begin();
     let code = fixture.code(url, state).await;
     let token = fixture.redeem(code, verifier).await.unwrap();
-    assert_eq!(
-        Fixture::http()
-            .get(&fixture.server.resource)
-            .bearer_auth(&token)
-            .send()
-            .await
-            .unwrap()
-            .status(),
-        200
-    );
+    assert_eq!(fixture.mcp(Some(&token), initialize()).await.status(), 200);
     let stored: (Vec<u8>, String, String) =
         sqlx::query_as("SELECT digest,resource,scope FROM oauth_tokens")
             .fetch_one(fixture.server.db.pool())
@@ -409,16 +737,7 @@ async fn maintained_public_client_uses_s256_resource_and_exact_redirect_with_per
         .execute(fixture.server.db.pool())
         .await
         .unwrap();
-    assert_eq!(
-        Fixture::http()
-            .get(&fixture.server.resource)
-            .bearer_auth(token)
-            .send()
-            .await
-            .unwrap()
-            .status(),
-        401
-    );
+    assert_eq!(fixture.mcp(Some(&token), initialize()).await.status(), 401);
 }
 
 #[tokio::test]
