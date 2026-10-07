@@ -1,6 +1,6 @@
 # Puxiri — Plano completo de desenvolvimento
 
-Versão: 1.1 · Atualizado: 03/10/2026 · Status: decisões de produto consolidadas; validação técnica pela Fase 0 ainda pendente.
+Versão: 1.1 · Atualizado: 06/10/2026 · Status: decisões de produto consolidadas; validação técnica pela Fase 0 ainda pendente.
 
 Esta revisão incorpora as decisões da sessão de definição de produto nas seções correspondentes, substituindo regras anteriores incompatíveis. Recursos acordados não estão implementados nem tecnicamente comprovados apenas por constarem neste plano.
 
