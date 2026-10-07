@@ -2,7 +2,7 @@
 
 - **Status:** Deferred — security and product compatibility evidence required
 - **Date:** 2026-10-06
-- **Context:** `docs/development-plan.md`, backup sections 12.2–12.3 and Phase 0 evidence 6–8, 45–46, 49, 51–53, 56–57, 60–62, 69–70, 79–102
+- **Context:** `docs/development-plan.md`, backup sections 12.2–12.3 and Phase 0 evidence 6–8, 45–46, 49, 51–53, 56–57, 60–62, 69–70, 79–103
 
 ## Context
 
@@ -59,12 +59,13 @@ rPGP/`pgp` 0.21.0 is also research-only under the current stability criterion: i
 - Evidence 100 directly compiles and exercises Sequoia's preflight access route on that Argon2-protected key: match `key.secret()` as `SecretKeyMaterial::Encrypted(encrypted)` and read `encrypted.s2k()` to assert `Argon2(t=2,p=1,m=16)` before calling `decrypt_secret`. This corrects the convenient but inaccurate `Key::s2k()` shorthand in evidence 97; the direct method does not exist. The focused test passed. This confirms caller inspection is possible, not that it is enforced automatically by Sequoia.
 - Evidence 101 reviews OpenPGP.js 6.3.1 Argon2 resource controls. Its configured default output profile is `t=3,p=4,m=16` (64 MiB), but `maxArgon2MemoryExponent` defaults to 30 (=1 TiB) and its explicit check in `Argon2S2K.produceKey` applies to both encrypt/decrypt; it rejects larger `m` before invoking the Argon2 WASM module. Thus the hard-coded default ceiling is vastly larger than the default profile and must be lowered explicitly for untrusted recovery keys. This documented cap only bounds memory exponent; no source evidence found in this review for a corresponding cap on untrusted `t` or `p`, and no extreme parameters were run. This is version-scoped source review, not a vulnerability or suitability claim.
 - Evidence 102 runtime-checks that configuration guard without invoking high-cost Argon2: the scratch creates a v6 secret key using S2K `m=16` (64 MiB), then a separate OpenPGP.js 6.3.1 harness sets `maxArgon2MemoryExponent=15` (32 MiB) and tries `decryptKey`. It rejects with wrapped message `Error decrypting private key: Argon2 required memory exceeds config.maxArgon2MemoryExponent`; source order places this guard before Argon2 WASM invocation. The same fixture passes the normal configured cap for decrypt, wrong passphrase is rejected, and Sequoia/OpenPGP.js stream comparisons pass. This verifies the caller-configurable m cap on this version, not t/p caps, concurrent limits, actual process peak RSS, or production policy. Scratch fmt/Clippy/all 7 tests/release build passed on system dynamic OpenSSL 3.6.4; no product code/dependency.
+- Evidence 103 replaces fixed test-only salts with a fresh 16-byte salt from Sequoia's documented `crypto::random` CSPRNG separately for the generated v6 primary and encryption subkey. The synthetic protected key remains interoperable with OpenPGP.js 6.3.1 (including cap-preflight, wrong-passphrase rejection and successful stream decryption); the test asserts both salts are present and unequal. This exercises a realistic salt-generation API path, but does not select Argon2 costs/profile, validate entropy/OS RNG failure handling in deployed targets, or approve recovery UX/kit. All scratch fmt, Clippy, 7 tests and release build passed; no product dependency.
 - Phase 0 backup/restore and resource checkboxes remain open until the end-to-end contracts above are verified and recorded.
 - S3 remains optional; a backup's key custody and restored destination credentials remain separate from this format selection.
 
 ## Evidence
 
-- `docs/development-plan.md`, Phase 0 and evidence 6–8, 45–46, 49, 51–53, 56–57, 60–62, 69, 79–102.
+- `docs/development-plan.md`, Phase 0 and evidence 6–8, 45–46, 49, 51–53, 56–57, 60–62, 69, 79–103.
 - Source links and temporary probes' exact versions, limits and omissions are recorded in evidence 46, 49, 51–53, 56–57, 60–62 and 69.
 - [RFC 9580](https://www.rfc-editor.org/rfc/rfc9580.html), [Sequoia README](https://gitlab.com/sequoia-pgp/sequoia/-/raw/main/README.md), [Sequoia status](https://sequoia-pgp.org/status), [Sequoia 2.4.1 crate metadata](https://docs.rs/crate/sequoia-openpgp/2.4.1), [stream serializer](https://docs.rs/sequoia-openpgp/2.4.1/sequoia_openpgp/serialize/stream/index.html), [stream decryptor](https://docs.rs/sequoia-openpgp/2.4.1/sequoia_openpgp/parse/stream/index.html), [feature/backend flags](https://docs.rs/crate/sequoia-openpgp/2.4.1/features), [RustSec advisories](https://rustsec.org/packages/sequoia-openpgp.html), [CVE-2026-42784 Debian status/fix](https://security-tracker.debian.org/tracker/CVE-2026-42784).
 - [OpenPGP.js 6.3.1 release](https://github.com/openpgpjs/openpgpjs/releases/tag/v6.3.1), [OpenPGP.js RFC 9580 AEAD configuration](https://docs.openpgpjs.org/module-config.html).
