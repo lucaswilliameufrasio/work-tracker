@@ -639,7 +639,7 @@ Não tratar cada fase como um produto final seguro. A v1 completa inclui todos o
 
 Saída: esqueleto executável, contratos comprovados e relatório de compatibilidade/limitações, sem UI fictícia de integrações. Não remover requisitos silenciosamente se spike falhar: documentar bloqueio e discutir alternativa.
 
-#### Gates de saída ainda abertos — status após a centésima nona fatia
+#### Gates de saída ainda abertos — status após a centésima décima fatia
 
 - **OAuth/MCP remoto — protótipo in-house autorizado, produção não:** o usuário confirmou single-binary, rejeitou `oauth-as` pela confiança insuficiente e autorizou somente um protótipo isolado de core próprio. O scratch consulta estado de conta/papel em tabelas SQLite fixture em cada autorização, deriva a identidade de approval de sessão opaca do host em um fluxo experimental e exige CSRF token fixture ligado à sessão para gravar consent/code. Valida scopes por allowlist exata, subset entre consentimento e emissão, e matriz de read/write para as oito tools v1, além de consentimento por projeto, access/refresh token e reuse detection. Checklists browser/CSRF (fatias 75–76) não são implementação nem aprovação. Continua sem integração com sessão/cookie/Origin/Fetch-Metadata/CSRF/HTTP reais, tabelas reais, discovery, conformance, auditoria ou revisão independente. Não expor nem afirmar suporte dos quatro clientes; CIMD continua indisponível. Ver [ADR 0001](adr/0001-authorization-server-selection.md).
 - **Smoke SaaS/clientes — autorização e contas controladas necessárias:** testes atuais usam endpoints fake/loopback, certificados artificiais e credenciais sintéticas. Não provam envio/entitlement/TLS/provider account, webhook/queue real nem cadastro/consent/revogação nos quatro MCP clients. Nenhuma credencial real foi usada; smoke externo só após autorização explícita do operador e contas/domínios/destinatários controlados.
@@ -670,6 +670,7 @@ Saída: esqueleto executável, contratos comprovados e relatório de compatibili
 - Slice 107 exercises the OpenPGP.js 6.3.1 configured Argon2 memory cap on both input-key decrypt and output-key encrypt: m16 under cap m15 rejects before WASM on both routes (encrypt requires AEAD profile config). Positive unlock, wrong-passphrase rejection and stream interop stay green.
 - Slice 108 mutates a disposable secret-key S2K pass-count byte from t2 to t255; Sequoia parses the modified certificate and exposes t255/p1/m16 for preflight. The hostile fixture is never unlocked/derived; this proves parser acceptance/inspectability only, not cryptographic validity, exploitability, or resource impact.
 - Slice 109 independently mutates only the secret-key Argon2 parallelism byte from p1 to p255; Sequoia parses and exposes t2/p255/m16 for preflight, without unlocking/deriving. Neither fixture is used for crypto operations.
+- Slice 110 independently mutates only the secret-key Argon2 memory exponent m16→m31; Sequoia parses and exposes t2/p1/m31 without unlocking/allocating. All three cost fields are thus parser-visible at extreme encodings; do not derive before exact-profile allowlisting.
 - **Recursos/capacidade — evidência sintética, sem promessa operacional:** probes em cgroups 1 vCPU/1 GiB incluem SQLite, FTS e bundle/restore moderados; as fatias 55/58 incluem comparações exploratórias com um e quatro hashes Argon2id sintéticos concorrendo com o bundle. Ainda não reproduz distribuição/esquema/workload real, hardware-alvo nem KDF concorrente por fluxo HTTP sob carga multiusuário. Nenhum parâmetro Argon2, RTO/RPO ou limite/capacidade de produto foi selecionado.
 
 Estes são gates de saída explícitos, não funcionalidades silenciosamente removidas. Continuar fatias locais independentes; não declarar Fase 0 concluída nem começar integração de produto que dependa dessas escolhas/autorizações.
@@ -1679,6 +1680,12 @@ O resultado não afirma que secret ciphertext adulterado seja válido, que há e
 Repetimos a análise de bytes de forma independente para `p`: uma segunda cópia dos bytes originais do certificado é pesquisada pela mesma salt randômica; validamos que os octetos de perfil iniciam `t=2,p=1,m=16`, trocamos apenas `p` para `255` e carregamos com `Cert::from_bytes`. Sequoia 2.4.1 aceita a estrutura e o acesso ao S2K confirma `t=2,p=255,m=16`. Nenhuma operação de `decrypt_secret` foi chamada para nenhuma cópia adulterada (t=255 da fatia 108 ou p=255 aqui), então não houve tentativa de derivação, allocation de Argon2 ou medição de CPU/memória.
 
 Isso confirma que ambos bytes extremos são sintaticamente preservados e visíveis ao caller antes do desbloqueio neste packet/version. Não diz que combinação é valida para derivação, que ciphertext adulterado é recuperável, nem demonstra exploit. `cargo fmt --check`, Clippy `-D warnings`, all seven scratch tests e release build passaram; produto não mudou. ADR 0002 continua Deferred.
+
+#### Evidências da centésima décima fatia — parse/preflight de m=31 sem alocação
+
+Terceira cópia separada do mesmo fixture, desta vez alterando exclusivamente o byte `m` em `Argon2(t=2,p=1,m=16)` para `31`. O parse `Cert::from_bytes` do Sequoia 2.4.1 retorna certificado e `SecretKeyMaterial::Encrypted(...).s2k()` expõe Argon2 `t=2,p=1,m=31`. Não chamamos unlock/derive: o valor teórico extremo de memória (2^31 KiB) não foi alocado, não tentamos disparar OOM e não sabemos se chegará à alocação após validação das demais camadas. A observação limita-se ao parser e à leitura pré-KDF do S2K wire.
+
+Com as fatias 108, 109 e 110, os campos de custo `t`, `p` e `m` são individualmente aceitos sintaticamente e permanecem consultáveis para o consumer antes de derivar. Isso sustenta o conselho de allowlist fechada do perfil inteiro, mas não classifica vulnerabilidade nem executa parâmetros adversariais. Focused e todos os sete testes scratch, fmt, Clippy `-D warnings` e release build passaram; sem mudanças do produto. ADR 0002 permanece Deferred.
 
 ### Fase 1 — Fundação e identidade
 
