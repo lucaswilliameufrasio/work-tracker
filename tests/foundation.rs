@@ -66,7 +66,7 @@ async fn all_four_connections_have_durable_sqlite_settings_and_real_migrations()
         .fetch_one(database.pool())
         .await
         .unwrap();
-    assert_eq!(rows, 1);
+    assert_eq!(rows, 2);
     let pending: Option<String> =
         sqlx::query_scalar("SELECT setup_completed_at FROM installation_state WHERE singleton = 1")
             .fetch_one(database.pool())
@@ -75,6 +75,73 @@ async fn all_four_connections_have_durable_sqlite_settings_and_real_migrations()
     assert!(pending.is_none());
     assert!(
         sqlx::query("INSERT INTO installation_state (singleton) VALUES (2)")
+            .execute(database.pool())
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn identity_foundation_schema_enforces_membership_and_admin_separation() {
+    let (_directory, database, _router) = application().await;
+
+    sqlx::query(
+        "INSERT INTO organizations (id, name, locale, timezone, created_at, updated_at) \
+         VALUES (1, 'Puxiri', 'pt-BR', 'America/Sao_Paulo', 'now', 'now')",
+    )
+    .execute(database.pool())
+    .await
+    .unwrap();
+    assert!(
+        sqlx::query(
+            "INSERT INTO organizations (id, name, locale, timezone, created_at, updated_at) \
+             VALUES (2, 'Outra', 'en', 'UTC', 'now', 'now')",
+        )
+        .execute(database.pool())
+        .await
+        .is_err()
+    );
+
+    for (id, role) in [
+        ("01890f3e-7b1c-7cc4-98a7-123456789abc", "member"),
+        ("01890f3e-7b1c-7cc4-98a7-123456789abd", "guest"),
+    ] {
+        sqlx::query(
+            "INSERT INTO users (id, display_name, state, created_at, updated_at) \
+             VALUES (?, ?, 'active', 'now', 'now')",
+        )
+        .bind(id)
+        .bind(role)
+        .execute(database.pool())
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO organization_members (user_id, role, created_at) VALUES (?, ?, 'now')",
+        )
+        .bind(id)
+        .bind(role)
+        .execute(database.pool())
+        .await
+        .unwrap();
+    }
+
+    let member_id = "01890f3e-7b1c-7cc4-98a7-123456789abc";
+    let guest_id = "01890f3e-7b1c-7cc4-98a7-123456789abd";
+    sqlx::query("INSERT INTO installation_admins (user_id, created_at) VALUES (?, 'now')")
+        .bind(member_id)
+        .execute(database.pool())
+        .await
+        .unwrap();
+    assert!(
+        sqlx::query("INSERT INTO installation_admins (user_id, created_at) VALUES (?, 'now')")
+            .bind(guest_id)
+            .execute(database.pool())
+            .await
+            .is_err()
+    );
+    assert!(
+        sqlx::query("UPDATE organization_members SET role = 'guest' WHERE user_id = ?")
+            .bind(member_id)
             .execute(database.pool())
             .await
             .is_err()

@@ -2069,6 +2069,12 @@ Teste no módulo de DB do produto confirma `PRAGMA journal_mode=wal`, cria tabel
 
 Isso valida apenas commit/reopen com o `Database` e SQLx atuais e o vínculo entre pool-close e lock do diretório. Não inspeciona checkpoint/WAL/SHM em cada etapa, troca diretórios, restaura geração, exercita SIGKILL/power loss ou decide política/syscall de ativação; portanto não fecha a lacuna da evidência 157 nem seleciona desenho de restore. Nenhuma migration, dependência ou dado de produto foi alterado.
 
+#### Evidências da centésima quinquagésima nona fatia — schema inicial de organização e identidade
+
+Migration `0002_identity_foundation.sql` cria a organização singleton, usuários com estados `active`/`banned`/`disabled`, memberships com papéis `owner`/`admin`/`member`/`guest` e tabela separada de installation admins. Checks impedem uma segunda organização, papéis/estados desconhecidos e campos de nome/locale/timezone vazios; triggers exigem que installation admin seja organization member (não guest) e impedem tornar guest um installation admin já existente. A regra TOTP não é ainda aplicável porque credentials/MFA não fazem parte desta migration e precisa ser imposta na camada de serviço futura.
+
+Integration test usa SQLite real via `Database`/SQLx e valida singleton, gravação das entidades e invariantes de separação organization-vs-installation admin. O teste focado `cargo test --locked --offline --test foundation identity_foundation_schema_enforces_membership_and_admin_separation` passou; também passaram `cargo fmt --all -- --check`, `cargo clippy --all-targets --locked --offline -- -D warnings`, `cargo test --all-targets --locked --offline` (todos os alvos Rust) e `cargo build --locked --offline`. `make check` web/full continua bloqueado pela ausência de `pnpm` no ambiente. A fatia materializa apenas o primeiro pedaço do modelo já definido na seção 4: emails/identidades/senha/sessões/MFA, setup wizard, services, rotas, auditoria, settings e jobs seguem ausentes. Nenhum fluxo de login ou provisionamento é anunciado como disponível; não altera formato/decisão OAuth ou backup.
+
 ### Fase 1 — Fundação e identidade
 
 - [ ] Migrations, usuários/organização/settings e infraestrutura básica de outbox/jobs/leases necessária aos próximos fluxos.
@@ -2209,7 +2215,7 @@ Esta matriz impede que fixtures/scratch sejam confundidos com capacidade do prod
 | Área | Evidência válida no checkout | O que ainda falta para fechar o gate |
 |---|---|---|
 | Fundação SQLite/SQLx | Migrations/checksum, quatro conexões com pragmas, lock exclusivo, readiness e persistência após restart testados; slice 158 exercita WAL commit/close/reopen e retenção do lock. | Benchmark nos perfis previstos; ciclo WAL/SHM e lock durante restore/ativação; teste do servidor em recovery mode e política de rollback. |
-| Identidade/setup (Fase 1) | Apenas tabela singleton `installation_state` e bootstrap mínimo de processo/CLI. | Wizard/token protegido, organização/owner/admin, master key e kit, sessões/senhas/MFA/recovery, autorização e auditoria integrados no produto. |
+| Identidade/setup (Fase 1) | Bootstrap mínimo e migration inicial de organização singleton, users, organization memberships e tabela separada de installation admins (slice 159). | Wizard/token protegido, fluxo transacional de criação do owner/admin, master key e kit, emails/identidades, sessões/senhas/MFA/recovery, serviços, autorização e auditoria integrados no produto. |
 | Kanban (Fase 2) | Nenhum fluxo de domínio de issue/projeto implementado no produto. | Modelo/migrations, serviços, autorização, API/UI, histórico, busca, acessibilidade e testes de jornada conforme seção 5. |
 | Providers e OAuth | Probes com HTTP fakes, fixtures locais e artefatos sintéticos para alguns contratos; ADR 0001 mantém autorização MCP deferred. | Adaptadores e configuração de produto, testes com provedores/contas controladas autorizados, segurança operacional; decisão e revisão independente para AS/OAuth antes de exposição. |
 | S3/arquivos (Fase 4) | Harness Node contra MinIO descartável e contratos sintéticos de URL, claims/pins e falha. | Adaptador S3 do produto, destinos aprovados, credenciais/segredos, uploads privados, migração, cotas, imagens/avatares, export e compatibilidade externa. |
