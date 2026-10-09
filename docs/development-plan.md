@@ -2063,6 +2063,12 @@ Integration Linux-only prepara dois pares de diretórios irmãos com SQLite sint
 
 Isto mantém kernel, page cache e filesystem vivos; não simula energia/kernel loss, durabilidade física, filesystem crash consistency, mounts de rede, diretórios WAL/SHM ou o `Database` pool/lock de Puxiri. O teste só exercita pastas locais offline e retenção dos dois lados; não implementa recuperação de estado parcialmente restaurado, política de rollback/commit, autenticação dos paths ou modo recovery do servidor e não aprova Linux-only activation em produto. Scratch: 29 unit + 3 subprocess integrations passaram; fmt, Clippy `-D warnings`, release tests/build offline passaram. Opt-in ENOSPC/scale não repetidos; sem alteração de produto/dependência/dado real; ADR 0002 continua **Deferred**.
 
+#### Evidências da centésima quinquagésima oitava fatia — ciclo real WAL do `Database` SQLx
+
+Teste no módulo de DB do produto confirma `PRAGMA journal_mode=wal`, cria tabela de fixture, commita uma geração e fecha o pool. Enquanto o objeto `Database` continua vivo, a tentativa de abrir outra instância no mesmo diretório segue rejeitada por `AlreadyRunning`; após destruir o objeto e liberar o lock, uma nova instância abre o banco e lê a geração commitada. O teste passou via `cargo test --locked --offline db::tests::committed_wal_data_survives_pool_close_and_database_reopen --lib`.
+
+Isso valida apenas commit/reopen com o `Database` e SQLx atuais e o vínculo entre pool-close e lock do diretório. Não inspeciona checkpoint/WAL/SHM em cada etapa, troca diretórios, restaura geração, exercita SIGKILL/power loss ou decide política/syscall de ativação; portanto não fecha a lacuna da evidência 157 nem seleciona desenho de restore. Nenhuma migration, dependência ou dado de produto foi alterado.
+
 ### Fase 1 — Fundação e identidade
 
 - [ ] Migrations, usuários/organização/settings e infraestrutura básica de outbox/jobs/leases necessária aos próximos fluxos.
