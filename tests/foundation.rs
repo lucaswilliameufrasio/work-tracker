@@ -5,7 +5,7 @@ use axum::{
     body::{Body, to_bytes},
     http::{Method, Request, StatusCode, header},
 };
-use puxiri::{db::Database, http};
+use puxiri::{auth::normalize_email_address, db::Database, http};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 use tower::ServiceExt;
@@ -66,7 +66,7 @@ async fn all_four_connections_have_durable_sqlite_settings_and_real_migrations()
         .fetch_one(database.pool())
         .await
         .unwrap();
-    assert_eq!(rows, 4);
+    assert_eq!(rows, 5);
     let pending: Option<String> =
         sqlx::query_scalar("SELECT setup_completed_at FROM installation_state WHERE singleton = 1")
             .fetch_one(database.pool())
@@ -235,6 +235,92 @@ async fn credential_schema_limits_password_hash_format_and_session_digest_shape(
         )
         .bind(vec![8_u8; 31])
         .bind(user_id)
+        .execute(database.pool())
+        .await
+        .is_err()
+    );
+}
+
+#[tokio::test]
+async fn user_emails_are_unique_by_canonical_key_and_primary_requires_confirmation() {
+    let (_directory, database, _router) = application().await;
+    let user_ids = [
+        "01890f3e-7b1c-7cc4-98a7-123456789abc",
+        "01890f3e-7b1c-7cc4-98a7-123456789abd",
+    ];
+    for user_id in user_ids {
+        sqlx::query(
+            "INSERT INTO users (id, display_name, state, created_at, updated_at) \
+             VALUES (?, 'Test user', 'active', 'now', 'now')",
+        )
+        .bind(user_id)
+        .execute(database.pool())
+        .await
+        .unwrap();
+    }
+
+    let email = normalize_email_address(" Alice.Example+work@EXAMPLE.COM ").unwrap();
+    sqlx::query(
+        "INSERT INTO user_emails \
+         (id, user_id, address, address_key, created_at) \
+         VALUES ('01890f3e-7b1c-7cc4-98a7-123456789abe', ?, ?, ?, 'now')",
+    )
+    .bind(user_ids[0])
+    .bind(&email.address)
+    .bind(&email.key)
+    .execute(database.pool())
+    .await
+    .unwrap();
+    assert!(
+        sqlx::query(
+            "INSERT INTO user_emails \
+             (id, user_id, address, address_key, created_at) \
+             VALUES ('01890f3e-7b1c-7cc4-98a7-123456789abf', ?, \
+                     'different@example.com', 'unrelated@example.com', 'now')",
+        )
+        .bind(user_ids[1])
+        .execute(database.pool())
+        .await
+        .is_err()
+    );
+    assert!(
+        sqlx::query(
+            "INSERT INTO user_emails \
+             (id, user_id, address, address_key, created_at) \
+             VALUES ('01890f3e-7b1c-7cc4-98a7-123456789abf', ?, \
+                     'alice.example+work@example.com', ?, 'now')",
+        )
+        .bind(user_ids[1])
+        .bind(&email.key)
+        .execute(database.pool())
+        .await
+        .is_err()
+    );
+
+    assert!(
+        sqlx::query(
+            "UPDATE user_emails SET is_primary = 1 \
+             WHERE id = '01890f3e-7b1c-7cc4-98a7-123456789abe'",
+        )
+        .execute(database.pool())
+        .await
+        .is_err()
+    );
+    sqlx::query(
+        "UPDATE user_emails SET confirmed_at = 'now', is_primary = 1 \
+         WHERE id = '01890f3e-7b1c-7cc4-98a7-123456789abe'",
+    )
+    .execute(database.pool())
+    .await
+    .unwrap();
+    assert!(
+        sqlx::query(
+            "INSERT INTO user_emails \
+             (id, user_id, address, address_key, is_primary, confirmed_at, created_at) \
+             VALUES ('01890f3e-7b1c-7cc4-98a7-123456789abf', ?, \
+                     'alternate@example.com', 'alternate@example.com', 1, 'now', 'now')",
+        )
+        .bind(user_ids[0])
         .execute(database.pool())
         .await
         .is_err()
