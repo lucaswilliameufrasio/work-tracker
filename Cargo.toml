@@ -6,9 +6,11 @@ rust-version = "1.94"
 publish = false
 
 [dependencies]
+argon2 = { version = "=0.5.3", features = ["zeroize"] }
 axum = "0.8.9"
 clap = { version = "4.6.7", features = ["derive", "env"] }
 mime_guess = "2.0.5"
+rand_core = { version = "0.6.4", features = ["getrandom"] }
 rust-embed = { version = "8.12.0", features = ["debug-embed"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -19,9 +21,9 @@ tower-http = { version = "0.7.1", features = ["set-header"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
 uuid = { version = "1.0", features = ["v7"] }
+zeroize = "1.9.0"
 
 [dev-dependencies]
-argon2 = "=0.5.3"
 rmcp = { version = "=3.5.1", default-features = false, features = ["server", "transport-streamable-http-server"] }
 oauth2 = { version = "=5.0.0", default-features = false }
 openidconnect = { version = "=4.0.1", default-features = false, features = ["accept-string-booleans"] }

@@ -95,6 +95,7 @@ dependencies = [
  "blake2",
  "cpufeatures 0.2.17",
  "password-hash",
+ "zeroize",
 ]
 
 [[package]]
@@ -2536,6 +2537,7 @@ dependencies = [
  "openidconnect",
  "openssl",
  "p256 0.14.0",
+ "rand_core 0.6.4",
  "reqwest",
  "rmcp",
  "rusqlite",
@@ -2553,6 +2555,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]
