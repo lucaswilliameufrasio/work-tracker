@@ -4,7 +4,9 @@ use argon2::{
     Algorithm, Argon2, Params, PasswordHash, PasswordHasher, PasswordVerifier, Version,
     password_hash::{Error as PasswordHashError, SaltString},
 };
-use rand_core::OsRng;
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+use rand_core::{OsRng, RngCore};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tokio::{sync::Semaphore, task};
 use zeroize::Zeroizing;
@@ -63,6 +65,34 @@ pub enum PasswordError {
     WorkerFailed,
     #[error("password hashing failed")]
     HashingFailed,
+}
+
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum SessionTokenError {
+    #[error("secure random token generation failed")]
+    RandomnessFailed,
+}
+
+pub struct SessionToken(Zeroizing<String>);
+
+impl SessionToken {
+    pub fn generate() -> Result<Self, SessionTokenError> {
+        let mut random_bytes = Zeroizing::new([0_u8; 32]);
+        OsRng
+            .try_fill_bytes(&mut *random_bytes)
+            .map_err(|_| SessionTokenError::RandomnessFailed)?;
+        Ok(Self(Zeroizing::new(
+            URL_SAFE_NO_PAD.encode(random_bytes.as_slice()),
+        )))
+    }
+
+    pub fn expose(&self) -> &str {
+        self.0.as_str()
+    }
+
+    pub fn digest(&self) -> [u8; 32] {
+        Sha256::digest(self.0.as_bytes()).into()
+    }
 }
 
 #[derive(Clone)]
@@ -253,6 +283,23 @@ mod tests {
         assert_eq!(
             normalize_email_address("a b@example.com").unwrap_err(),
             EmailAddressError::WhitespaceOrControl
+        );
+    }
+
+    #[test]
+    fn session_tokens_are_256_bit_url_safe_values_with_sha256_digests() {
+        let token = SessionToken::generate().unwrap();
+        let decoded = URL_SAFE_NO_PAD.decode(token.expose()).unwrap();
+        assert_eq!(decoded.len(), 32);
+        assert!(
+            token
+                .expose()
+                .bytes()
+                .all(|byte| { byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-' })
+        );
+        assert_eq!(
+            token.digest(),
+            Sha256::digest(token.expose().as_bytes()).as_slice()
         );
     }
 
