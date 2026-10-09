@@ -2087,6 +2087,8 @@ Migration `0004_auth_identities.sql` persiste somente provider (`google`, `apple
 
 Isso implementa o limite de identidade previsto no modelo, mas não valida tokens/OIDC, não vincula/desvincula contas, não consulta/normaliza email, não autentica ninguém e não integra providers externos. Esses serviços e smokes seguem pendentes; nenhum SaaS foi chamado e nenhuma identidade real foi usada.
 
+Após as migrations 0002–0004, `make check` completo passou usando o `pnpm@11.21.0` declarado no `web/package.json` via Corepack e wrapper temporário só para PATH da execução; instalação estava up-to-date e lock/configuração não mudaram. Passaram build web, Prettier, ESLint, Svelte check sem warnings, 14 Vitest, fmt, Clippy `-D warnings`, todos os alvos Rust/tests/build, seis Playwright E2E e 38 testes MinIO S3/bundle. Container MinIO da suíte descartável foi encerrado pelo harness. Isso valida o checkout e harnesses atuais, não transforma fixtures em integração de produto, não é smoke externo e não fecha gates de security review, OAuth/providers reais, restore de produto ou release.
+
 ### Fase 1 — Fundação e identidade
 
 - [ ] Migrations, usuários/organização/settings e infraestrutura básica de outbox/jobs/leases necessária aos próximos fluxos.
@@ -2233,6 +2235,6 @@ Esta matriz impede que fixtures/scratch sejam confundidos com capacidade do prod
 | S3/arquivos (Fase 4) | Harness Node contra MinIO descartável e contratos sintéticos de URL, claims/pins e falha. | Adaptador S3 do produto, destinos aprovados, credenciais/segredos, uploads privados, migração, cotas, imagens/avatares, export e compatibilidade externa. |
 | Backup/restore (Fase 5) | Fixtures/harness e scratch demonstram mecanismos isolados; SQLite WAL snapshot/pins SQLx fixture e probes de staging/activation têm limites registrados nas fatias 133–158. | ADR 0002/formato e security review; implementação de produto end-to-end, retenção, download/MFA, restauração operacional e isolada, crash/durabilidade, capacidade real, ensaio de desastre e RPO/RTO. |
 | MCP/automações (Fases 6–7) | Probes de protocolo/state machine, sem aceitação de cliente real nem aplicação de domínio de produto. | API tokens, tools/jobs/outbox/scheduler e autorização comum; quatro clientes aprovados em HTTP/stdio, revogação/perda de acesso e fluxos duráveis. |
-| Release (Fase 8) | `make check` passou integralmente na fatia 155; ARM64 cross-build foi tentado e bloqueado por toolchain ausente. | Repetir gate completo após mudanças atuais, CI por arquitetura, benchmarks, revisão de segurança/acessibilidade/desastre, pacotes/deploy/runbooks e release candidate com backup/restore aprovados. |
+| Release (Fase 8) | `make check` passou nas fatias 155 e 161 (após migrations 0002–0004); ARM64 cross-build foi tentado e bloqueado por toolchain ausente. | CI por arquitetura, benchmarks, revisão de segurança/acessibilidade/desastre, pacotes/deploy/runbooks e release candidate com backup/restore aprovados. |
 
 Nenhuma linha acima muda os checkboxes de saída das Fases 1–8: cada critério continua exigindo implementação e evidência do fluxo de produto correspondente. Próximas fatias devem avançar jornadas implementáveis da Fase 1 sem escolher formato de backup, AS/OAuth, providers ou contratos externos ainda deferred.
