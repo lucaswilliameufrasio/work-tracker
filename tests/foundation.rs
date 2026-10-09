@@ -66,7 +66,7 @@ async fn all_four_connections_have_durable_sqlite_settings_and_real_migrations()
         .fetch_one(database.pool())
         .await
         .unwrap();
-    assert_eq!(rows, 3);
+    assert_eq!(rows, 4);
     let pending: Option<String> =
         sqlx::query_scalar("SELECT setup_completed_at FROM installation_state WHERE singleton = 1")
             .fetch_one(database.pool())
@@ -145,6 +145,27 @@ async fn identity_foundation_schema_enforces_membership_and_admin_separation() {
             .execute(database.pool())
             .await
             .is_err()
+    );
+
+    sqlx::query(
+        "INSERT INTO auth_identities (id, user_id, provider, issuer, subject, created_at) \
+         VALUES ('01890f3e-7b1c-7cc4-98a7-123456789abe', ?, 'google', \
+                 'https://accounts.google.com', 'provider-subject-1', 'now')",
+    )
+    .bind(member_id)
+    .execute(database.pool())
+    .await
+    .unwrap();
+    assert!(
+        sqlx::query(
+            "INSERT INTO auth_identities (id, user_id, provider, issuer, subject, created_at) \
+             VALUES ('01890f3e-7b1c-7cc4-98a7-123456789abf', ?, 'google', \
+                     'https://accounts.google.com', 'provider-subject-1', 'now')",
+        )
+        .bind(guest_id)
+        .execute(database.pool())
+        .await
+        .is_err()
     );
 }
 

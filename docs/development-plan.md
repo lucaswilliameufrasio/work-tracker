@@ -2081,6 +2081,12 @@ Migration `0003_credentials_and_sessions.sql` adiciona no máximo um password cr
 
 Isso valida apenas constraints/índice do schema, não o hashing, geração/lookup de token opaco, policy de sessão, expiração/inatividade, reauth/MFA, login, CSRF, revogação em endpoints ou rate limits: nenhum desses serviços está implementado. Os campos/textos são schema fixtures, nunca credenciais reais. Também passaram `cargo fmt --all -- --check`, `cargo clippy --all-targets --locked --offline -- -D warnings`, `cargo test --all-targets --locked --offline` (todos os alvos Rust) e `cargo build --locked --offline`. A suíte web segue não verificada porque `pnpm` não está instalado/disponível no PATH.
 
+#### Evidências da centésima sexagésima primeira fatia — unicidade de identidade externa
+
+Migration `0004_auth_identities.sql` persiste somente provider (`google`, `apple`, `github`, `gitlab`), issuer e subject, com chave única nesse trio e referência restrita ao usuário; índice permite localizar identidades de uma conta. O teste SQLite real confirma que o mesmo principal externo não pode ser anexado a um segundo usuário. Passou `cargo test --locked --offline --test foundation identity_foundation_schema_enforces_membership_and_admin_separation`.
+
+Isso implementa o limite de identidade previsto no modelo, mas não valida tokens/OIDC, não vincula/desvincula contas, não consulta/normaliza email, não autentica ninguém e não integra providers externos. Esses serviços e smokes seguem pendentes; nenhum SaaS foi chamado e nenhuma identidade real foi usada.
+
 ### Fase 1 — Fundação e identidade
 
 - [ ] Migrations, usuários/organização/settings e infraestrutura básica de outbox/jobs/leases necessária aos próximos fluxos.
@@ -2221,7 +2227,7 @@ Esta matriz impede que fixtures/scratch sejam confundidos com capacidade do prod
 | Área | Evidência válida no checkout | O que ainda falta para fechar o gate |
 |---|---|---|
 | Fundação SQLite/SQLx | Migrations/checksum, quatro conexões com pragmas, lock exclusivo, readiness e persistência após restart testados; slice 158 exercita WAL commit/close/reopen e retenção do lock. | Benchmark nos perfis previstos; ciclo WAL/SHM e lock durante restore/ativação; teste do servidor em recovery mode e política de rollback. |
-| Identidade/setup (Fase 1) | Bootstrap mínimo; migrations de organização/identidade e schemas de password credential/session (slices 159–160), sem serviços de auth. | Wizard/token protegido, fluxo transacional de criação do owner/admin, master key e kit, emails/identidades, hashing/verificação de senha, sessões/MFA/recovery executáveis, serviços, autorização e auditoria integrados no produto. |
+| Identidade/setup (Fase 1) | Bootstrap mínimo; migrations de organização, membership, installation admin, identidade externa, password credential e sessão (slices 159–161), sem serviços de auth. | Wizard/token protegido, fluxo transacional de criação do owner/admin, master key e kit, emails, link/unlink seguro, validação OIDC, hashing/verificação de senha, sessões/MFA/recovery executáveis, serviços, autorização e auditoria integrados no produto. |
 | Kanban (Fase 2) | Nenhum fluxo de domínio de issue/projeto implementado no produto. | Modelo/migrations, serviços, autorização, API/UI, histórico, busca, acessibilidade e testes de jornada conforme seção 5. |
 | Providers e OAuth | Probes com HTTP fakes, fixtures locais e artefatos sintéticos para alguns contratos; ADR 0001 mantém autorização MCP deferred. | Adaptadores e configuração de produto, testes com provedores/contas controladas autorizados, segurança operacional; decisão e revisão independente para AS/OAuth antes de exposição. |
 | S3/arquivos (Fase 4) | Harness Node contra MinIO descartável e contratos sintéticos de URL, claims/pins e falha. | Adaptador S3 do produto, destinos aprovados, credenciais/segredos, uploads privados, migração, cotas, imagens/avatares, export e compatibilidade externa. |
