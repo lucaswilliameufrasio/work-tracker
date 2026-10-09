@@ -2201,3 +2201,20 @@ No início das integrações, acrescentar ADRs com links oficiais e versões exa
 - Benchmarks para padrões de rate limit/capacidade e testes de segurança/acessibilidade/desastre.
 
 Falha nesses pontos deve gerar evidência, limitação e proposta de ajuste, não implementação fictícia nem mudança silenciosa do produto acordado.
+
+### 19.2 Matriz de evidência e gates restantes
+
+Esta matriz impede que fixtures/scratch sejam confundidos com capacidade do produto e orienta a ordem das próximas fatias. “Validado parcialmente” significa apenas o limite descrito, não o critério de saída da fase.
+
+| Área | Evidência válida no checkout | O que ainda falta para fechar o gate |
+|---|---|---|
+| Fundação SQLite/SQLx | Migrations/checksum, quatro conexões com pragmas, lock exclusivo, readiness e persistência após restart testados; slice 158 exercita WAL commit/close/reopen e retenção do lock. | Benchmark nos perfis previstos; ciclo WAL/SHM e lock durante restore/ativação; teste do servidor em recovery mode e política de rollback. |
+| Identidade/setup (Fase 1) | Apenas tabela singleton `installation_state` e bootstrap mínimo de processo/CLI. | Wizard/token protegido, organização/owner/admin, master key e kit, sessões/senhas/MFA/recovery, autorização e auditoria integrados no produto. |
+| Kanban (Fase 2) | Nenhum fluxo de domínio de issue/projeto implementado no produto. | Modelo/migrations, serviços, autorização, API/UI, histórico, busca, acessibilidade e testes de jornada conforme seção 5. |
+| Providers e OAuth | Probes com HTTP fakes, fixtures locais e artefatos sintéticos para alguns contratos; ADR 0001 mantém autorização MCP deferred. | Adaptadores e configuração de produto, testes com provedores/contas controladas autorizados, segurança operacional; decisão e revisão independente para AS/OAuth antes de exposição. |
+| S3/arquivos (Fase 4) | Harness Node contra MinIO descartável e contratos sintéticos de URL, claims/pins e falha. | Adaptador S3 do produto, destinos aprovados, credenciais/segredos, uploads privados, migração, cotas, imagens/avatares, export e compatibilidade externa. |
+| Backup/restore (Fase 5) | Fixtures/harness e scratch demonstram mecanismos isolados; SQLite WAL snapshot/pins SQLx fixture e probes de staging/activation têm limites registrados nas fatias 133–158. | ADR 0002/formato e security review; implementação de produto end-to-end, retenção, download/MFA, restauração operacional e isolada, crash/durabilidade, capacidade real, ensaio de desastre e RPO/RTO. |
+| MCP/automações (Fases 6–7) | Probes de protocolo/state machine, sem aceitação de cliente real nem aplicação de domínio de produto. | API tokens, tools/jobs/outbox/scheduler e autorização comum; quatro clientes aprovados em HTTP/stdio, revogação/perda de acesso e fluxos duráveis. |
+| Release (Fase 8) | `make check` passou integralmente na fatia 155; ARM64 cross-build foi tentado e bloqueado por toolchain ausente. | Repetir gate completo após mudanças atuais, CI por arquitetura, benchmarks, revisão de segurança/acessibilidade/desastre, pacotes/deploy/runbooks e release candidate com backup/restore aprovados. |
+
+Nenhuma linha acima muda os checkboxes de saída das Fases 1–8: cada critério continua exigindo implementação e evidência do fluxo de produto correspondente. Próximas fatias devem avançar jornadas implementáveis da Fase 1 sem escolher formato de backup, AS/OAuth, providers ou contratos externos ainda deferred.
