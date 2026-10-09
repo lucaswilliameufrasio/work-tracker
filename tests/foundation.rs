@@ -66,7 +66,7 @@ async fn all_four_connections_have_durable_sqlite_settings_and_real_migrations()
         .fetch_one(database.pool())
         .await
         .unwrap();
-    assert_eq!(rows, 2);
+    assert_eq!(rows, 3);
     let pending: Option<String> =
         sqlx::query_scalar("SELECT setup_completed_at FROM installation_state WHERE singleton = 1")
             .fetch_one(database.pool())
@@ -145,6 +145,78 @@ async fn identity_foundation_schema_enforces_membership_and_admin_separation() {
             .execute(database.pool())
             .await
             .is_err()
+    );
+}
+
+#[tokio::test]
+async fn credential_schema_limits_password_hash_format_and_session_digest_shape() {
+    let (_directory, database, _router) = application().await;
+    let user_id = "01890f3e-7b1c-7cc4-98a7-123456789abc";
+    sqlx::query(
+        "INSERT INTO users (id, display_name, state, created_at, updated_at) \
+         VALUES (?, 'Test user', 'active', 'now', 'now')",
+    )
+    .bind(user_id)
+    .execute(database.pool())
+    .await
+    .unwrap();
+
+    assert!(
+        sqlx::query(
+            "INSERT INTO password_credentials (user_id, password_hash, changed_at) \
+             VALUES (?, 'not-a-password-hash', 'now')",
+        )
+        .bind(user_id)
+        .execute(database.pool())
+        .await
+        .is_err()
+    );
+    sqlx::query(
+        "INSERT INTO password_credentials (user_id, password_hash, changed_at) \
+         VALUES (?, '$argon2id$v=19$m=19456,t=2,p=1$c2FsdA$aGFzaA', 'now')",
+    )
+    .bind(user_id)
+    .execute(database.pool())
+    .await
+    .unwrap();
+
+    let session_id = "01890f3e-7b1c-7cc4-98a7-123456789abd";
+    let token_hash = vec![7_u8; 32];
+    sqlx::query(
+        "INSERT INTO sessions \
+         (id, token_hash, user_id, created_at, last_activity_at, expires_at) \
+         VALUES (?, ?, ?, 'now', 'now', 'later')",
+    )
+    .bind(session_id)
+    .bind(&token_hash)
+    .bind(user_id)
+    .execute(database.pool())
+    .await
+    .unwrap();
+
+    assert!(
+        sqlx::query(
+            "INSERT INTO sessions \
+             (id, token_hash, user_id, created_at, last_activity_at, expires_at) \
+             VALUES ('01890f3e-7b1c-7cc4-98a7-123456789abe', ?, ?, 'now', 'now', 'later')",
+        )
+        .bind(&token_hash)
+        .bind(user_id)
+        .execute(database.pool())
+        .await
+        .is_err()
+    );
+    assert!(
+        sqlx::query(
+            "INSERT INTO sessions \
+             (id, token_hash, user_id, created_at, last_activity_at, expires_at) \
+             VALUES ('01890f3e-7b1c-7cc4-98a7-123456789abf', ?, ?, 'now', 'now', 'later')",
+        )
+        .bind(vec![8_u8; 31])
+        .bind(user_id)
+        .execute(database.pool())
+        .await
+        .is_err()
     );
 }
 
