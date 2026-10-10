@@ -11,6 +11,8 @@ use thiserror::Error;
 use tokio::{sync::Semaphore, task};
 use zeroize::Zeroizing;
 
+pub mod session;
+
 const PASSWORD_MIN_CHARS: usize = 10;
 const PASSWORD_MAX_CHARS: usize = 128;
 const ARGON2_MEMORY_KIB: u32 = 64 * 1024;
