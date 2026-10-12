@@ -66,7 +66,7 @@ async fn all_four_connections_have_durable_sqlite_settings_and_real_migrations()
         .fetch_one(database.pool())
         .await
         .unwrap();
-    assert_eq!(rows, 5);
+    assert_eq!(rows, 12);
     let pending: Option<String> =
         sqlx::query_scalar("SELECT setup_completed_at FROM installation_state WHERE singleton = 1")
             .fetch_one(database.pool())
@@ -576,4 +576,66 @@ fn cli_exposes_version_and_rejects_invalid_bind_before_creating_data() {
         .unwrap();
     assert!(!output.status.success());
     assert!(!data.exists());
+}
+
+#[test]
+fn setup_token_cli_refuses_non_terminal_output_before_creating_data() {
+    let directory = TempDir::new().unwrap();
+    let data = directory.path().join("setup-data");
+    let output = Command::new(env!("CARGO_BIN_EXE_puxiri"))
+        .args(["setup-token", "--data-dir"])
+        .arg(&data)
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("interactive terminal"));
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("One-time setup token"));
+    assert!(!data.exists());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn serve_creates_a_private_default_master_key_before_binding() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = TempDir::new().unwrap();
+    let data = directory.path().join("serve-data");
+    let occupied_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let occupied_address = occupied_listener.local_addr().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_puxiri"))
+        .args([
+            "serve",
+            "--bind",
+            &occupied_address.to_string(),
+            "--data-dir",
+        ])
+        .arg(&data)
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let key_path = data.join("master.key");
+    let metadata = std::fs::metadata(&key_path).unwrap();
+    assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+    assert_eq!(std::fs::read(key_path).unwrap().len(), 32);
+
+    let custom_data = directory.path().join("custom-data");
+    let custom_key = directory.path().join("custom-master.key");
+    let output = Command::new(env!("CARGO_BIN_EXE_puxiri"))
+        .args([
+            "serve",
+            "--bind",
+            &occupied_address.to_string(),
+            "--data-dir",
+        ])
+        .arg(&custom_data)
+        .arg("--master-key")
+        .arg(&custom_key)
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    assert!(custom_key.is_file());
+    assert!(!custom_data.join("master.key").exists());
 }

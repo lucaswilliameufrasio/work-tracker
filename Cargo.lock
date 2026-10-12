@@ -485,6 +485,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fd307490d624467aa6f74b0eabb77633d1f758a7b25f12bceb0b22e08d9726f6"
 
 [[package]]
+name = "base32"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "022dfe9eb35f19ebbcb51e0b40a5ab759f46ad60cadf7297e0bd085afb50e076"
+
+[[package]]
 name = "base64"
 version = "0.21.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2528,10 +2534,13 @@ dependencies = [
  "argon2",
  "aws-sdk-sesv2",
  "axum",
+ "base32",
  "base64 0.22.1",
  "chrono",
  "clap",
+ "hmac 0.13.0",
  "http-body-util",
+ "libc",
  "mime_guess",
  "oauth2",
  "openidconnect",
@@ -2542,11 +2551,14 @@ dependencies = [
  "rmcp",
  "rusqlite",
  "rust-embed",
+ "rustix",
  "serde",
  "serde_json",
+ "sha1",
  "sha2 0.11.0",
  "sqlx",
  "standardwebhooks",
+ "subtle",
  "tempfile",
  "thiserror 2.0.21",
  "time",
@@ -2613,7 +2625,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3003,7 +3015,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

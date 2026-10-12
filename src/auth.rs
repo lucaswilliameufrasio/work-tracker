@@ -11,7 +11,19 @@ use thiserror::Error;
 use tokio::{sync::Semaphore, task};
 use zeroize::Zeroizing;
 
+pub mod authentication;
+pub mod credentials;
+pub mod email_addresses;
+pub mod email_verification;
+pub mod master_key;
+pub mod mfa;
+pub mod password_reset;
+pub mod rate_limit;
+pub mod reauthentication;
+pub mod recovery;
 pub mod session;
+pub mod setup;
+pub(crate) mod time;
 
 const PASSWORD_MIN_CHARS: usize = 10;
 const PASSWORD_MAX_CHARS: usize = 128;
@@ -38,6 +50,10 @@ const COMMON_PASSWORDS: &[&str] = &[
 ];
 
 static PASSWORD_KDF_ADMISSION: OnceLock<Arc<Semaphore>> = OnceLock::new();
+
+#[cfg(test)]
+pub(crate) static PASSWORD_KDF_TEST_LOCK: tokio::sync::Mutex<()> =
+    tokio::sync::Mutex::const_new(());
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EmailAddress {
@@ -73,11 +89,35 @@ pub enum PasswordError {
 pub enum SessionTokenError {
     #[error("secure random token generation failed")]
     RandomnessFailed,
+    #[error("session token encoding is invalid")]
+    InvalidEncoding,
 }
 
 pub struct SessionToken(Zeroizing<String>);
 
 impl SessionToken {
+    pub fn parse(value: &str) -> Result<Self, SessionTokenError> {
+        if value.len() != 43
+            || !value
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+        {
+            return Err(SessionTokenError::InvalidEncoding);
+        }
+
+        let decoded = Zeroizing::new(
+            URL_SAFE_NO_PAD
+                .decode(value)
+                .map_err(|_| SessionTokenError::InvalidEncoding)?,
+        );
+        let canonical = Zeroizing::new(URL_SAFE_NO_PAD.encode(decoded.as_slice()));
+        if decoded.len() != 32 || canonical.as_str() != value {
+            return Err(SessionTokenError::InvalidEncoding);
+        }
+
+        Ok(Self(Zeroizing::new(value.to_owned())))
+    }
+
     pub fn generate() -> Result<Self, SessionTokenError> {
         let mut random_bytes = Zeroizing::new([0_u8; 32]);
         OsRng
@@ -303,10 +343,21 @@ mod tests {
             token.digest(),
             Sha256::digest(token.expose().as_bytes()).as_slice()
         );
+
+        let parsed = SessionToken::parse(token.expose()).unwrap();
+        assert_eq!(parsed.digest(), token.digest());
+        let padded = format!("{}=", token.expose());
+        for invalid in ["", "not-a-token", padded.as_str()] {
+            assert!(matches!(
+                SessionToken::parse(invalid),
+                Err(SessionTokenError::InvalidEncoding)
+            ));
+        }
     }
 
     #[tokio::test]
     async fn password_service_hashes_and_verifies_the_bounded_argon2id_profile() {
+        let _guard = PASSWORD_KDF_TEST_LOCK.lock().await;
         let service = PasswordService::default();
         let password = String::from("a deliberately strong passphrase");
         let encoded_hash = service.hash(password.clone()).await.unwrap();
