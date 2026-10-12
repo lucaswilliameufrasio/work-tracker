@@ -21,6 +21,7 @@ pub enum AuditEventKind {
     PasswordChanged,
     SessionRevoked,
     SessionsRevoked,
+    ProjectCreated,
 }
 
 impl AuditEventKind {
@@ -34,6 +35,7 @@ impl AuditEventKind {
             Self::PasswordChanged => "auth.password.changed",
             Self::SessionRevoked => "auth.session.revoked",
             Self::SessionsRevoked => "auth.sessions.revoked",
+            Self::ProjectCreated => "project.created",
         }
     }
 }
@@ -77,6 +79,13 @@ impl AuditEventTarget {
     pub fn session(id: impl Into<String>) -> Self {
         Self {
             kind: "session",
+            id: id.into(),
+        }
+    }
+
+    pub fn project(id: impl Into<String>) -> Self {
+        Self {
+            kind: "project",
             id: id.into(),
         }
     }

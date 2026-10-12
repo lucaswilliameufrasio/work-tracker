@@ -1,4 +1,4 @@
-use sqlx::{Row, SqlitePool};
+use sqlx::{Row, Sqlite, SqliteConnection, SqlitePool, Transaction};
 use thiserror::Error;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -104,8 +104,9 @@ impl AccessContext {
     }
 }
 
-/// Loads account and organization membership from SQLite for one authorization
-/// decision. Project membership is deliberately absent until its schema exists.
+/// Loads current account and organization membership from SQLite for one
+/// organization-scoped authorization decision. Project membership is not
+/// included because this query has no project identifier.
 #[derive(Clone)]
 pub struct AccessStore {
     pool: SqlitePool,
@@ -123,47 +124,67 @@ impl AccessStore {
         user_id: &str,
         recent_privileged_proof: bool,
     ) -> Result<Option<AccessContext>, AccessStoreError> {
-        let row = sqlx::query(
-            "SELECT users.state AS account_state, \
-                    organization_members.role AS organization_role, \
-                    EXISTS (SELECT 1 FROM installation_admins \
-                            WHERE installation_admins.user_id = users.id) \
-                        AS installation_admin \
-             FROM users \
-             LEFT JOIN organization_members \
-               ON organization_members.organization_id = 1 \
-              AND organization_members.user_id = users.id \
-             WHERE users.id = ?",
-        )
-        .bind(user_id)
-        .fetch_optional(&self.pool)
-        .await?;
-
-        let Some(row) = row else {
-            return Ok(None);
-        };
-
-        let account_state = parse_account_state(&row.try_get::<String, _>("account_state")?)?;
-        let raw_organization_role = row.try_get::<Option<String>, _>("organization_role")?;
-        let organization_role = parse_organization_role(raw_organization_role.as_deref())?;
-        let installation_admin = match row.try_get::<i64, _>("installation_admin")? {
-            0 => false,
-            1 => true,
-            _ => return Err(AccessStoreError::CorruptState),
-        };
-
-        let context = AccessContext::new(
-            account_state,
-            installation_admin,
-            organization_role,
-            None,
-            false,
-            recent_privileged_proof,
-        )
-        .map_err(|_| AccessStoreError::CorruptState)?;
-
-        Ok(Some(context))
+        let mut connection = self.pool.acquire().await?;
+        load_organization_context_on_connection(&mut connection, user_id, recent_privileged_proof)
+            .await
     }
+
+    /// Loads current account and organization roles under the caller's write
+    /// transaction so an authorized mutation cannot use a stale role snapshot.
+    pub(crate) async fn load_organization_context_in_transaction(
+        transaction: &mut Transaction<'_, Sqlite>,
+        user_id: &str,
+        recent_privileged_proof: bool,
+    ) -> Result<Option<AccessContext>, AccessStoreError> {
+        load_organization_context_on_connection(transaction, user_id, recent_privileged_proof).await
+    }
+}
+
+async fn load_organization_context_on_connection(
+    connection: &mut SqliteConnection,
+    user_id: &str,
+    recent_privileged_proof: bool,
+) -> Result<Option<AccessContext>, AccessStoreError> {
+    let row = sqlx::query(
+        "SELECT users.state AS account_state, \
+                organization_members.role AS organization_role, \
+                EXISTS (SELECT 1 FROM installation_admins \
+                        WHERE installation_admins.user_id = users.id) \
+                    AS installation_admin \
+         FROM users \
+         LEFT JOIN organization_members \
+           ON organization_members.organization_id = 1 \
+          AND organization_members.user_id = users.id \
+         WHERE users.id = ?",
+    )
+    .bind(user_id)
+    .fetch_optional(&mut *connection)
+    .await?;
+
+    let Some(row) = row else {
+        return Ok(None);
+    };
+
+    let account_state = parse_account_state(&row.try_get::<String, _>("account_state")?)?;
+    let raw_organization_role = row.try_get::<Option<String>, _>("organization_role")?;
+    let organization_role = parse_organization_role(raw_organization_role.as_deref())?;
+    let installation_admin = match row.try_get::<i64, _>("installation_admin")? {
+        0 => false,
+        1 => true,
+        _ => return Err(AccessStoreError::CorruptState),
+    };
+
+    let context = AccessContext::new(
+        account_state,
+        installation_admin,
+        organization_role,
+        None,
+        false,
+        recent_privileged_proof,
+    )
+    .map_err(|_| AccessStoreError::CorruptState)?;
+
+    Ok(Some(context))
 }
 
 fn parse_account_state(value: &str) -> Result<AccountState, AccessStoreError> {

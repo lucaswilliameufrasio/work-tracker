@@ -1,0 +1,183 @@
+use chrono::{DateTime, Utc};
+use sqlx::SqlitePool;
+use thiserror::Error;
+use uuid::Uuid;
+
+use crate::{
+    access::{AccessCapability, AccessStore, AccessStoreError, authorize},
+    audit::{self, AuditEventError, AuditEventKind, AuditEventResult, AuditEventTarget},
+    auth::time::format_timestamp,
+};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProjectDefaultView {
+    Board,
+    List,
+}
+
+impl ProjectDefaultView {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Board => "board",
+            Self::List => "list",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectRecord {
+    pub id: String,
+    pub project_key: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub default_view: ProjectDefaultView,
+}
+
+#[derive(Debug, Error)]
+pub enum ProjectCreationError {
+    #[error("project key must be 2 to 6 uppercase ASCII letters")]
+    InvalidProjectKey,
+    #[error("project name must not be empty")]
+    InvalidProjectName,
+    #[error("the authenticated actor does not exist")]
+    UnknownActor,
+    #[error("the authenticated actor is not allowed to create a project")]
+    Forbidden,
+    #[error("project key is already in use")]
+    ProjectKeyUnavailable,
+    #[error("current access state is invalid")]
+    AccessState(#[from] AccessStoreError),
+    #[error("project persistence failed: {0}")]
+    Database(#[from] sqlx::Error),
+    #[error("project audit persistence failed: {0}")]
+    Audit(#[from] AuditEventError),
+}
+
+#[derive(Clone)]
+pub struct ProjectStore {
+    pool: SqlitePool,
+}
+
+impl ProjectStore {
+    pub fn new(pool: SqlitePool) -> Self {
+        Self { pool }
+    }
+
+    /// Creates a project and grants its creator the initial manager role.
+    /// The caller must provide the user ID from an already-authenticated
+    /// request; current account and organization roles are reloaded here.
+    pub async fn create(
+        &self,
+        actor_user_id: &str,
+        project_key: &str,
+        name: &str,
+        description: Option<&str>,
+        now: DateTime<Utc>,
+    ) -> Result<ProjectRecord, ProjectCreationError> {
+        validate_project_key(project_key)?;
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(ProjectCreationError::InvalidProjectName);
+        }
+
+        let project_id = Uuid::now_v7().to_string();
+        let timestamp = format_timestamp(now);
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+
+        let access_context = AccessStore::load_organization_context_in_transaction(
+            &mut transaction,
+            actor_user_id,
+            false,
+        )
+        .await?;
+        let Some(access_context) = access_context else {
+            transaction.rollback().await?;
+            return Err(ProjectCreationError::UnknownActor);
+        };
+        if authorize(&access_context, AccessCapability::CreateProject).is_err() {
+            transaction.rollback().await?;
+            return Err(ProjectCreationError::Forbidden);
+        }
+
+        let inserted = sqlx::query(
+            "INSERT INTO projects \
+             (id, organization_id, project_key, name, description, default_view, \
+              archived_at, next_issue_number, created_at, updated_at) \
+             VALUES (?, 1, ?, ?, ?, ?, NULL, 1, ?, ?) \
+             ON CONFLICT (organization_id, project_key) DO NOTHING",
+        )
+        .bind(&project_id)
+        .bind(project_key)
+        .bind(name)
+        .bind(description)
+        .bind(ProjectDefaultView::Board.as_str())
+        .bind(&timestamp)
+        .bind(&timestamp)
+        .execute(&mut *transaction)
+        .await?;
+
+        if inserted.rows_affected() == 0 {
+            transaction.rollback().await?;
+            return Err(ProjectCreationError::ProjectKeyUnavailable);
+        }
+
+        sqlx::query(
+            "INSERT INTO project_members \
+             (project_id, organization_id, user_id, role, created_at) \
+             VALUES (?, 1, ?, 'manager', ?)",
+        )
+        .bind(&project_id)
+        .bind(actor_user_id)
+        .bind(&timestamp)
+        .execute(&mut *transaction)
+        .await?;
+
+        audit::append_in_transaction(
+            &mut transaction,
+            Some(actor_user_id),
+            AuditEventKind::ProjectCreated,
+            AuditEventResult::Success,
+            &AuditEventTarget::project(&project_id),
+            now,
+        )
+        .await?;
+
+        transaction.commit().await?;
+
+        Ok(ProjectRecord {
+            id: project_id,
+            project_key: project_key.to_owned(),
+            name: name.to_owned(),
+            description: description.map(str::to_owned),
+            default_view: ProjectDefaultView::Board,
+        })
+    }
+}
+
+fn validate_project_key(project_key: &str) -> Result<(), ProjectCreationError> {
+    if !(2..=6).contains(&project_key.len())
+        || !project_key.bytes().all(|byte| byte.is_ascii_uppercase())
+    {
+        return Err(ProjectCreationError::InvalidProjectKey);
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ProjectCreationError, validate_project_key};
+
+    #[test]
+    fn project_keys_are_two_to_six_uppercase_ascii_letters() {
+        for valid in ["AB", "DEV", "ABCDEF"] {
+            assert!(validate_project_key(valid).is_ok());
+        }
+
+        for invalid in ["A", "ABCDEFG", "dev", "A1", "ÉV", " A", "A ", ""] {
+            assert!(matches!(
+                validate_project_key(invalid),
+                Err(ProjectCreationError::InvalidProjectKey)
+            ));
+        }
+    }
+}
