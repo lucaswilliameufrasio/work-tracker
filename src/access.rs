@@ -129,6 +129,24 @@ impl AccessStore {
             .await
     }
 
+    /// Loads current project access without allowing organization or
+    /// installation roles to imply project-content access.
+    pub async fn load_project_context(
+        &self,
+        user_id: &str,
+        project_id: &str,
+        recent_privileged_proof: bool,
+    ) -> Result<Option<AccessContext>, AccessStoreError> {
+        let mut connection = self.pool.acquire().await?;
+        load_project_context_on_connection(
+            &mut connection,
+            user_id,
+            project_id,
+            recent_privileged_proof,
+        )
+        .await
+    }
+
     /// Loads current account and organization roles under the caller's write
     /// transaction so an authorized mutation cannot use a stale role snapshot.
     pub(crate) async fn load_organization_context_in_transaction(
@@ -137,6 +155,23 @@ impl AccessStore {
         recent_privileged_proof: bool,
     ) -> Result<Option<AccessContext>, AccessStoreError> {
         load_organization_context_on_connection(transaction, user_id, recent_privileged_proof).await
+    }
+
+    /// Loads project authorization state on the caller's transaction so
+    /// protected mutations can fence membership and archive changes.
+    pub async fn load_project_context_in_transaction(
+        transaction: &mut Transaction<'_, Sqlite>,
+        user_id: &str,
+        project_id: &str,
+        recent_privileged_proof: bool,
+    ) -> Result<Option<AccessContext>, AccessStoreError> {
+        load_project_context_on_connection(
+            transaction,
+            user_id,
+            project_id,
+            recent_privileged_proof,
+        )
+        .await
     }
 }
 
@@ -187,6 +222,81 @@ async fn load_organization_context_on_connection(
     Ok(Some(context))
 }
 
+async fn load_project_context_on_connection(
+    connection: &mut SqliteConnection,
+    user_id: &str,
+    project_id: &str,
+    recent_privileged_proof: bool,
+) -> Result<Option<AccessContext>, AccessStoreError> {
+    let row = sqlx::query(
+        "SELECT users.state AS account_state, \
+                organization_members.role AS organization_role, \
+                EXISTS (SELECT 1 FROM installation_admins \
+                        WHERE installation_admins.user_id = users.id) \
+                    AS installation_admin, \
+                project_members.role AS project_role, \
+                CASE WHEN projects.archived_at IS NULL THEN 0 ELSE 1 END \
+                    AS project_archived \
+         FROM projects \
+         JOIN users ON users.id = ? \
+         LEFT JOIN organization_members \
+           ON organization_members.organization_id = projects.organization_id \
+          AND organization_members.user_id = users.id \
+         LEFT JOIN project_members \
+           ON project_members.project_id = projects.id \
+          AND project_members.organization_id = projects.organization_id \
+          AND project_members.user_id = users.id \
+         WHERE projects.id = ?",
+    )
+    .bind(user_id)
+    .bind(project_id)
+    .fetch_optional(&mut *connection)
+    .await?;
+
+    let Some(row) = row else {
+        return Ok(None);
+    };
+
+    let account_state = parse_account_state(&row.try_get::<String, _>("account_state")?)?;
+    let raw_organization_role = row.try_get::<Option<String>, _>("organization_role")?;
+    let organization_role = parse_organization_role(raw_organization_role.as_deref())?;
+    let installation_admin = parse_boolean_column(&row, "installation_admin")?;
+    let raw_project_role = row.try_get::<Option<String>, _>("project_role")?;
+    let project_role = parse_project_role(raw_project_role.as_deref())?;
+    let project_archived = parse_boolean_column(&row, "project_archived")?;
+
+    let context = AccessContext::new(
+        account_state,
+        installation_admin,
+        organization_role,
+        project_role,
+        project_archived,
+        recent_privileged_proof,
+    )
+    .map_err(|_| AccessStoreError::CorruptState)?;
+
+    let is_org_admin = matches!(
+        context.organization_role,
+        Some(OrganizationRole::Owner | OrganizationRole::Admin)
+    );
+    if context.project_role.is_none() && !is_org_admin {
+        return Ok(None);
+    }
+
+    Ok(Some(context))
+}
+
+fn parse_boolean_column(
+    row: &sqlx::sqlite::SqliteRow,
+    column: &str,
+) -> Result<bool, AccessStoreError> {
+    match row.try_get::<i64, _>(column)? {
+        0 => Ok(false),
+        1 => Ok(true),
+        _ => Err(AccessStoreError::CorruptState),
+    }
+}
+
 fn parse_account_state(value: &str) -> Result<AccountState, AccessStoreError> {
     match value {
         "active" => Ok(AccountState::Active),
@@ -205,6 +315,16 @@ fn parse_organization_role(
         Some("admin") => Ok(Some(OrganizationRole::Admin)),
         Some("member") => Ok(Some(OrganizationRole::Member)),
         Some("guest") => Ok(Some(OrganizationRole::Guest)),
+        Some(_) => Err(AccessStoreError::CorruptState),
+    }
+}
+
+fn parse_project_role(value: Option<&str>) -> Result<Option<ProjectRole>, AccessStoreError> {
+    match value {
+        None => Ok(None),
+        Some("manager") => Ok(Some(ProjectRole::Manager)),
+        Some("member") => Ok(Some(ProjectRole::Member)),
+        Some("viewer") => Ok(Some(ProjectRole::Viewer)),
         Some(_) => Err(AccessStoreError::CorruptState),
     }
 }
@@ -265,6 +385,10 @@ pub fn authorize(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{db::Database, projects::ProjectStore};
+    use chrono::{DateTime, Utc};
+    use tempfile::TempDir;
+    use uuid::Uuid;
 
     fn context(
         state: AccountState,
@@ -623,5 +747,87 @@ mod tests {
             ),
             Err(AccessContextError::GuestCannotBeInstallationAdmin)
         );
+    }
+
+    #[tokio::test]
+    async fn project_context_can_be_loaded_from_the_callers_write_transaction() {
+        let directory = TempDir::new().unwrap();
+        let database = Database::open(directory.path()).await.unwrap();
+        sqlx::query(
+            "INSERT INTO organizations \
+             (id, name, locale, timezone, created_at, updated_at) \
+             VALUES (1, 'Access transaction test', 'en', 'UTC', \
+                     '2026-10-12T00:00:00.000000000Z', \
+                     '2026-10-12T00:00:00.000000000Z')",
+        )
+        .execute(database.pool())
+        .await
+        .unwrap();
+        let user_id = Uuid::now_v7().to_string();
+        sqlx::query(
+            "INSERT INTO users (id, display_name, state, created_at, updated_at) \
+             VALUES (?, 'Access transaction test', 'active', \
+                     '2026-10-12T00:00:00.000000000Z', \
+                     '2026-10-12T00:00:00.000000000Z')",
+        )
+        .bind(&user_id)
+        .execute(database.pool())
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO organization_members \
+             (organization_id, user_id, role, created_at) \
+             VALUES (1, ?, 'owner', '2026-10-12T00:00:00.000000000Z')",
+        )
+        .bind(&user_id)
+        .execute(database.pool())
+        .await
+        .unwrap();
+        let now = DateTime::parse_from_rfc3339("2026-10-12T13:14:15Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let project = ProjectStore::new(database.pool().clone())
+            .create(&user_id, "TX", "Transaction context", None, now)
+            .await
+            .unwrap();
+
+        let mut transaction = database.pool().begin_with("BEGIN IMMEDIATE").await.unwrap();
+        sqlx::query(
+            "UPDATE project_members SET role = 'viewer' \
+             WHERE project_id = ? AND user_id = ?",
+        )
+        .bind(&project.id)
+        .bind(&user_id)
+        .execute(&mut *transaction)
+        .await
+        .unwrap();
+        let transaction_context = AccessStore::load_project_context_in_transaction(
+            &mut transaction,
+            &user_id,
+            &project.id,
+            false,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(is_allowed(
+            &transaction_context,
+            AccessCapability::ReadProjectContent
+        ));
+        assert!(!is_allowed(
+            &transaction_context,
+            AccessCapability::MutateIssues
+        ));
+        transaction.rollback().await.unwrap();
+
+        let persisted_context = AccessStore::new(database.pool().clone())
+            .load_project_context(&user_id, &project.id, false)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(is_allowed(
+            &persisted_context,
+            AccessCapability::MutateIssues
+        ));
     }
 }

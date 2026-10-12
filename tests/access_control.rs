@@ -1,6 +1,7 @@
 use puxiri::{
     access::{AccessCapability, AccessStore, AccessStoreError, OrganizationRole, authorize},
     db::Database,
+    projects::ProjectStore,
 };
 use sqlx::SqliteConnection;
 use tempfile::TempDir;
@@ -47,6 +48,34 @@ async fn create_user(database: &Database, state: &str, role: Option<&str>) -> St
     }
 
     user_id
+}
+
+async fn create_project(database: &Database, owner_id: &str, project_key: &str) -> String {
+    ProjectStore::new(database.pool().clone())
+        .create(
+            owner_id,
+            project_key,
+            "Access project",
+            None,
+            chrono::Utc::now(),
+        )
+        .await
+        .unwrap()
+        .id
+}
+
+async fn add_project_member(database: &Database, project_id: &str, user_id: &str, role: &str) {
+    sqlx::query(
+        "INSERT INTO project_members \
+         (project_id, organization_id, user_id, role, created_at) \
+         VALUES (?, 1, ?, ?, '2026-10-12T00:00:00.000000000Z')",
+    )
+    .bind(project_id)
+    .bind(user_id)
+    .bind(role)
+    .execute(database.pool())
+    .await
+    .unwrap();
 }
 
 async fn set_ignore_check_constraints(connection: &mut SqliteConnection) {
@@ -320,6 +349,216 @@ async fn invalid_installation_admin_membership_invariant_fails_closed() {
     let store = AccessStore::new(database.pool().clone());
     assert!(matches!(
         store.load_organization_context(&user_id, false).await,
+        Err(AccessStoreError::CorruptState)
+    ));
+}
+
+#[tokio::test]
+async fn project_context_loads_explicit_roles_without_implicit_org_or_installation_access() {
+    let directory = TempDir::new().unwrap();
+    let database = Database::open(directory.path()).await.unwrap();
+    create_organization(&database).await;
+    let creator = create_user(&database, "active", Some("owner")).await;
+    let owner = create_user(&database, "active", Some("owner")).await;
+    let administrator = create_user(&database, "active", Some("admin")).await;
+    let member = create_user(&database, "active", Some("member")).await;
+    let viewer = create_user(&database, "active", Some("member")).await;
+    let guest_member = create_user(&database, "active", Some("guest")).await;
+    let guest_viewer = create_user(&database, "active", Some("guest")).await;
+    let installation_admin = create_user(&database, "active", Some("member")).await;
+    let project_id = create_project(&database, &creator, "CTX").await;
+    add_project_member(&database, &project_id, &member, "member").await;
+    add_project_member(&database, &project_id, &viewer, "viewer").await;
+    add_project_member(&database, &project_id, &guest_member, "member").await;
+    add_project_member(&database, &project_id, &guest_viewer, "viewer").await;
+    sqlx::query(
+        "INSERT INTO installation_admins (user_id, created_at) \
+         VALUES (?, '2026-10-12T00:00:00.000000000Z')",
+    )
+    .bind(&installation_admin)
+    .execute(database.pool())
+    .await
+    .unwrap();
+    let store = AccessStore::new(database.pool().clone());
+
+    let manager_context = store
+        .load_project_context(&creator, &project_id, false)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(authorize(&manager_context, AccessCapability::ReadProjectContent).is_ok());
+    assert!(authorize(&manager_context, AccessCapability::ManageProjectSchema).is_ok());
+    assert!(authorize(&manager_context, AccessCapability::ExportProject).is_ok());
+
+    let member_context = store
+        .load_project_context(&member, &project_id, false)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(authorize(&member_context, AccessCapability::ReadProjectContent).is_ok());
+    assert!(authorize(&member_context, AccessCapability::MutateIssues).is_ok());
+    assert!(authorize(&member_context, AccessCapability::ManageProjectSchema).is_err());
+    assert!(authorize(&member_context, AccessCapability::ExportProject).is_err());
+
+    let viewer_context = store
+        .load_project_context(&viewer, &project_id, false)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(authorize(&viewer_context, AccessCapability::ReadProjectContent).is_ok());
+    assert!(authorize(&viewer_context, AccessCapability::MutateIssues).is_err());
+
+    let guest_member_context = store
+        .load_project_context(&guest_member, &project_id, false)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(authorize(&guest_member_context, AccessCapability::ReadProjectContent).is_ok());
+    assert!(authorize(&guest_member_context, AccessCapability::MutateIssues).is_ok());
+    assert!(authorize(&guest_member_context, AccessCapability::ManageProjectSchema).is_err());
+
+    let guest_viewer_context = store
+        .load_project_context(&guest_viewer, &project_id, false)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(authorize(&guest_viewer_context, AccessCapability::ReadProjectContent).is_ok());
+    assert!(authorize(&guest_viewer_context, AccessCapability::MutateIssues).is_err());
+
+    for (org_admin, role) in [
+        (&owner, OrganizationRole::Owner),
+        (&administrator, OrganizationRole::Admin),
+    ] {
+        let context = store
+            .load_project_context(org_admin, &project_id, false)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(authorize(&context, AccessCapability::ReadProjectContent).is_err());
+        assert!(authorize(&context, AccessCapability::ChangeProjectArchive).is_ok());
+        assert!(authorize(&context, AccessCapability::ManageProjectMembership).is_ok());
+        if role == OrganizationRole::Owner {
+            assert!(authorize(&context, AccessCapability::TransferOrganizationOwnership).is_ok());
+        }
+    }
+
+    assert!(
+        store
+            .load_project_context(&installation_admin, &project_id, false)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let unrelated_member = create_user(&database, "active", Some("member")).await;
+    assert!(
+        store
+            .load_project_context(&unrelated_member, &project_id, false)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        store
+            .load_project_context(&owner, &Uuid::now_v7().to_string(), false)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        store
+            .load_project_context(&Uuid::now_v7().to_string(), &project_id, false)
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn project_context_reloads_membership_account_state_and_archived_state() {
+    let directory = TempDir::new().unwrap();
+    let database = Database::open(directory.path()).await.unwrap();
+    create_organization(&database).await;
+    let manager = create_user(&database, "active", Some("member")).await;
+    let member = create_user(&database, "active", Some("member")).await;
+    let creator = create_user(&database, "active", Some("admin")).await;
+    let owner = create_user(&database, "active", Some("owner")).await;
+    let project_id = create_project(&database, &creator, "UPD").await;
+    add_project_member(&database, &project_id, &manager, "manager").await;
+    add_project_member(&database, &project_id, &member, "member").await;
+    let store = AccessStore::new(database.pool().clone());
+
+    sqlx::query("UPDATE project_members SET role = 'viewer' WHERE project_id = ? AND user_id = ?")
+        .bind(&project_id)
+        .bind(&member)
+        .execute(database.pool())
+        .await
+        .unwrap();
+    let updated_member = store
+        .load_project_context(&member, &project_id, false)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(authorize(&updated_member, AccessCapability::ReadProjectContent).is_ok());
+    assert!(authorize(&updated_member, AccessCapability::MutateIssues).is_err());
+
+    sqlx::query("UPDATE projects SET archived_at = '2026-10-12T01:00:00.000000000Z' WHERE id = ?")
+        .bind(&project_id)
+        .execute(database.pool())
+        .await
+        .unwrap();
+    let archived_manager = store
+        .load_project_context(&manager, &project_id, false)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(authorize(&archived_manager, AccessCapability::ReadProjectContent).is_ok());
+    assert!(authorize(&archived_manager, AccessCapability::ExportProject).is_ok());
+    assert!(authorize(&archived_manager, AccessCapability::ChangeProjectArchive).is_ok());
+    assert!(authorize(&archived_manager, AccessCapability::MutateIssues).is_err());
+    assert!(authorize(&archived_manager, AccessCapability::ManageProjectSchema).is_err());
+    assert!(authorize(&archived_manager, AccessCapability::ManageProjectMembership).is_err());
+
+    let archived_owner = store
+        .load_project_context(&owner, &project_id, false)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(authorize(&archived_owner, AccessCapability::ReadProjectContent).is_err());
+    assert!(authorize(&archived_owner, AccessCapability::ChangeProjectArchive).is_ok());
+
+    sqlx::query("UPDATE users SET state = 'banned' WHERE id = ?")
+        .bind(&manager)
+        .execute(database.pool())
+        .await
+        .unwrap();
+    let banned_manager = store
+        .load_project_context(&manager, &project_id, false)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(authorize(&banned_manager, AccessCapability::ReadProjectContent).is_err());
+    assert!(authorize(&banned_manager, AccessCapability::ChangeProjectArchive).is_err());
+}
+
+#[tokio::test]
+async fn malformed_persisted_project_role_fails_closed() {
+    let directory = TempDir::new().unwrap();
+    let database = Database::open(directory.path()).await.unwrap();
+    create_organization(&database).await;
+    let owner = create_user(&database, "active", Some("owner")).await;
+    let project_id = create_project(&database, &owner, "BAD").await;
+    let mut connection = database.pool().acquire().await.unwrap();
+    set_ignore_check_constraints(&mut connection).await;
+    sqlx::query("UPDATE project_members SET role = 'unknown' WHERE project_id = ?")
+        .bind(&project_id)
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    drop(connection);
+
+    let store = AccessStore::new(database.pool().clone());
+    assert!(matches!(
+        store.load_project_context(&owner, &project_id, false).await,
         Err(AccessStoreError::CorruptState)
     ));
 }
