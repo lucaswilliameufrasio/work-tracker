@@ -1,4 +1,4 @@
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
 use sqlx::{Row, SqlitePool};
 use thiserror::Error;
 use uuid::Uuid;
@@ -11,6 +11,11 @@ use crate::{
 const INITIAL_RANK_STRIDE: i64 = 1_024;
 const MAX_DESCRIPTION_BYTES: usize = 65_536;
 const MAX_TITLE_CHARS: usize = 240;
+
+mod queries;
+pub use queries::{
+    IssueDetails, IssueEvent, IssueEventKind, IssueListPage, IssueReadError, IssueSummary,
+};
 
 #[derive(Debug, Error)]
 pub enum IssueCreationError {
@@ -39,6 +44,10 @@ pub enum IssueCreationError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IssuePriority {
     None,
+    Low,
+    Medium,
+    High,
+    Urgent,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -54,9 +63,13 @@ pub struct IssueRecord {
     pub assignee_user_id: Option<String>,
     pub creator_user_id: String,
     pub priority: IssuePriority,
+    pub due_date: Option<NaiveDate>,
     pub rank: i64,
     pub version: i64,
+    pub completed_at: Option<DateTime<Utc>>,
+    pub trashed_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -68,7 +81,7 @@ pub struct NewIssue<'a> {
 
 #[derive(Clone)]
 pub struct IssueStore {
-    pool: SqlitePool,
+    pub(super) pool: SqlitePool,
 }
 
 impl IssueStore {
@@ -251,9 +264,13 @@ impl IssueStore {
             assignee_user_id: input.assignee_user_id.map(str::to_owned),
             creator_user_id: actor_user_id.to_owned(),
             priority: IssuePriority::None,
+            due_date: None,
             rank,
             version: 1,
+            completed_at: None,
+            trashed_at: None,
             created_at: now,
+            updated_at: now,
         })
     }
 }

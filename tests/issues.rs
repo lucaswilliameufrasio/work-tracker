@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 use puxiri::{
     db::Database,
-    issues::{IssueCreationError, IssuePriority, IssueStore, NewIssue},
+    issues::{IssueCreationError, IssuePriority, IssueReadError, IssueStore, NewIssue},
     projects::ProjectStore,
 };
 use sqlx::Row;
@@ -703,4 +703,336 @@ async fn composite_foreign_keys_reject_type_or_status_from_another_project() {
         .await
         .unwrap();
     assert_eq!(issue_count, 0);
+}
+
+#[tokio::test]
+async fn authorized_issue_queries_page_by_immutable_number_and_read_trashed_details() {
+    let directory = TempDir::new().unwrap();
+    let database = Database::open(directory.path()).await.unwrap();
+    create_organization(&database).await;
+    let owner = create_user(&database, "active", "owner").await;
+    let member = create_user(&database, "active", "member").await;
+    let guest = create_user(&database, "active", "guest").await;
+    let viewer = create_user(&database, "active", "member").await;
+    let project_id = create_project(&database, &owner, "READ").await;
+    add_project_member(&database, &project_id, &member, "member").await;
+    add_project_member(&database, &project_id, &guest, "member").await;
+    add_project_member(&database, &project_id, &viewer, "viewer").await;
+    let store = IssueStore::new(database.pool().clone());
+    let now = at("2026-10-12T13:14:15Z");
+
+    for title in ["Read 1", "Read 2", "Read 3"] {
+        store
+            .create(
+                &owner,
+                &project_id,
+                NewIssue {
+                    title,
+                    description: Some("Private Markdown description"),
+                    assignee_user_id: None,
+                },
+                now,
+            )
+            .await
+            .unwrap();
+    }
+
+    let first_page = store
+        .list_project_issues(&viewer, &project_id, None, 2)
+        .await
+        .unwrap();
+    assert_eq!(
+        first_page
+            .items
+            .iter()
+            .map(|issue| issue.issue_number)
+            .collect::<Vec<_>>(),
+        [1, 2]
+    );
+    assert_eq!(first_page.items[0].issue_key, "READ-1");
+    assert_eq!(first_page.next_after_issue_number, Some(2));
+    assert_eq!(
+        store
+            .get_project_issue(&owner, &project_id, 1)
+            .await
+            .unwrap()
+            .issue
+            .issue_key,
+        "READ-1"
+    );
+    assert_eq!(
+        store
+            .get_project_issue(&member, &project_id, 1)
+            .await
+            .unwrap()
+            .issue
+            .issue_key,
+        "READ-1"
+    );
+    assert_eq!(
+        store
+            .get_project_issue(&guest, &project_id, 1)
+            .await
+            .unwrap()
+            .issue
+            .issue_key,
+        "READ-1"
+    );
+
+    let details = store
+        .get_project_issue(&viewer, &project_id, 2)
+        .await
+        .unwrap();
+    assert_eq!(details.issue.issue_number, 2);
+    assert_eq!(details.issue.title, "Read 2");
+    assert_eq!(
+        details.issue.description.as_deref(),
+        Some("Private Markdown description")
+    );
+    assert_eq!(details.issue.priority, IssuePriority::None);
+    assert_eq!(details.issue.due_date, None);
+    assert_eq!(details.issue.completed_at, None);
+    assert_eq!(details.issue.trashed_at, None);
+    assert_eq!(details.issue.updated_at, now);
+    assert_eq!(details.history.len(), 1);
+    assert_eq!(details.history[0].actor_user_id, owner);
+    assert_eq!(
+        details.history[0].kind,
+        puxiri::issues::IssueEventKind::Created
+    );
+    assert_eq!(details.history[0].occurred_at, now);
+
+    store
+        .create(
+            &owner,
+            &project_id,
+            NewIssue {
+                title: "Read 4 created between pages",
+                description: None,
+                assignee_user_id: None,
+            },
+            now,
+        )
+        .await
+        .unwrap();
+    let second_page = store
+        .list_project_issues(&viewer, &project_id, first_page.next_after_issue_number, 2)
+        .await
+        .unwrap();
+    assert_eq!(
+        second_page
+            .items
+            .iter()
+            .map(|issue| issue.issue_number)
+            .collect::<Vec<_>>(),
+        [3, 4]
+    );
+    assert_eq!(second_page.next_after_issue_number, None);
+
+    sqlx::query(
+        "UPDATE issues SET trashed_at = '2026-10-12T13:30:00.000000000Z' \
+         WHERE project_id = ? AND issue_number = 2",
+    )
+    .bind(&project_id)
+    .execute(database.pool())
+    .await
+    .unwrap();
+    let trashed_details = store
+        .get_project_issue(&viewer, &project_id, 2)
+        .await
+        .unwrap();
+    assert_eq!(
+        trashed_details.issue.trashed_at,
+        Some(at("2026-10-12T13:30:00Z"))
+    );
+    let active_list = store
+        .list_project_issues(&viewer, &project_id, None, 10)
+        .await
+        .unwrap();
+    assert_eq!(
+        active_list
+            .items
+            .iter()
+            .map(|issue| issue.issue_number)
+            .collect::<Vec<_>>(),
+        [1, 3, 4]
+    );
+}
+
+#[tokio::test]
+async fn issue_reads_require_explicit_current_membership_and_hide_missing_resources() {
+    let directory = TempDir::new().unwrap();
+    let database = Database::open(directory.path()).await.unwrap();
+    create_organization(&database).await;
+    let owner = create_user(&database, "active", "owner").await;
+    let viewer = create_user(&database, "active", "member").await;
+    let org_admin = create_user(&database, "active", "admin").await;
+    let installation_admin = create_user(&database, "active", "admin").await;
+    let banned_member = create_user(&database, "active", "member").await;
+    let disabled_member = create_user(&database, "active", "member").await;
+    let project_id = create_project(&database, &owner, "AUTH").await;
+    add_project_member(&database, &project_id, &viewer, "viewer").await;
+    add_project_member(&database, &project_id, &banned_member, "member").await;
+    add_project_member(&database, &project_id, &disabled_member, "member").await;
+    sqlx::query("INSERT INTO installation_admins (user_id, created_at) VALUES (?, ?)")
+        .bind(&installation_admin)
+        .bind("2026-10-12T00:00:00.000000000Z")
+        .execute(database.pool())
+        .await
+        .unwrap();
+    sqlx::query("UPDATE users SET state = 'banned' WHERE id = ?")
+        .bind(&banned_member)
+        .execute(database.pool())
+        .await
+        .unwrap();
+    sqlx::query("UPDATE users SET state = 'disabled' WHERE id = ?")
+        .bind(&disabled_member)
+        .execute(database.pool())
+        .await
+        .unwrap();
+    let store = IssueStore::new(database.pool().clone());
+    store
+        .create(
+            &owner,
+            &project_id,
+            NewIssue {
+                title: "Private issue",
+                description: None,
+                assignee_user_id: None,
+            },
+            at("2026-10-12T13:14:15Z"),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        store
+            .get_project_issue(&viewer, &project_id, 1)
+            .await
+            .unwrap()
+            .issue
+            .issue_key,
+        "AUTH-1"
+    );
+
+    for actor in [
+        &org_admin,
+        &installation_admin,
+        &banned_member,
+        &disabled_member,
+    ] {
+        assert!(matches!(
+            store.get_project_issue(actor, &project_id, 1).await,
+            Err(IssueReadError::Unavailable)
+        ));
+    }
+    assert!(matches!(
+        store.get_project_issue(&viewer, &project_id, 99).await,
+        Err(IssueReadError::Unavailable)
+    ));
+    assert!(matches!(
+        store
+            .list_project_issues(&org_admin, &project_id, None, 10)
+            .await,
+        Err(IssueReadError::Unavailable)
+    ));
+    assert!(matches!(
+        store
+            .get_project_issue(&owner, "01890f3e-7b1c-7cc4-98a7-123456789abc", 1)
+            .await,
+        Err(IssueReadError::Unavailable)
+    ));
+
+    sqlx::query("UPDATE projects SET archived_at = ? WHERE id = ?")
+        .bind("2026-10-12T13:30:00.000000000Z")
+        .bind(&project_id)
+        .execute(database.pool())
+        .await
+        .unwrap();
+    assert!(
+        store
+            .get_project_issue(&viewer, &project_id, 1)
+            .await
+            .is_ok()
+    );
+    sqlx::query("DELETE FROM project_members WHERE project_id = ? AND user_id = ?")
+        .bind(&project_id)
+        .bind(&viewer)
+        .execute(database.pool())
+        .await
+        .unwrap();
+    assert!(matches!(
+        store.get_project_issue(&viewer, &project_id, 1).await,
+        Err(IssueReadError::Unavailable)
+    ));
+}
+
+#[tokio::test]
+async fn issue_queries_reject_invalid_bounds_and_fail_closed_on_corrupt_rows_or_history() {
+    let directory = TempDir::new().unwrap();
+    let database = Database::open(directory.path()).await.unwrap();
+    let store = IssueStore::new(database.pool().clone());
+    assert!(matches!(
+        store.list_project_issues("actor", "project", None, 0).await,
+        Err(IssueReadError::InvalidPageSize)
+    ));
+    assert!(matches!(
+        store
+            .list_project_issues("actor", "project", None, 101)
+            .await,
+        Err(IssueReadError::InvalidPageSize)
+    ));
+    assert!(matches!(
+        store
+            .list_project_issues("actor", "project", Some(0), 10)
+            .await,
+        Err(IssueReadError::InvalidCursor)
+    ));
+    assert!(matches!(
+        store.get_project_issue("actor", "project", 0).await,
+        Err(IssueReadError::InvalidIssueNumber)
+    ));
+
+    create_organization(&database).await;
+    let owner = create_user(&database, "active", "owner").await;
+    let project_id = create_project(&database, &owner, "BAD").await;
+    store
+        .create(
+            &owner,
+            &project_id,
+            NewIssue {
+                title: "Corruptible issue",
+                description: None,
+                assignee_user_id: None,
+            },
+            at("2026-10-12T13:14:15Z"),
+        )
+        .await
+        .unwrap();
+
+    sqlx::query("UPDATE issues SET updated_at = 'not-a-timestamp' WHERE project_id = ?")
+        .bind(&project_id)
+        .execute(database.pool())
+        .await
+        .unwrap();
+    assert!(matches!(
+        store.get_project_issue(&owner, &project_id, 1).await,
+        Err(IssueReadError::CorruptData)
+    ));
+
+    sqlx::query("UPDATE issues SET updated_at = ? WHERE project_id = ?")
+        .bind("2026-10-12T13:14:15.000000000Z")
+        .bind(&project_id)
+        .execute(database.pool())
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM issue_events WHERE project_id = ?")
+        .bind(&project_id)
+        .execute(database.pool())
+        .await
+        .unwrap();
+    assert!(matches!(
+        store.get_project_issue(&owner, &project_id, 1).await,
+        Err(IssueReadError::CorruptData)
+    ));
 }
