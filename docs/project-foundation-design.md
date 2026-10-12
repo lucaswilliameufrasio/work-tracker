@@ -1,6 +1,6 @@
 # Project foundation — feature design
 
-**Status:** Project persistence, transactional creation, and initial issue-schema catalogs are implemented; slice 186 passed `RUSTUP_TOOLCHAIN=1.99.0 PUXIRI_E2E_PORT=18491 make check` and slice 188 passed `RUSTUP_TOOLCHAIN=1.99.0 PUXIRI_E2E_PORT=18493 make check`. Issues, routes, UI, and project browsing are not part of these slices.
+**Status:** Project persistence, transactional creation, initial issue-schema catalogs, and an internal transactional issue-creation use case are implemented in separate slices; slice 186 passed `RUSTUP_TOOLCHAIN=1.99.0 PUXIRI_E2E_PORT=18491 make check`, slice 188 passed `RUSTUP_TOOLCHAIN=1.99.0 PUXIRI_E2E_PORT=18493 make check`, and slice 189 passed `RUSTUP_TOOLCHAIN=1.99.0 PUXIRI_E2E_PORT=18495 make check`. Routes, issue listing/mutation, UI, and project browsing remain outside these foundations.
 
 **Requirements:** `docs/development-plan.md`, sections 5–6 and 13.
 
@@ -20,7 +20,7 @@ The key is unique within its organization and immutable by both omission of an u
 - `project_members` owns explicit `manager`/`member`/`viewer` access. A composite foreign key requires organization membership; database triggers prevent a guest from being a manager and prevent changing an existing manager's organization role to guest.
 - Creation derives project membership from the creator's successful project-creation authorization, not from organization role as an implicit content grant. The transaction rechecks persisted state under SQLite's writer lock to avoid authorizing from a stale pre-transaction context.
 - Audit records contain only the actor, operation, target project ID, outcome, and timestamp; no project name, key, description, or content is copied into the audit row.
-- Projects are archived rather than permanently deleted. This slice provides no archive mutation and does not yet create the issue types/statuses required for a usable Kanban workflow.
+- Projects are archived rather than permanently deleted. This foundation provides no archive mutation; slice 188 seeds issue types/statuses and slice 189 adds issue creation, but neither provides a usable Kanban workflow.
 
 ## Modules and contract
 
@@ -34,4 +34,4 @@ The public command returns a project ID and validated project fields on success.
 
 ## Delivery boundary
 
-Integration tests use the real SQLite file/migrations and verify the complete transaction, persisted membership/default catalogs/audit, locale-specific names, denial and rollback paths, duplicate-key concurrency, guest constraints, and preservation of pre-existing audit rows and projects during migrations. Routes, UI, issue creation, catalog editing, invitations, assigning other members/managers, archive/restore, Kanban, idempotency keys, and last-manager/owner administration remain later slices.
+Integration tests use the real SQLite file/migrations and verify the complete project transaction, persisted membership/default catalogs/audit, locale-specific names, denial and rollback paths, duplicate-key concurrency, guest constraints, and preservation of pre-existing audit rows and projects during migrations. Routes, UI, issue listing/update, catalog editing, invitations, assigning other project members/managers, archive/restore, Kanban, idempotency keys, and last-manager/owner administration remain later slices; issue creation has its own contract and tests in `docs/issue-creation-design.md`.

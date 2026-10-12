@@ -4,4 +4,5 @@ pub mod auth;
 pub mod config;
 pub mod db;
 pub mod http;
+pub mod issues;
 pub mod projects;
