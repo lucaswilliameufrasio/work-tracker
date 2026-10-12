@@ -43,6 +43,8 @@ pub enum ProjectCreationError {
     UnknownActor,
     #[error("the authenticated actor is not allowed to create a project")]
     Forbidden,
+    #[error("persisted organization locale is invalid")]
+    CorruptOrganizationLocale,
     #[error("project key is already in use")]
     ProjectKeyUnavailable,
     #[error("current access state is invalid")]
@@ -99,6 +101,16 @@ impl ProjectStore {
             return Err(ProjectCreationError::Forbidden);
         }
 
+        let organization_locale: String =
+            sqlx::query_scalar("SELECT locale FROM organizations WHERE id = 1")
+                .fetch_one(&mut *transaction)
+                .await?;
+        let is_portuguese = match organization_locale.as_str() {
+            "pt-BR" => true,
+            "en" => false,
+            _ => return Err(ProjectCreationError::CorruptOrganizationLocale),
+        };
+
         let inserted = sqlx::query(
             "INSERT INTO projects \
              (id, organization_id, project_key, name, description, default_view, \
@@ -132,6 +144,9 @@ impl ProjectStore {
         .execute(&mut *transaction)
         .await?;
 
+        persist_initial_issue_schema(&mut transaction, &project_id, is_portuguese, &timestamp)
+            .await?;
+
         audit::append_in_transaction(
             &mut transaction,
             Some(actor_user_id),
@@ -152,6 +167,68 @@ impl ProjectStore {
             default_view: ProjectDefaultView::Board,
         })
     }
+}
+
+async fn persist_initial_issue_schema(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    project_id: &str,
+    is_portuguese: bool,
+    timestamp: &str,
+) -> Result<(), sqlx::Error> {
+    let issue_type_name = if is_portuguese { "Tarefa" } else { "Task" };
+    sqlx::query(
+        "INSERT INTO issue_types \
+         (id, project_id, system_key, name, icon_key, color_key, archived_at, \
+          created_at, updated_at) \
+         VALUES (?, ?, 'task', ?, NULL, NULL, NULL, ?, ?)",
+    )
+    .bind(Uuid::now_v7().to_string())
+    .bind(project_id)
+    .bind(issue_type_name)
+    .bind(timestamp)
+    .bind(timestamp)
+    .execute(&mut **transaction)
+    .await?;
+
+    let statuses = if is_portuguese {
+        [
+            ("backlog", "Backlog", "backlog", 0_i64, false),
+            ("todo", "A fazer", "backlog", 1, true),
+            ("in_progress", "Em progresso", "active", 2, true),
+            ("done", "Concluído", "done", 3, true),
+            ("canceled", "Cancelado", "canceled", 4, false),
+        ]
+    } else {
+        [
+            ("backlog", "Backlog", "backlog", 0_i64, false),
+            ("todo", "To do", "backlog", 1, true),
+            ("in_progress", "In progress", "active", 2, true),
+            ("done", "Done", "done", 3, true),
+            ("canceled", "Canceled", "canceled", 4, false),
+        ]
+    };
+
+    for (system_key, name, category, position, board_visible) in statuses {
+        sqlx::query(
+            "INSERT INTO statuses \
+             (id, project_id, system_key, name, category, position, board_visible, \
+              archived_at, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)",
+        )
+        .bind(Uuid::now_v7().to_string())
+        .bind(project_id)
+        .bind(system_key)
+        .bind(name)
+        .bind(category)
+        .bind(position)
+        .bind(if board_visible { 1_i64 } else { 0_i64 })
+        .bind(timestamp)
+        .bind(timestamp)
+        .execute(&mut **transaction)
+        .await?;
+    }
+
+    Ok(())
 }
 
 fn validate_project_key(project_key: &str) -> Result<(), ProjectCreationError> {

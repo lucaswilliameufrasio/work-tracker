@@ -17,13 +17,18 @@ fn at(timestamp: &str) -> DateTime<Utc> {
 }
 
 async fn create_organization(database: &Database) {
+    create_organization_with_locale(database, "en").await;
+}
+
+async fn create_organization_with_locale(database: &Database, locale: &str) {
     sqlx::query(
         "INSERT INTO organizations \
          (id, name, locale, timezone, created_at, updated_at) \
-         VALUES (1, 'Project test', 'en', 'UTC', \
+         VALUES (1, 'Project test', ?, 'UTC', \
                  '2026-10-12T00:00:00.000000000Z', \
                  '2026-10-12T00:00:00.000000000Z')",
     )
+    .bind(locale)
     .execute(database.pool())
     .await
     .unwrap();
@@ -128,6 +133,72 @@ async fn creation_atomically_persists_project_creator_manager_and_opaque_audit()
     assert_eq!(member.try_get::<String, _>("user_id").unwrap(), owner);
     assert_eq!(member.try_get::<String, _>("role").unwrap(), "manager");
 
+    let issue_type = sqlx::query(
+        "SELECT system_key, name, icon_key, color_key, archived_at, created_at, updated_at \
+         FROM issue_types WHERE project_id = ?",
+    )
+    .bind(&project.id)
+    .fetch_one(database.pool())
+    .await
+    .unwrap();
+    assert_eq!(
+        issue_type.try_get::<String, _>("system_key").unwrap(),
+        "task"
+    );
+    assert_eq!(issue_type.try_get::<String, _>("name").unwrap(), "Task");
+    assert_eq!(
+        issue_type.try_get::<Option<String>, _>("icon_key").unwrap(),
+        None
+    );
+    assert_eq!(
+        issue_type
+            .try_get::<Option<String>, _>("color_key")
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        issue_type
+            .try_get::<Option<String>, _>("archived_at")
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        issue_type.try_get::<String, _>("created_at").unwrap(),
+        "2026-10-12T13:14:15.123456789Z"
+    );
+    assert_eq!(
+        issue_type.try_get::<String, _>("updated_at").unwrap(),
+        "2026-10-12T13:14:15.123456789Z"
+    );
+
+    let statuses = sqlx::query(
+        "SELECT system_key, name, category, position, board_visible, archived_at \
+         FROM statuses WHERE project_id = ? ORDER BY position, id",
+    )
+    .bind(&project.id)
+    .fetch_all(database.pool())
+    .await
+    .unwrap();
+    let expected_statuses = [
+        ("backlog", "Backlog", "backlog", 0_i64, 0_i64),
+        ("todo", "To do", "backlog", 1, 1),
+        ("in_progress", "In progress", "active", 2, 1),
+        ("done", "Done", "done", 3, 1),
+        ("canceled", "Canceled", "canceled", 4, 0),
+    ];
+    assert_eq!(statuses.len(), expected_statuses.len());
+    for (row, expected) in statuses.iter().zip(expected_statuses) {
+        assert_eq!(row.try_get::<String, _>("system_key").unwrap(), expected.0);
+        assert_eq!(row.try_get::<String, _>("name").unwrap(), expected.1);
+        assert_eq!(row.try_get::<String, _>("category").unwrap(), expected.2);
+        assert_eq!(row.try_get::<i64, _>("position").unwrap(), expected.3);
+        assert_eq!(row.try_get::<i64, _>("board_visible").unwrap(), expected.4);
+        assert_eq!(
+            row.try_get::<Option<String>, _>("archived_at").unwrap(),
+            None
+        );
+    }
+
     let audit = sqlx::query(
         "SELECT event_kind, result, actor_user_id, target_kind, target_id, occurred_at \
          FROM audit_events WHERE target_id = ?",
@@ -150,6 +221,51 @@ async fn creation_atomically_persists_project_creator_manager_and_opaque_audit()
     assert_eq!(
         audit.try_get::<String, _>("occurred_at").unwrap(),
         "2026-10-12T13:14:15.123456789Z"
+    );
+}
+
+#[tokio::test]
+async fn new_project_seed_names_follow_the_organization_locale() {
+    let directory = TempDir::new().unwrap();
+    let database = Database::open(directory.path()).await.unwrap();
+    create_organization_with_locale(&database, "pt-BR").await;
+    let owner = create_user(&database, "active", "owner").await;
+    let project = ProjectStore::new(database.pool().clone())
+        .create(
+            &owner,
+            "PTBR",
+            "Projeto localizado",
+            None,
+            at("2026-10-12T13:14:15Z"),
+        )
+        .await
+        .unwrap();
+
+    let issue_type_name: String = sqlx::query_scalar(
+        "SELECT name FROM issue_types WHERE project_id = ? AND system_key = 'task'",
+    )
+    .bind(&project.id)
+    .fetch_one(database.pool())
+    .await
+    .unwrap();
+    assert_eq!(issue_type_name, "Tarefa");
+
+    let statuses = sqlx::query_scalar::<_, String>(
+        "SELECT name FROM statuses WHERE project_id = ? ORDER BY position",
+    )
+    .bind(&project.id)
+    .fetch_all(database.pool())
+    .await
+    .unwrap();
+    assert_eq!(
+        statuses,
+        [
+            "Backlog",
+            "A fazer",
+            "Em progresso",
+            "Concluído",
+            "Cancelado"
+        ]
     );
 }
 
@@ -209,6 +325,16 @@ async fn only_active_organization_owners_and_admins_can_create_projects() {
         .unwrap();
     assert_eq!(projects, 2);
     assert_eq!(audits, 2);
+    let seeded_types: i64 = sqlx::query_scalar("SELECT count(*) FROM issue_types")
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
+    let seeded_statuses: i64 = sqlx::query_scalar("SELECT count(*) FROM statuses")
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
+    assert_eq!(seeded_types, 2);
+    assert_eq!(seeded_statuses, 10);
 }
 
 #[tokio::test]
@@ -257,6 +383,16 @@ async fn invalid_inputs_and_duplicate_keys_leave_no_partial_rows() {
     assert_eq!(projects, 1);
     assert_eq!(members, 1);
     assert_eq!(audits, 1);
+    let issue_types: i64 = sqlx::query_scalar("SELECT count(*) FROM issue_types")
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
+    let statuses: i64 = sqlx::query_scalar("SELECT count(*) FROM statuses")
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
+    assert_eq!(issue_types, 1);
+    assert_eq!(statuses, 5);
 }
 
 #[tokio::test]
@@ -293,7 +429,7 @@ async fn concurrent_creation_with_the_same_key_has_one_atomic_winner() {
 }
 
 #[tokio::test]
-async fn audit_failure_rolls_back_project_and_initial_membership() {
+async fn audit_failure_rolls_back_project_membership_and_initial_schema() {
     let directory = TempDir::new().unwrap();
     let database = Database::open(directory.path()).await.unwrap();
     create_organization(&database).await;
@@ -331,6 +467,16 @@ async fn audit_failure_rolls_back_project_and_initial_membership() {
     assert_eq!(projects, 0);
     assert_eq!(members, 0);
     assert_eq!(audits, 0);
+    let issue_types: i64 = sqlx::query_scalar("SELECT count(*) FROM issue_types")
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
+    let statuses: i64 = sqlx::query_scalar("SELECT count(*) FROM statuses")
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
+    assert_eq!(issue_types, 0);
+    assert_eq!(statuses, 0);
 }
 
 #[tokio::test]
@@ -351,6 +497,28 @@ async fn database_constraints_preserve_explicit_membership_and_guest_manager_rul
         )
         .await
         .unwrap();
+
+    assert!(
+        sqlx::query("UPDATE issue_types SET system_key = 'renamed' WHERE project_id = ?")
+            .bind(&project.id)
+            .execute(database.pool())
+            .await
+            .is_err()
+    );
+    assert!(
+        sqlx::query("UPDATE statuses SET system_key = 'renamed' WHERE project_id = ?")
+            .bind(&project.id)
+            .execute(database.pool())
+            .await
+            .is_err()
+    );
+    assert!(
+        sqlx::query("UPDATE issue_types SET icon_key = 'unsafe icon' WHERE project_id = ?")
+            .bind(&project.id)
+            .execute(database.pool())
+            .await
+            .is_err()
+    );
 
     assert!(
         sqlx::query("UPDATE projects SET project_key = 'OTHER' WHERE id = ?")
@@ -413,7 +581,7 @@ async fn project_migration_preserves_existing_audit_rows_and_reinstates_immutabi
         .unwrap();
 
     sqlx::raw_sql(
-        "CREATE TABLE organizations (id INTEGER PRIMARY KEY); \
+        "CREATE TABLE organizations (id INTEGER PRIMARY KEY, locale TEXT NOT NULL); \
          CREATE TABLE users (id TEXT PRIMARY KEY); \
          CREATE TABLE organization_members ( \
              organization_id INTEGER NOT NULL, user_id TEXT NOT NULL, role TEXT NOT NULL, \
@@ -425,7 +593,7 @@ async fn project_migration_preserves_existing_audit_rows_and_reinstates_immutabi
     .execute(&pool)
     .await
     .unwrap();
-    sqlx::query("INSERT INTO organizations (id) VALUES (1)")
+    sqlx::query("INSERT INTO organizations (id, locale) VALUES (1, 'pt-BR')")
         .execute(&pool)
         .await
         .unwrap();
@@ -459,6 +627,82 @@ async fn project_migration_preserves_existing_audit_rows_and_reinstates_immutabi
     .execute(&pool)
     .await
     .unwrap();
+
+    let existing_project_id = Uuid::now_v7().to_string();
+    sqlx::query(
+        "INSERT INTO projects \
+         (id, organization_id, project_key, name, description, default_view, \
+          archived_at, next_issue_number, created_at, updated_at) \
+         VALUES (?, 1, 'OLD', 'Existing project', NULL, 'board', NULL, 1, \
+                 '2026-10-11T00:00:00.000000000Z', \
+                 '2026-10-11T00:00:00.000000000Z')",
+    )
+    .bind(&existing_project_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    sqlx::raw_sql(include_str!(
+        "../migrations/0014_project_initial_issue_schema.sql"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let backfilled_type = sqlx::query(
+        "SELECT id, system_key, name, icon_key, color_key FROM issue_types \
+         WHERE project_id = ?",
+    )
+    .bind(&existing_project_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let type_id: String = backfilled_type.try_get("id").unwrap();
+    assert!(Uuid::parse_str(&type_id).is_ok());
+    assert_eq!(
+        backfilled_type.try_get::<String, _>("system_key").unwrap(),
+        "task"
+    );
+    assert_eq!(
+        backfilled_type.try_get::<String, _>("name").unwrap(),
+        "Tarefa"
+    );
+    assert_eq!(
+        backfilled_type
+            .try_get::<Option<String>, _>("icon_key")
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        backfilled_type
+            .try_get::<Option<String>, _>("color_key")
+            .unwrap(),
+        None
+    );
+
+    let backfilled_statuses = sqlx::query(
+        "SELECT system_key, name, category, position, board_visible \
+         FROM statuses WHERE project_id = ? ORDER BY position",
+    )
+    .bind(&existing_project_id)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    let expected_backfill = [
+        ("backlog", "Backlog", "backlog", 0_i64, 0_i64),
+        ("todo", "A fazer", "backlog", 1, 1),
+        ("in_progress", "Em progresso", "active", 2, 1),
+        ("done", "Concluído", "done", 3, 1),
+        ("canceled", "Cancelado", "canceled", 4, 0),
+    ];
+    assert_eq!(backfilled_statuses.len(), expected_backfill.len());
+    for (row, expected) in backfilled_statuses.iter().zip(expected_backfill) {
+        assert_eq!(row.try_get::<String, _>("system_key").unwrap(), expected.0);
+        assert_eq!(row.try_get::<String, _>("name").unwrap(), expected.1);
+        assert_eq!(row.try_get::<String, _>("category").unwrap(), expected.2);
+        assert_eq!(row.try_get::<i64, _>("position").unwrap(), expected.3);
+        assert_eq!(row.try_get::<i64, _>("board_visible").unwrap(), expected.4);
+    }
 
     let copied_event = sqlx::query(
         "SELECT event_kind, result, actor_user_id, target_kind, occurred_at \
