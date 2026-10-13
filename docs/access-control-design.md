@@ -1,6 +1,6 @@
 # Authorization policy matrix — feature design
 
-**Status:** The deny-by-default Rust capability policy, fresh SQLite loading of current organization/project access context, transactional project creation, and internal project-membership add/change/remove commands are implemented. Session-to-principal wiring, HTTP/MCP/job/download/SSE enforcement, audit browsing, and route integration are not implemented.
+**Status:** The deny-by-default Rust capability policy, fresh SQLite loading of current organization/project access context, transactional project creation, and internal project-membership add/change/remove/self-leave commands are implemented. Session-to-principal wiring, HTTP/MCP/job/download/SSE enforcement, audit browsing, and route integration are not implemented.
 
 **Requirements:** `docs/development-plan.md`, sections 5, 6, and 13.
 
@@ -24,6 +24,8 @@ The `AccessCapability` matrix expresses the policy table without treating roles 
 ### Project membership mutations
 
 `ProjectMembershipStore` changes membership only for users already in the organization; invitations and organization membership creation remain separate. Each command opens `BEGIN IMMEDIATE`, reloads the actor's current account/org/project state, checks `ManageProjectMembership`, and revalidates the target's account and organization membership before writing. The caller must supply the actor ID from a validated session; these services do not authenticate arbitrary IDs.
+
+`ProjectMembershipStore::leave` is separate from administrator removal: any active user with explicit membership can remove only their own membership, preserving their organization account (including a guest leaving their last project). It uses the `LeaveProject` capability, which is denied for archived projects; the last manager must appoint a replacement first. The self-leave audit records the same user as actor and subject, and audit failure rolls back the exit.
 
 Organization owners/admins may assign any project role and are the only actors who may add, demote, or remove a project manager. A user acting only with project-manager authority may add, change, or remove member/viewer roles but cannot appoint or alter manager membership; an owner/admin who is also a project manager retains the stronger organization authority. Organization guests may hold only member/viewer project roles. New membership and role escalation require an active account; a banned/disabled member may still be demoted, while removal remains available to authorized membership managers. An unchanged role is a no-op with no audit event.
 

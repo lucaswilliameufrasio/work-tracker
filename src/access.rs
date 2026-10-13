@@ -34,6 +34,7 @@ pub enum AccessCapability {
     MutateIssues,
     ManageProjectSchema,
     ManageProjectMembership,
+    LeaveProject,
     ChangeProjectArchive,
     ExportProject,
     BanInstallationUser,
@@ -377,6 +378,7 @@ pub fn authorize(
         AccessCapability::ManageProjectMembership => {
             project_is_mutable && (is_org_admin || is_project_manager)
         }
+        AccessCapability::LeaveProject => project_is_mutable && context.project_role.is_some(),
         AccessCapability::ChangeProjectArchive => is_org_admin || is_project_manager,
         AccessCapability::ExportProject => is_project_manager,
         AccessCapability::DownloadFullBackup => {
@@ -433,6 +435,7 @@ mod tests {
             AccessCapability::MutateIssues,
             AccessCapability::ManageProjectSchema,
             AccessCapability::ManageProjectMembership,
+            AccessCapability::LeaveProject,
             AccessCapability::ChangeProjectArchive,
             AccessCapability::ExportProject,
             AccessCapability::BanInstallationUser,
@@ -471,6 +474,7 @@ mod tests {
                 &principal,
                 AccessCapability::ManageProjectMembership
             ));
+            assert!(!is_allowed(&principal, AccessCapability::LeaveProject));
             assert!(is_allowed(
                 &principal,
                 AccessCapability::ChangeProjectArchive
@@ -519,6 +523,7 @@ mod tests {
         ));
         assert!(is_allowed(&manager, AccessCapability::ChangeProjectArchive));
         assert!(is_allowed(&manager, AccessCapability::ExportProject));
+        assert!(is_allowed(&manager, AccessCapability::LeaveProject));
         assert!(!is_allowed(
             &manager,
             AccessCapability::ManageOrganizationMembership
@@ -539,6 +544,7 @@ mod tests {
         );
         assert!(is_allowed(&member, AccessCapability::ReadProjectContent));
         assert!(is_allowed(&member, AccessCapability::MutateIssues));
+        assert!(is_allowed(&member, AccessCapability::LeaveProject));
         assert!(!is_allowed(&member, AccessCapability::ManageProjectSchema));
         assert!(!is_allowed(
             &member,
@@ -555,6 +561,7 @@ mod tests {
             false,
         );
         assert!(is_allowed(&viewer, AccessCapability::ReadProjectContent));
+        assert!(is_allowed(&viewer, AccessCapability::LeaveProject));
         assert!(!is_allowed(&viewer, AccessCapability::MutateIssues));
         assert!(!is_allowed(&viewer, AccessCapability::ManageProjectSchema));
         assert!(!is_allowed(
@@ -562,6 +569,48 @@ mod tests {
             AccessCapability::ManageProjectMembership
         ));
         assert!(!is_allowed(&viewer, AccessCapability::ExportProject));
+    }
+
+    #[test]
+    fn project_members_can_leave_only_while_the_project_is_unarchived() {
+        for (organization_role, project_role) in [
+            (OrganizationRole::Member, ProjectRole::Manager),
+            (OrganizationRole::Member, ProjectRole::Member),
+            (OrganizationRole::Guest, ProjectRole::Viewer),
+        ] {
+            let active = context(
+                AccountState::Active,
+                false,
+                Some(organization_role),
+                Some(project_role),
+                false,
+                false,
+            );
+            assert!(is_allowed(&active, AccessCapability::LeaveProject));
+
+            let archived = context(
+                AccountState::Active,
+                false,
+                Some(organization_role),
+                Some(project_role),
+                true,
+                false,
+            );
+            assert!(!is_allowed(&archived, AccessCapability::LeaveProject));
+        }
+
+        let organization_admin = context(
+            AccountState::Active,
+            false,
+            Some(OrganizationRole::Admin),
+            None,
+            false,
+            false,
+        );
+        assert!(!is_allowed(
+            &organization_admin,
+            AccessCapability::LeaveProject
+        ));
     }
 
     #[test]

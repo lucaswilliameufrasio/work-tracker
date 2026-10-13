@@ -496,6 +496,193 @@ async fn manager_removal_and_demotion_require_a_replacement() {
 }
 
 #[tokio::test]
+async fn members_and_guests_can_leave_without_losing_organization_membership() {
+    let directory = TempDir::new().unwrap();
+    let database = Database::open(directory.path()).await.unwrap();
+    create_organization(&database).await;
+    let owner = create_user(&database, "owner").await;
+    let member = create_user(&database, "member").await;
+    let guest = create_user(&database, "guest").await;
+    let project = ProjectStore::new(database.pool().clone())
+        .create(
+            &owner,
+            "TEAM",
+            "Team project",
+            None,
+            at("2026-10-13T12:00:00Z"),
+        )
+        .await
+        .unwrap();
+    let memberships = ProjectMembershipStore::new(database.pool().clone());
+    memberships
+        .set_role(
+            &owner,
+            &project.id,
+            &member,
+            ProjectRole::Member,
+            at("2026-10-13T12:01:00Z"),
+        )
+        .await
+        .unwrap();
+    memberships
+        .set_role(
+            &owner,
+            &project.id,
+            &guest,
+            ProjectRole::Viewer,
+            at("2026-10-13T12:02:00Z"),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        memberships
+            .leave(&guest, &project.id, at("2026-10-13T12:03:00Z"))
+            .await
+            .unwrap(),
+        ProjectMembershipChange::Removed
+    );
+    assert_eq!(
+        memberships
+            .leave(&member, &project.id, at("2026-10-13T12:04:00Z"))
+            .await
+            .unwrap(),
+        ProjectMembershipChange::Removed
+    );
+
+    let guest_org_role: String = sqlx::query_scalar(
+        "SELECT role FROM organization_members WHERE organization_id = 1 AND user_id = ?",
+    )
+    .bind(&guest)
+    .fetch_one(database.pool())
+    .await
+    .unwrap();
+    assert_eq!(guest_org_role, "guest");
+    let remaining_memberships: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM project_members WHERE project_id = ?")
+            .bind(&project.id)
+            .fetch_one(database.pool())
+            .await
+            .unwrap();
+    assert_eq!(remaining_memberships, 1);
+
+    let leave_events = sqlx::query(
+        "SELECT actor_user_id, subject_user_id, project_role_before, project_role_after \
+         FROM audit_events WHERE event_kind = 'project.member.removed' \
+           AND target_id = ? AND subject_user_id IN (?, ?) ORDER BY subject_user_id",
+    )
+    .bind(&project.id)
+    .bind(&member)
+    .bind(&guest)
+    .fetch_all(database.pool())
+    .await
+    .unwrap();
+    assert_eq!(leave_events.len(), 2);
+    for event in leave_events {
+        assert_eq!(
+            event.try_get::<String, _>("actor_user_id").unwrap(),
+            event.try_get::<String, _>("subject_user_id").unwrap()
+        );
+        assert!(matches!(
+            event
+                .try_get::<String, _>("project_role_before")
+                .unwrap()
+                .as_str(),
+            "member" | "viewer"
+        ));
+        assert_eq!(
+            event
+                .try_get::<Option<String>, _>("project_role_after")
+                .unwrap(),
+            None
+        );
+    }
+}
+
+#[tokio::test]
+async fn project_manager_can_leave_with_a_replacement_but_last_manager_cannot() {
+    let directory = TempDir::new().unwrap();
+    let database = Database::open(directory.path()).await.unwrap();
+    create_organization(&database).await;
+    let owner = create_user(&database, "owner").await;
+    let manager = create_user(&database, "member").await;
+    let safe_project = ProjectStore::new(database.pool().clone())
+        .create(
+            &owner,
+            "SAFE",
+            "Safe exit",
+            None,
+            at("2026-10-13T12:00:00Z"),
+        )
+        .await
+        .unwrap();
+    let last_project = ProjectStore::new(database.pool().clone())
+        .create(
+            &owner,
+            "LAST",
+            "Last manager",
+            None,
+            at("2026-10-13T12:00:00Z"),
+        )
+        .await
+        .unwrap();
+    let memberships = ProjectMembershipStore::new(database.pool().clone());
+    for project_id in [&safe_project.id, &last_project.id] {
+        memberships
+            .set_role(
+                &owner,
+                project_id,
+                &manager,
+                ProjectRole::Manager,
+                at("2026-10-13T12:01:00Z"),
+            )
+            .await
+            .unwrap();
+    }
+
+    assert_eq!(
+        memberships
+            .leave(&manager, &safe_project.id, at("2026-10-13T12:02:00Z"))
+            .await
+            .unwrap(),
+        ProjectMembershipChange::Removed
+    );
+    assert_eq!(
+        memberships
+            .remove(&owner, &last_project.id, &owner, at("2026-10-13T12:03:00Z"),)
+            .await
+            .unwrap(),
+        ProjectMembershipChange::Removed
+    );
+    assert!(matches!(
+        memberships
+            .leave(&manager, &last_project.id, at("2026-10-13T12:04:00Z"))
+            .await,
+        Err(ProjectMembershipError::LastManager)
+    ));
+
+    let manager_membership: Option<String> =
+        sqlx::query_scalar("SELECT role FROM project_members WHERE project_id = ? AND user_id = ?")
+            .bind(&last_project.id)
+            .bind(&manager)
+            .fetch_optional(database.pool())
+            .await
+            .unwrap();
+    assert_eq!(manager_membership.as_deref(), Some("manager"));
+    let failed_leave_events: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM audit_events WHERE event_kind = 'project.member.removed' \
+         AND target_id = ? AND actor_user_id = ? AND subject_user_id = ?",
+    )
+    .bind(&last_project.id)
+    .bind(&manager)
+    .bind(&manager)
+    .fetch_one(database.pool())
+    .await
+    .unwrap();
+    assert_eq!(failed_leave_events, 0);
+}
+
+#[tokio::test]
 async fn role_changes_noops_and_removals_are_audited_only_when_state_changes() {
     let directory = TempDir::new().unwrap();
     let database = Database::open(directory.path()).await.unwrap();
@@ -735,6 +922,34 @@ async fn audit_failure_rolls_back_each_membership_mutation() {
             .await
             .unwrap();
     assert_eq!(member_audits, 1);
+
+    sqlx::query(
+        "CREATE TRIGGER fail_project_member_self_leave BEFORE INSERT ON audit_events \
+         WHEN NEW.event_kind = 'project.member.removed' \
+         BEGIN SELECT RAISE(ABORT, 'forced self-leave audit failure'); END",
+    )
+    .execute(database.pool())
+    .await
+    .unwrap();
+    assert!(matches!(
+        memberships
+            .leave(&member, &project.id, at("2026-10-13T12:05:00Z"))
+            .await,
+        Err(ProjectMembershipError::Audit(_))
+    ));
+    sqlx::query("DROP TRIGGER fail_project_member_self_leave")
+        .execute(database.pool())
+        .await
+        .unwrap();
+    let membership_after_failed_leave: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM project_members WHERE project_id = ? AND user_id = ?",
+    )
+    .bind(&project.id)
+    .bind(&member)
+    .fetch_one(database.pool())
+    .await
+    .unwrap();
+    assert_eq!(membership_after_failed_leave, 1);
 }
 
 #[tokio::test]
@@ -867,6 +1082,12 @@ async fn membership_changes_reject_unauthorized_inactive_and_unaffiliated_accoun
     assert!(matches!(
         memberships
             .remove(&owner, &project.id, &viewer, at("2026-10-13T12:07:00Z"),)
+            .await,
+        Err(ProjectMembershipError::Forbidden)
+    ));
+    assert!(matches!(
+        memberships
+            .leave(&viewer, &project.id, at("2026-10-13T12:08:00Z"))
             .await,
         Err(ProjectMembershipError::Forbidden)
     ));

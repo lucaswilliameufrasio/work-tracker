@@ -259,6 +259,60 @@ impl ProjectMembershipStore {
 
         Ok(ProjectMembershipChange::Removed)
     }
+
+    /// Allows an active project member to remove their own membership without
+    /// leaving the organization. The last project manager must be replaced
+    /// first; archived projects are read-only, including voluntary exit.
+    pub async fn leave(
+        &self,
+        user_id: &str,
+        project_id: &str,
+        now: DateTime<Utc>,
+    ) -> Result<ProjectMembershipChange, ProjectMembershipError> {
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let context = load_actor_context(&mut transaction, user_id, project_id).await?;
+        if authorize(&context, AccessCapability::LeaveProject).is_err() {
+            transaction.rollback().await?;
+            return Err(ProjectMembershipError::Forbidden);
+        }
+
+        let current_role = sqlx::query_scalar::<_, String>(
+            "SELECT role FROM project_members WHERE project_id = ? AND user_id = ?",
+        )
+        .bind(project_id)
+        .bind(user_id)
+        .fetch_optional(&mut *transaction)
+        .await?
+        .map(|value| parse_project_role(&value))
+        .transpose()?
+        .ok_or(ProjectMembershipError::Forbidden)?;
+
+        if current_role == ProjectRole::Manager
+            && project_manager_count(&mut transaction, project_id).await? <= 1
+        {
+            transaction.rollback().await?;
+            return Err(ProjectMembershipError::LastManager);
+        }
+
+        sqlx::query("DELETE FROM project_members WHERE project_id = ? AND user_id = ?")
+            .bind(project_id)
+            .bind(user_id)
+            .execute(&mut *transaction)
+            .await?;
+
+        audit::append_in_transaction(
+            &mut transaction,
+            Some(user_id),
+            AuditEventKind::ProjectMemberRemoved,
+            AuditEventResult::Success,
+            &AuditEventTarget::project_membership(project_id, user_id, Some(current_role), None),
+            now,
+        )
+        .await?;
+        transaction.commit().await?;
+
+        Ok(ProjectMembershipChange::Removed)
+    }
 }
 
 async fn load_actor_context(
