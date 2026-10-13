@@ -174,25 +174,73 @@ impl AuthRateLimiter {
         Ok(latest)
     }
 
-    /// Records one failed password attempt atomically across all three scopes.
-    /// Callers should check `blocked_until` before running the KDF. This write
-    /// transaction serializes concurrent failure updates across the scopes.
+    pub(crate) async fn blocked_until_in_transaction(
+        &self,
+        transaction: &mut Transaction<'_, Sqlite>,
+        client_ip: IpAddr,
+        identity_key: &str,
+        now: DateTime<Utc>,
+    ) -> Result<Option<DateTime<Utc>>, AuthRateLimitError> {
+        let keys = self.subject_hashes(client_ip, identity_key);
+        let mut latest = None;
+        for key in &keys {
+            let state = load_bucket(transaction, key).await?;
+            let Some(state) = state else {
+                continue;
+            };
+            if state.window_started_at > now {
+                return Err(AuthRateLimitError::CorruptState);
+            }
+            if let Some(blocked_until) = state.blocked_until
+                && blocked_until > now
+            {
+                latest = Some(latest.map_or(blocked_until, |current: DateTime<Utc>| {
+                    current.max(blocked_until)
+                }));
+            }
+        }
+        Ok(latest)
+    }
+
+    /// Records one failed password or factor attempt atomically across all
+    /// three scopes. Callers should check `blocked_until` before costly work.
     pub async fn record_failure(
         &self,
         client_ip: IpAddr,
         identity_key: &str,
         now: DateTime<Utc>,
     ) -> Result<Option<DateTime<Utc>>, AuthRateLimitError> {
-        let keys = self.subject_hashes(client_ip, identity_key);
         let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let result = self
+            .record_failure_in_transaction(&mut transaction, client_ip, identity_key, now)
+            .await;
+        match result {
+            Ok(blocked_until) => {
+                transaction.commit().await?;
+                Ok(blocked_until)
+            }
+            Err(error) => {
+                transaction.rollback().await?;
+                Err(error)
+            }
+        }
+    }
+
+    pub(crate) async fn record_failure_in_transaction(
+        &self,
+        transaction: &mut Transaction<'_, Sqlite>,
+        client_ip: IpAddr,
+        identity_key: &str,
+        now: DateTime<Utc>,
+    ) -> Result<Option<DateTime<Utc>>, AuthRateLimitError> {
+        let keys = self.subject_hashes(client_ip, identity_key);
         let mut states = Vec::with_capacity(keys.len());
         let mut active_block = None;
 
         for key in &keys {
-            let state = load_bucket(&mut transaction, key).await?;
+            let state = load_bucket(transaction, key).await?;
             if let Some(state) = &state {
                 if state.window_started_at > now {
-                    transaction.rollback().await?;
                     return Err(AuthRateLimitError::CorruptState);
                 }
                 if let Some(blocked_until) = state.blocked_until
@@ -209,7 +257,6 @@ impl AuthRateLimiter {
         }
 
         if active_block.is_some() {
-            transaction.rollback().await?;
             return Ok(active_block);
         }
 
@@ -236,11 +283,10 @@ impl AuthRateLimiter {
             .bind(i64::from(next.failure_count))
             .bind(format_timestamp(next.window_started_at))
             .bind(next.blocked_until.map(format_timestamp))
-            .execute(&mut *transaction)
+            .execute(&mut **transaction)
             .await?;
         }
 
-        transaction.commit().await?;
         Ok(latest_block)
     }
 

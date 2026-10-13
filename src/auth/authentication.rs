@@ -6,19 +6,23 @@ use thiserror::Error;
 use super::{
     PasswordError,
     credentials::{CredentialError, CredentialStore},
+    mfa::login::{
+        MfaLoginAuthentication, MfaLoginChallenge, MfaLoginError, MfaLoginPasswordOutcome,
+        MfaLoginService, MfaLoginToken,
+    },
     normalize_email_address,
     rate_limit::{AuthRateLimitError, AuthRateLimiter},
-    session::{IssuedSession, SessionError, SessionStore},
+    session::IssuedSession,
 };
 
 #[derive(Debug, Error)]
 pub enum PasswordAuthenticationError {
     #[error("password authentication failed")]
     Credential(#[from] CredentialError),
-    #[error("session issuance failed")]
-    Session(#[from] SessionError),
     #[error("authentication rate-limit operation failed")]
     RateLimit(#[from] AuthRateLimitError),
+    #[error("MFA login operation failed: {0}")]
+    MfaLogin(#[from] MfaLoginError),
 }
 
 impl PasswordAuthenticationError {
@@ -32,6 +36,8 @@ impl PasswordAuthenticationError {
 
 pub enum PasswordAuthentication {
     Authenticated(IssuedSession),
+    MfaRequired(MfaLoginChallenge),
+    MfaSetupRequired,
     Rejected {
         blocked_until: Option<DateTime<Utc>>,
     },
@@ -40,22 +46,22 @@ pub enum PasswordAuthentication {
 #[derive(Clone)]
 pub struct PasswordAuthenticator {
     credentials: CredentialStore,
-    sessions: SessionStore,
     rate_limiter: AuthRateLimiter,
+    mfa_login: MfaLoginService,
     dummy_hash: String,
 }
 
 impl PasswordAuthenticator {
     pub fn new(
         credentials: CredentialStore,
-        sessions: SessionStore,
         rate_limiter: AuthRateLimiter,
+        mfa_login: MfaLoginService,
         dummy_hash: String,
     ) -> Self {
         Self {
             credentials,
-            sessions,
             rate_limiter,
+            mfa_login,
             dummy_hash,
         }
     }
@@ -107,24 +113,43 @@ impl PasswordAuthenticator {
             });
         }
 
-        self.rate_limiter.record_success(&identity_key).await?;
-        let issued = self
-            .sessions
-            .issue_if_credential_matches(
-                &verified.user_id,
-                &verified.email_key,
-                &verified.password_hash,
-                now,
-            )
-            .await?;
-        let Some(issued) = issued else {
-            let blocked_until = self
-                .rate_limiter
-                .record_failure(client_ip, &identity_key, now)
-                .await?;
-            return Ok(PasswordAuthentication::Rejected { blocked_until });
-        };
+        match self
+            .mfa_login
+            .after_password_verification(&verified, client_ip, now)
+            .await?
+        {
+            MfaLoginPasswordOutcome::Authenticated(issued) => {
+                Ok(PasswordAuthentication::Authenticated(issued))
+            }
+            MfaLoginPasswordOutcome::MfaRequired(challenge) => {
+                Ok(PasswordAuthentication::MfaRequired(challenge))
+            }
+            MfaLoginPasswordOutcome::SetupRequired => Ok(PasswordAuthentication::MfaSetupRequired),
+            MfaLoginPasswordOutcome::RateLimited(blocked_until) => {
+                Ok(PasswordAuthentication::Rejected {
+                    blocked_until: Some(blocked_until),
+                })
+            }
+            MfaLoginPasswordOutcome::Rejected => {
+                let blocked_until = self
+                    .rate_limiter
+                    .record_failure(client_ip, &identity_key, now)
+                    .await?;
+                Ok(PasswordAuthentication::Rejected { blocked_until })
+            }
+        }
+    }
 
-        Ok(PasswordAuthentication::Authenticated(issued))
+    pub async fn complete_mfa_login(
+        &self,
+        token: &MfaLoginToken,
+        code: &str,
+        client_ip: IpAddr,
+        now: DateTime<Utc>,
+    ) -> Result<MfaLoginAuthentication, PasswordAuthenticationError> {
+        self.mfa_login
+            .complete(token, code, client_ip, now)
+            .await
+            .map_err(PasswordAuthenticationError::from)
     }
 }

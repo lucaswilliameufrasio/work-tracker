@@ -34,7 +34,7 @@ Confirmation checks the RFC 6238 default profile (30-second steps, six digits, Â
 
 ## Explicit exclusions
 
-Optional active-TOTP disable exists as a separate internal operation documented in `docs/mfa-credential-lifecycle-design.md`; other credential revocation/replacement and recovery-code access remain absent. There is no MFA-required login challenge, HTTP/MCP route, frontend, CSRF/Origin or rate-limit wiring, audit viewer, automatic expiry sweeper, master-key rotation, or general admin-policy enforcement. The transaction-level credential verification result is not by itself authenticated-session proof and grants no capability; the separate step-up service binds TOTP to a rotated session, while each protected operation still needs its own authorization and proof check. Installation-admin actions not explicitly wired to that proof remain fail-closed.
+Optional active-TOTP disable exists as a separate internal operation documented in `docs/mfa-credential-lifecycle-design.md`; restricted recovery and the internal password-login challenge are documented separately. There is no HTTP/MCP route, frontend, setup flow, CSRF/Origin wiring, audit viewer, automatic expiry sweeper, master-key rotation, or general admin-policy enforcement. The transaction-level credential verification result is not by itself authenticated-session proof and grants no capability; the separate step-up service binds TOTP to a rotated session, while each protected operation still needs its own authorization and proof check. Installation-admin actions not explicitly wired to that proof remain fail-closed.
 
 ## Implementation evidence
 

@@ -7,6 +7,7 @@ use puxiri::{
         authentication::{PasswordAuthentication, PasswordAuthenticator},
         credentials::CredentialStore,
         master_key::MasterKeyStore,
+        mfa::{TotpSecretBox, login::MfaLoginService, store::TotpCredentialStore},
         rate_limit::{AuthRateLimitPolicies, AuthRateLimitPolicy, AuthRateLimiter},
         session::{SessionPolicy, SessionStore},
     },
@@ -79,18 +80,25 @@ async fn authenticator(
     let scope_policy = policy(threshold);
     let limiter = AuthRateLimiter::open(
         database.pool().clone(),
-        master_key,
+        master_key.clone(),
         AuthRateLimitPolicies::new(scope_policy, scope_policy, scope_policy),
     )
     .await
     .unwrap();
+    let sessions = SessionStore::new(
+        database.pool().clone(),
+        SessionPolicy::initial(TimeDelta::minutes(5)).unwrap(),
+    );
+    let mfa_login = MfaLoginService::new(
+        database.pool().clone(),
+        sessions,
+        TotpCredentialStore::new(database.pool().clone(), TotpSecretBox::new(master_key)),
+        limiter.clone(),
+    );
     PasswordAuthenticator::new(
         CredentialStore::new(database.pool().clone(), password_service),
-        SessionStore::new(
-            database.pool().clone(),
-            SessionPolicy::initial(TimeDelta::minutes(5)).unwrap(),
-        ),
         limiter,
+        mfa_login,
         dummy_hash.to_owned(),
     )
 }

@@ -168,12 +168,45 @@ impl SessionStore {
     /// is still current and belongs to this confirmed email. This closes the
     /// verify-then-password-reset race that could otherwise create a fresh
     /// session after a reset had already revoked all existing sessions.
+    #[cfg(test)]
     pub(crate) async fn issue_if_credential_matches(
         &self,
         user_id: &str,
         email_key: &str,
         verified_password_hash: &str,
         now: DateTime<Utc>,
+    ) -> Result<Option<IssuedSession>, SessionError> {
+        let mut transaction = self.begin_immediate().await?;
+        let result = self
+            .issue_if_credential_matches_in_transaction(
+                &mut transaction,
+                user_id,
+                email_key,
+                verified_password_hash,
+                now,
+                None,
+            )
+            .await?;
+        match result {
+            Some(issued) => {
+                transaction.commit().await?;
+                Ok(Some(issued))
+            }
+            None => {
+                transaction.rollback().await?;
+                Ok(None)
+            }
+        }
+    }
+
+    pub(crate) async fn issue_if_credential_matches_in_transaction(
+        &self,
+        transaction: &mut Transaction<'_, Sqlite>,
+        user_id: &str,
+        email_key: &str,
+        verified_password_hash: &str,
+        now: DateTime<Utc>,
+        mfa_authenticated_at: Option<DateTime<Utc>>,
     ) -> Result<Option<IssuedSession>, SessionError> {
         let expires_at = now
             .checked_add_signed(self.policy.absolute_lifetime)
@@ -183,12 +216,13 @@ impl SessionStore {
         let token_hash = token.digest().to_vec();
         let now_text = format_timestamp(now);
         let expires_at_text = format_timestamp(expires_at);
-        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mfa_authenticated_at = mfa_authenticated_at.map(format_timestamp);
 
         let result = sqlx::query(
             "INSERT INTO sessions \
-             (id, token_hash, user_id, created_at, last_activity_at, expires_at) \
-             SELECT ?, ?, users.id, ?, ?, ? \
+             (id, token_hash, user_id, created_at, last_activity_at, expires_at, \
+              reauthenticated_at, revoked_at, mfa_authenticated_at) \
+             SELECT ?, ?, users.id, ?, ?, ?, NULL, NULL, ? \
              FROM users \
              JOIN password_credentials AS credentials \
                ON credentials.user_id = users.id \
@@ -203,18 +237,17 @@ impl SessionStore {
         .bind(&now_text)
         .bind(&now_text)
         .bind(expires_at_text)
+        .bind(mfa_authenticated_at)
         .bind(user_id)
         .bind(verified_password_hash)
         .bind(email_key)
-        .execute(&mut *transaction)
+        .execute(&mut **transaction)
         .await?;
 
         if result.rows_affected() != 1 {
-            transaction.rollback().await?;
             return Ok(None);
         }
 
-        transaction.commit().await?;
         Ok(Some(IssuedSession {
             id: session_id,
             token,

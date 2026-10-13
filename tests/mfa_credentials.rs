@@ -1117,6 +1117,10 @@ async fn mfa_migrations_preserve_audit_history_and_reinstate_immutability() {
     .execute(&pool)
     .await
     .unwrap();
+    sqlx::raw_sql(include_str!("../migrations/0022_mfa_login_challenges.sql"))
+        .execute(&pool)
+        .await
+        .unwrap();
 
     let preserved = sqlx::query(
         "SELECT event_kind, actor_user_id, target_kind, target_id \
