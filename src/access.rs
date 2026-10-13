@@ -102,6 +102,14 @@ impl AccessContext {
             recent_privileged_proof,
         })
     }
+
+    pub fn account_state(&self) -> AccountState {
+        self.account_state
+    }
+
+    pub fn organization_role(&self) -> Option<OrganizationRole> {
+        self.organization_role
+    }
 }
 
 /// Loads current account and organization membership from SQLite for one
@@ -790,6 +798,36 @@ mod tests {
             .create(&user_id, "TX", "Transaction context", None, now)
             .await
             .unwrap();
+        let backup_manager_id = Uuid::now_v7().to_string();
+        sqlx::query(
+            "INSERT INTO users (id, display_name, state, created_at, updated_at) \
+             VALUES (?, 'Backup manager', 'active', \
+                     '2026-10-12T00:00:00.000000000Z', \
+                     '2026-10-12T00:00:00.000000000Z')",
+        )
+        .bind(&backup_manager_id)
+        .execute(database.pool())
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO organization_members \
+             (organization_id, user_id, role, created_at) \
+             VALUES (1, ?, 'member', '2026-10-12T00:00:00.000000000Z')",
+        )
+        .bind(&backup_manager_id)
+        .execute(database.pool())
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO project_members \
+             (project_id, organization_id, user_id, role, created_at) \
+             VALUES (?, 1, ?, 'manager', '2026-10-12T00:00:00.000000000Z')",
+        )
+        .bind(&project.id)
+        .bind(&backup_manager_id)
+        .execute(database.pool())
+        .await
+        .unwrap();
 
         let mut transaction = database.pool().begin_with("BEGIN IMMEDIATE").await.unwrap();
         sqlx::query(

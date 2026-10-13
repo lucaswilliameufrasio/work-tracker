@@ -3,6 +3,8 @@ use sqlx::SqlitePool;
 use thiserror::Error;
 use uuid::Uuid;
 
+pub mod membership;
+
 use crate::{
     access::{AccessCapability, AccessStore, AccessStoreError, authorize},
     audit::{self, AuditEventError, AuditEventKind, AuditEventResult, AuditEventTarget},

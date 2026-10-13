@@ -1121,9 +1121,23 @@ async fn mfa_migrations_preserve_audit_history_and_reinstate_immutability() {
         .execute(&pool)
         .await
         .unwrap();
+    sqlx::raw_sql(
+        "CREATE TABLE project_members ( \
+             project_id TEXT NOT NULL, user_id TEXT NOT NULL, role TEXT NOT NULL \
+         )",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::raw_sql(include_str!(
+        "../migrations/0023_project_membership_management.sql"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
 
     let preserved = sqlx::query(
-        "SELECT event_kind, actor_user_id, target_kind, target_id \
+        "SELECT event_kind, actor_user_id, target_kind, target_id, subject_user_id \
          FROM audit_events WHERE id = ?",
     )
     .bind(&event_id)
@@ -1194,6 +1208,44 @@ async fn mfa_migrations_preserve_audit_history_and_reinstate_immutability() {
         preserved.try_get::<String, _>("target_id").unwrap(),
         target_id
     );
+    assert_eq!(
+        preserved
+            .try_get::<Option<String>, _>("subject_user_id")
+            .unwrap(),
+        None
+    );
+
+    sqlx::query(
+        "INSERT INTO audit_events \
+         (id, event_kind, result, actor_user_id, target_kind, target_id, \
+          subject_user_id, project_role_before, project_role_after, occurred_at) \
+         VALUES (?, 'project.member.added', 'success', ?, 'project', ?, ?, NULL, 'member', \
+                 '2026-10-10T12:00:00.000000000Z')",
+    )
+    .bind(Uuid::now_v7().to_string())
+    .bind(&actor_id)
+    .bind(Uuid::now_v7().to_string())
+    .bind(&actor_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert!(
+        sqlx::query(
+            "INSERT INTO audit_events \
+             (id, event_kind, result, actor_user_id, target_kind, target_id, \
+              subject_user_id, project_role_before, project_role_after, occurred_at) \
+             VALUES (?, 'project.member.role_changed', 'success', ?, 'project', ?, ?, \
+                     'member', 'member', \
+                     '2026-10-10T12:00:00.000000000Z')",
+        )
+        .bind(Uuid::now_v7().to_string())
+        .bind(&actor_id)
+        .bind(Uuid::now_v7().to_string())
+        .bind(&actor_id)
+        .execute(&pool)
+        .await
+        .is_err()
+    );
 
     let session_id = Uuid::now_v7().to_string();
     sqlx::query(
@@ -1230,7 +1282,14 @@ async fn mfa_migrations_preserve_audit_history_and_reinstate_immutability() {
     .unwrap();
     assert!(
         sqlx::query("UPDATE audit_events SET result = 'failure' WHERE id = ?")
-            .bind(event_id)
+            .bind(&event_id)
+            .execute(&pool)
+            .await
+            .is_err()
+    );
+    assert!(
+        sqlx::query("DELETE FROM audit_events WHERE id = ?")
+            .bind(&event_id)
             .execute(&pool)
             .await
             .is_err()

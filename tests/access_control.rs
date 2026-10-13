@@ -546,14 +546,20 @@ async fn malformed_persisted_project_role_fails_closed() {
     let database = Database::open(directory.path()).await.unwrap();
     create_organization(&database).await;
     let owner = create_user(&database, "active", Some("owner")).await;
+    let backup_manager = create_user(&database, "active", Some("member")).await;
     let project_id = create_project(&database, &owner, "BAD").await;
+    add_project_member(&database, &project_id, &backup_manager, "manager").await;
     let mut connection = database.pool().acquire().await.unwrap();
     set_ignore_check_constraints(&mut connection).await;
-    sqlx::query("UPDATE project_members SET role = 'unknown' WHERE project_id = ?")
-        .bind(&project_id)
-        .execute(&mut *connection)
-        .await
-        .unwrap();
+    sqlx::query(
+        "UPDATE project_members SET role = 'unknown' \
+         WHERE project_id = ? AND user_id = ?",
+    )
+    .bind(&project_id)
+    .bind(&owner)
+    .execute(&mut *connection)
+    .await
+    .unwrap();
     drop(connection);
 
     let store = AccessStore::new(database.pool().clone());

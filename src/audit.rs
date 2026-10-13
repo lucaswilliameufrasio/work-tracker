@@ -3,7 +3,7 @@ use sqlx::{Sqlite, Transaction};
 use thiserror::Error;
 use uuid::Uuid;
 
-use crate::auth::time::format_timestamp;
+use crate::{access::ProjectRole, auth::time::format_timestamp};
 
 #[derive(Debug, Error)]
 pub enum AuditEventError {
@@ -31,6 +31,9 @@ pub enum AuditEventKind {
     MfaRecoveryStarted,
     MfaRecoveryEnrollmentStarted,
     MfaRecoveryCompleted,
+    ProjectMemberAdded,
+    ProjectMemberRoleChanged,
+    ProjectMemberRemoved,
 }
 
 impl AuditEventKind {
@@ -54,6 +57,9 @@ impl AuditEventKind {
             Self::MfaRecoveryStarted => "auth.mfa.recovery_started",
             Self::MfaRecoveryEnrollmentStarted => "auth.mfa.recovery_enrollment_started",
             Self::MfaRecoveryCompleted => "auth.mfa.recovery_completed",
+            Self::ProjectMemberAdded => "project.member.added",
+            Self::ProjectMemberRoleChanged => "project.member.role_changed",
+            Self::ProjectMemberRemoved => "project.member.removed",
         }
     }
 }
@@ -77,6 +83,9 @@ impl AuditEventResult {
 pub struct AuditEventTarget {
     kind: &'static str,
     id: String,
+    subject_user_id: Option<String>,
+    project_role_before: Option<String>,
+    project_role_after: Option<String>,
 }
 
 impl AuditEventTarget {
@@ -84,6 +93,9 @@ impl AuditEventTarget {
         Self {
             kind: "user",
             id: id.into(),
+            subject_user_id: None,
+            project_role_before: None,
+            project_role_after: None,
         }
     }
 
@@ -91,6 +103,9 @@ impl AuditEventTarget {
         Self {
             kind: "email_address",
             id: id.into(),
+            subject_user_id: None,
+            project_role_before: None,
+            project_role_after: None,
         }
     }
 
@@ -98,6 +113,9 @@ impl AuditEventTarget {
         Self {
             kind: "session",
             id: id.into(),
+            subject_user_id: None,
+            project_role_before: None,
+            project_role_after: None,
         }
     }
 
@@ -105,6 +123,24 @@ impl AuditEventTarget {
         Self {
             kind: "project",
             id: id.into(),
+            subject_user_id: None,
+            project_role_before: None,
+            project_role_after: None,
+        }
+    }
+
+    pub fn project_membership(
+        project_id: impl Into<String>,
+        subject_user_id: impl Into<String>,
+        role_before: Option<ProjectRole>,
+        role_after: Option<ProjectRole>,
+    ) -> Self {
+        Self {
+            kind: "project",
+            id: project_id.into(),
+            subject_user_id: Some(subject_user_id.into()),
+            project_role_before: role_before.map(project_role_as_str).map(str::to_owned),
+            project_role_after: role_after.map(project_role_as_str).map(str::to_owned),
         }
     }
 
@@ -112,6 +148,9 @@ impl AuditEventTarget {
         Self {
             kind: "mfa_credential",
             id: id.into(),
+            subject_user_id: None,
+            project_role_before: None,
+            project_role_after: None,
         }
     }
 
@@ -119,13 +158,17 @@ impl AuditEventTarget {
         Self {
             kind: "mfa_recovery_session",
             id: id.into(),
+            subject_user_id: None,
+            project_role_before: None,
+            project_role_after: None,
         }
     }
 }
 
-/// Appends a minimal event to a caller-owned transaction so the event and the
-/// protected mutation commit or roll back together. No payload/details field
-/// exists: callers cannot attach passwords, tokens, addresses, or content.
+/// Appends a typed event to a caller-owned transaction so the event and the
+/// protected mutation commit or roll back together. Membership events may
+/// include only the affected user and before/after project roles; there is no
+/// arbitrary details field for passwords, tokens, addresses, or content.
 pub async fn append_in_transaction(
     transaction: &mut Transaction<'_, Sqlite>,
     actor_user_id: Option<&str>,
@@ -137,8 +180,9 @@ pub async fn append_in_transaction(
     let event_id = Uuid::now_v7().to_string();
     sqlx::query(
         "INSERT INTO audit_events \
-         (id, event_kind, result, actor_user_id, target_kind, target_id, occurred_at) \
-         VALUES (?, ?, ?, ?, ?, ?, ?)",
+         (id, event_kind, result, actor_user_id, target_kind, target_id, \
+          subject_user_id, project_role_before, project_role_after, occurred_at) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&event_id)
     .bind(event_kind.as_str())
@@ -146,8 +190,19 @@ pub async fn append_in_transaction(
     .bind(actor_user_id)
     .bind(target.kind)
     .bind(&target.id)
+    .bind(&target.subject_user_id)
+    .bind(&target.project_role_before)
+    .bind(&target.project_role_after)
     .bind(format_timestamp(occurred_at))
     .execute(&mut **transaction)
     .await?;
     Ok(event_id)
+}
+
+fn project_role_as_str(role: ProjectRole) -> &'static str {
+    match role {
+        ProjectRole::Manager => "manager",
+        ProjectRole::Member => "member",
+        ProjectRole::Viewer => "viewer",
+    }
 }
