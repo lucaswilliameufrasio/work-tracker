@@ -878,6 +878,71 @@ async fn concurrent_mfa_elevation_rotates_the_exact_session_only_once() {
 }
 
 #[tokio::test]
+async fn disabling_optional_totp_invalidates_existing_mfa_proofs_without_revoking_login_session() {
+    let directory = TempDir::new().unwrap();
+    let database = Database::open(directory.path()).await.unwrap();
+    let user_id = create_user(&database, "active").await;
+    let secret_store = credential_store(&database, &directory.path().join("master.key"));
+    let sessions = SessionStore::new(
+        database.pool().clone(),
+        SessionPolicy::initial(TimeDelta::minutes(5)).unwrap(),
+    );
+    let now = at("2026-10-10T12:00:00Z");
+    let enrollment = secret_store.begin_enrollment(user_id, now).await.unwrap();
+    let activation_code = code_for_step(enrollment.secret_for_display(), current_step(now));
+    assert!(
+        secret_store
+            .confirm_enrollment(user_id, activation_code.as_str(), now)
+            .await
+            .unwrap()
+    );
+    let original = sessions.issue(&user_id.to_string(), now).await.unwrap();
+    let original_token = SessionToken::parse(original.token.expose()).unwrap();
+    let step_up_time = now + TimeDelta::seconds(30);
+    let code = code_for_step(enrollment.secret_for_display(), current_step(step_up_time));
+    let step_up = MfaStepUpService::new(sessions.clone(), secret_store.clone());
+    let elevation = step_up
+        .elevate(&original_token, code.as_str(), step_up_time)
+        .await
+        .unwrap()
+        .unwrap();
+    let rotated_token = SessionToken::parse(elevation.session().token.expose()).unwrap();
+
+    assert!(
+        secret_store
+            .disable_with_mfa_proof(elevation.proof(), step_up_time + TimeDelta::seconds(1))
+            .await
+            .unwrap()
+    );
+    assert!(
+        step_up
+            .recent_proof(&rotated_token, step_up_time + TimeDelta::seconds(1))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        sessions
+            .validate(&rotated_token, step_up_time + TimeDelta::seconds(1))
+            .await
+            .unwrap()
+            .is_some()
+    );
+
+    let stale_proof_result = EmailAddressStore::new(database.pool().clone())
+        .add_pending_with_mfa(
+            elevation.proof(),
+            "disabled-factor@example.test",
+            step_up_time + TimeDelta::seconds(1),
+        )
+        .await;
+    assert!(matches!(
+        stale_proof_result,
+        Err(puxiri::auth::email_addresses::EmailAddressManagementError::ReauthenticationRequired)
+    ));
+}
+
+#[tokio::test]
 async fn session_elevation_audit_failure_rolls_back_rotation_and_totp_replay_state() {
     let directory = TempDir::new().unwrap();
     let database = Database::open(directory.path()).await.unwrap();
@@ -1032,6 +1097,10 @@ async fn mfa_migrations_preserve_audit_history_and_reinstate_immutability() {
         .execute(&pool)
         .await
         .unwrap();
+    sqlx::raw_sql(include_str!("../migrations/0018_totp_disable_audit.sql"))
+        .execute(&pool)
+        .await
+        .unwrap();
 
     let preserved = sqlx::query(
         "SELECT event_kind, actor_user_id, target_kind, target_id \
@@ -1039,6 +1108,18 @@ async fn mfa_migrations_preserve_audit_history_and_reinstate_immutability() {
     )
     .bind(&event_id)
     .fetch_one(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO audit_events \
+         (id, event_kind, result, actor_user_id, target_kind, target_id, occurred_at) \
+         VALUES (?, 'auth.mfa.totp_disabled', 'success', ?, 'mfa_credential', ?, \
+                 '2026-10-10T12:00:00.000000000Z')",
+    )
+    .bind(Uuid::now_v7().to_string())
+    .bind(&actor_id)
+    .bind(Uuid::now_v7().to_string())
+    .execute(&pool)
     .await
     .unwrap();
     assert_eq!(

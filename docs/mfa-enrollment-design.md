@@ -16,7 +16,7 @@ The actor is an active user configuring an authenticator for their own account. 
 |---|---|---|
 | No credential | No row | Active user begins enrollment → pending |
 | Pending | 65-byte ADR 0003 encrypted envelope; `activated_at` and replay counter absent; expiry present | Correct TOTP before expiry → active; expiry → delete; begin again → atomically replace pending secret/id |
-| Active | Encrypted envelope; activation time and last accepted TOTP step present; pending expiry absent | Verify a newer TOTP step → advance replay counter; re-enrollment/disable is rejected or absent until a separately authorized lifecycle exists |
+| Active | Encrypted envelope; activation time and last accepted TOTP step present; pending expiry absent | Verify a newer TOTP step → advance replay counter; optional credential disable → separately authorized lifecycle in `docs/mfa-credential-lifecycle-design.md`; installation-admin disable is rejected |
 
 The pending secret expires exactly 10 minutes after creation. Confirmation is valid only while `expires_at > now`; the boundary instant is expired. A wrong code does not consume or extend the pending enrollment. An expired row is removed when confirmation observes it or a new enrollment replaces it; no background cleanup job is part of this slice.
 
@@ -34,7 +34,7 @@ Confirmation checks the RFC 6238 default profile (30-second steps, six digits, �
 
 ## Explicit exclusions
 
-There is no disable/revoke or replace-active operation, recovery-code access flow, MFA-required login challenge, HTTP/MCP route, frontend, CSRF/Origin or rate-limit wiring, audit viewer, automatic expiry sweeper, master-key rotation, or general admin-policy enforcement. The transaction-level credential verification result is not by itself authenticated-session proof and grants no capability; the separate step-up service binds TOTP to a rotated session, while each protected operation still needs its own authorization and proof check. Installation-admin actions not explicitly wired to that proof remain fail-closed.
+Optional active-TOTP disable exists as a separate internal operation documented in `docs/mfa-credential-lifecycle-design.md`; other credential revocation/replacement and recovery-code access remain absent. There is no MFA-required login challenge, HTTP/MCP route, frontend, CSRF/Origin or rate-limit wiring, audit viewer, automatic expiry sweeper, master-key rotation, or general admin-policy enforcement. The transaction-level credential verification result is not by itself authenticated-session proof and grants no capability; the separate step-up service binds TOTP to a rotated session, while each protected operation still needs its own authorization and proof check. Installation-admin actions not explicitly wired to that proof remain fail-closed.
 
 ## Implementation evidence
 

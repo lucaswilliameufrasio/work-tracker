@@ -8,6 +8,7 @@ use crate::audit::{self, AuditEventError, AuditEventKind, AuditEventResult, Audi
 
 use super::{
     EncryptedTotpSecret, TotpError, TotpPolicy, TotpSecret, TotpSecretBox, TotpSecretBoxError,
+    step_up::RecentMfaProof,
 };
 use crate::auth::time::format_timestamp;
 
@@ -27,6 +28,10 @@ pub enum TotpCredentialError {
     InvalidCredential,
     #[error("TOTP enrollment deadline is outside the supported timestamp range")]
     DeadlineOutOfRange,
+    #[error("a recent MFA proof for the current session is required")]
+    MfaProofRequired,
+    #[error("installation-admin TOTP cannot be disabled")]
+    InstallationAdminCannotDisable,
     #[error("TOTP credential persistence failed: {0}")]
     Database(#[from] sqlx::Error),
     #[error("TOTP audit persistence failed: {0}")]
@@ -332,5 +337,339 @@ impl TotpCredentialStore {
         )
         .await?;
         Ok(true)
+    }
+
+    /// Disables optional TOTP only after revalidating a recent, session-bound
+    /// MFA proof. Installation-admin credentials are mandatory and cannot be
+    /// removed by this self-service operation. Existing MFA markers are
+    /// cleared atomically so an outstanding proof cannot survive disable.
+    pub async fn disable_with_mfa_proof(
+        &self,
+        proof: &RecentMfaProof,
+        now: DateTime<Utc>,
+    ) -> Result<bool, TotpCredentialError> {
+        if !proof.is_current_at(now) {
+            return Err(TotpCredentialError::MfaProofRequired);
+        }
+
+        let authenticated_at_text = format_timestamp(proof.authenticated_at);
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let proof_is_current: i64 = sqlx::query_scalar(
+            "SELECT EXISTS( \
+                 SELECT 1 FROM sessions \
+                 JOIN users ON users.id = sessions.user_id \
+                 WHERE sessions.id = ? AND sessions.user_id = ? \
+                   AND sessions.token_hash = ? \
+                   AND sessions.mfa_authenticated_at = ? \
+                   AND sessions.revoked_at IS NULL AND users.state = 'active')",
+        )
+        .bind(&proof.session_id)
+        .bind(&proof.user_id)
+        .bind(&proof.token_digest)
+        .bind(authenticated_at_text)
+        .fetch_one(&mut *transaction)
+        .await?;
+        if proof_is_current != 1 {
+            transaction.rollback().await?;
+            return Err(TotpCredentialError::MfaProofRequired);
+        }
+
+        let is_installation_admin: i64 = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM installation_admins WHERE user_id = ?)",
+        )
+        .bind(&proof.user_id)
+        .fetch_one(&mut *transaction)
+        .await?;
+        if is_installation_admin == 1 {
+            transaction.rollback().await?;
+            return Err(TotpCredentialError::InstallationAdminCannotDisable);
+        }
+
+        let active_credential = sqlx::query(
+            "SELECT id FROM mfa_credentials \
+             WHERE user_id = ? AND activated_at IS NOT NULL",
+        )
+        .bind(&proof.user_id)
+        .fetch_optional(&mut *transaction)
+        .await?;
+        let Some(active_credential) = active_credential else {
+            transaction.rollback().await?;
+            return Ok(false);
+        };
+        let credential_id: String = active_credential.try_get("id")?;
+        let deleted = sqlx::query(
+            "DELETE FROM mfa_credentials \
+             WHERE id = ? AND user_id = ? AND activated_at IS NOT NULL",
+        )
+        .bind(&credential_id)
+        .bind(&proof.user_id)
+        .execute(&mut *transaction)
+        .await?;
+        if deleted.rows_affected() != 1 {
+            return Err(TotpCredentialError::InvalidCredential);
+        }
+
+        sqlx::query(
+            "UPDATE sessions SET mfa_authenticated_at = NULL \
+             WHERE user_id = ? AND mfa_authenticated_at IS NOT NULL",
+        )
+        .bind(&proof.user_id)
+        .execute(&mut *transaction)
+        .await?;
+        audit::append_in_transaction(
+            &mut transaction,
+            Some(&proof.user_id),
+            AuditEventKind::TotpDisabled,
+            AuditEventResult::Success,
+            &AuditEventTarget::mfa_credential(&credential_id),
+            now,
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(true)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::{DateTime, TimeDelta, Utc};
+    use tempfile::TempDir;
+    use uuid::Uuid;
+
+    use crate::{
+        auth::{master_key::MasterKeyStore, mfa::step_up::RecentMfaProof},
+        db::Database,
+    };
+
+    use super::{TotpCredentialError, TotpCredentialStore};
+    use crate::auth::mfa::TotpSecretBox;
+
+    fn at(timestamp: &str) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(timestamp)
+            .unwrap()
+            .with_timezone(&Utc)
+    }
+
+    async fn fixture(
+        is_installation_admin: bool,
+    ) -> (
+        TempDir,
+        Database,
+        TotpCredentialStore,
+        RecentMfaProof,
+        String,
+        DateTime<Utc>,
+    ) {
+        let directory = TempDir::new().unwrap();
+        let database = Database::open(directory.path()).await.unwrap();
+        let user_id = Uuid::now_v7().to_string();
+        let credential_id = Uuid::now_v7().to_string();
+        let proof_session_id = Uuid::now_v7().to_string();
+        let other_session_id = Uuid::now_v7().to_string();
+        let now = at("2026-10-10T12:00:00Z");
+        let now_text = "2026-10-10T12:00:00.000000000Z";
+
+        sqlx::query(
+            "INSERT INTO users (id, display_name, state, created_at, updated_at) \
+             VALUES (?, 'MFA disable test', 'active', ?, ?)",
+        )
+        .bind(&user_id)
+        .bind(now_text)
+        .bind(now_text)
+        .execute(database.pool())
+        .await
+        .unwrap();
+        if is_installation_admin {
+            sqlx::query(
+                "INSERT INTO organizations \
+                 (id, name, locale, timezone, created_at, updated_at) \
+                 VALUES (1, 'MFA disable test', 'en', 'UTC', ?, ?)",
+            )
+            .bind(now_text)
+            .bind(now_text)
+            .execute(database.pool())
+            .await
+            .unwrap();
+            sqlx::query(
+                "INSERT INTO organization_members \
+                 (organization_id, user_id, role, created_at) VALUES (1, ?, 'admin', ?)",
+            )
+            .bind(&user_id)
+            .bind(now_text)
+            .execute(database.pool())
+            .await
+            .unwrap();
+            sqlx::query("INSERT INTO installation_admins (user_id, created_at) VALUES (?, ?)")
+                .bind(&user_id)
+                .bind(now_text)
+                .execute(database.pool())
+                .await
+                .unwrap();
+        }
+
+        for (session_id, token_hash) in [
+            (&proof_session_id, [1_u8; 32]),
+            (&other_session_id, [2_u8; 32]),
+        ] {
+            sqlx::query(
+                "INSERT INTO sessions \
+                 (id, token_hash, user_id, created_at, last_activity_at, expires_at, \
+                  reauthenticated_at, revoked_at, mfa_authenticated_at) \
+                 VALUES (?, ?, ?, ?, ?, '2026-10-17T12:00:00.000000000Z', NULL, NULL, ?)",
+            )
+            .bind(session_id)
+            .bind(token_hash.as_slice())
+            .bind(&user_id)
+            .bind(now_text)
+            .bind(now_text)
+            .bind(now_text)
+            .execute(database.pool())
+            .await
+            .unwrap();
+        }
+        sqlx::query(
+            "INSERT INTO mfa_credentials \
+             (id, user_id, secret_envelope, created_at, expires_at, activated_at, last_accepted_step) \
+             VALUES (?, ?, zeroblob(65), ?, NULL, ?, 123)",
+        )
+        .bind(&credential_id)
+        .bind(&user_id)
+        .bind(now_text)
+        .bind(now_text)
+        .execute(database.pool())
+        .await
+        .unwrap();
+
+        let master_key =
+            MasterKeyStore::load_or_create(&directory.path().join("master.key")).unwrap();
+        let store =
+            TotpCredentialStore::new(database.pool().clone(), TotpSecretBox::new(master_key));
+        let proof = RecentMfaProof {
+            user_id: user_id.clone(),
+            session_id: proof_session_id,
+            token_digest: vec![1_u8; 32],
+            authenticated_at: now,
+            session_valid_until: now + TimeDelta::hours(24),
+        };
+        (directory, database, store, proof, credential_id, now)
+    }
+
+    #[tokio::test]
+    async fn disable_removes_optional_credential_and_clears_all_session_assurance_atomically() {
+        let (_directory, database, store, proof, credential_id, now) = fixture(false).await;
+
+        assert!(
+            store
+                .disable_with_mfa_proof(&proof, now + TimeDelta::seconds(1))
+                .await
+                .unwrap()
+        );
+
+        let credential_count: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM mfa_credentials WHERE id = ?")
+                .bind(&credential_id)
+                .fetch_one(database.pool())
+                .await
+                .unwrap();
+        assert_eq!(credential_count, 0);
+        let remaining_markers: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM sessions WHERE mfa_authenticated_at IS NOT NULL",
+        )
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
+        assert_eq!(remaining_markers, 0);
+        let audit_event: (String, String) = sqlx::query_as(
+            "SELECT event_kind, target_id FROM audit_events WHERE event_kind = 'auth.mfa.totp_disabled'",
+        )
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
+        assert_eq!(audit_event.0, "auth.mfa.totp_disabled");
+        assert_eq!(audit_event.1, credential_id);
+    }
+
+    #[tokio::test]
+    async fn disable_rejects_installation_admin_and_stale_session_proofs() {
+        let (_directory, admin_database, admin_store, admin_proof, credential_id, now) =
+            fixture(true).await;
+        assert!(matches!(
+            admin_store
+                .disable_with_mfa_proof(&admin_proof, now + TimeDelta::seconds(1))
+                .await,
+            Err(TotpCredentialError::InstallationAdminCannotDisable)
+        ));
+        let admin_credential_count: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM mfa_credentials WHERE id = ?")
+                .bind(&credential_id)
+                .fetch_one(admin_database.pool())
+                .await
+                .unwrap();
+        assert_eq!(admin_credential_count, 1);
+
+        let (_directory, database, store, proof, credential_id, now) = fixture(false).await;
+        sqlx::query("UPDATE sessions SET revoked_at = ? WHERE id = ?")
+            .bind("2026-10-10T12:00:00.500000000Z")
+            .bind(&proof.session_id)
+            .execute(database.pool())
+            .await
+            .unwrap();
+        assert!(matches!(
+            store
+                .disable_with_mfa_proof(&proof, now + TimeDelta::seconds(1))
+                .await,
+            Err(TotpCredentialError::MfaProofRequired)
+        ));
+        let credential_count: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM mfa_credentials WHERE id = ?")
+                .bind(credential_id)
+                .fetch_one(database.pool())
+                .await
+                .unwrap();
+        assert_eq!(credential_count, 1);
+    }
+
+    #[tokio::test]
+    async fn disable_audit_failure_rolls_back_credential_deletion_and_marker_clearing() {
+        let (_directory, database, store, proof, credential_id, now) = fixture(false).await;
+        sqlx::query(
+            "CREATE TRIGGER fail_totp_disabled_audit BEFORE INSERT ON audit_events \
+             WHEN NEW.event_kind = 'auth.mfa.totp_disabled' \
+             BEGIN SELECT RAISE(ABORT, 'fixture TOTP disable audit failure'); END",
+        )
+        .execute(database.pool())
+        .await
+        .unwrap();
+        assert!(
+            store
+                .disable_with_mfa_proof(&proof, now + TimeDelta::seconds(1))
+                .await
+                .is_err()
+        );
+        sqlx::query("DROP TRIGGER fail_totp_disabled_audit")
+            .execute(database.pool())
+            .await
+            .unwrap();
+
+        let credential_count: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM mfa_credentials WHERE id = ?")
+                .bind(&credential_id)
+                .fetch_one(database.pool())
+                .await
+                .unwrap();
+        let remaining_markers: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM sessions WHERE mfa_authenticated_at IS NOT NULL",
+        )
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
+        assert_eq!(credential_count, 1);
+        assert_eq!(remaining_markers, 2);
+        assert!(
+            store
+                .disable_with_mfa_proof(&proof, now + TimeDelta::seconds(1))
+                .await
+                .unwrap()
+        );
     }
 }

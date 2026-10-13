@@ -27,6 +27,7 @@ pub enum AuditEventKind {
     TotpEnrollmentExpired,
     TotpVerified,
     SessionMfaElevated,
+    TotpDisabled,
 }
 
 impl AuditEventKind {
@@ -46,6 +47,7 @@ impl AuditEventKind {
             Self::TotpEnrollmentExpired => "auth.mfa.totp_enrollment_expired",
             Self::TotpVerified => "auth.mfa.totp_verified",
             Self::SessionMfaElevated => "auth.session.mfa_elevated",
+            Self::TotpDisabled => "auth.mfa.totp_disabled",
         }
     }
 }

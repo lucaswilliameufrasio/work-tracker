@@ -1,6 +1,6 @@
 # TOTP multi-factor authentication — feature design
 
-**Status:** TOTP, encrypted credential persistence, pending enrollment, and internal session-bound step-up are implemented; recovery-code access, transport routes, MFA policy enforcement, and user-facing setup remain open.
+**Status:** TOTP, encrypted credential persistence, pending enrollment, session-bound step-up, and internal disable of optional TOTP are implemented; recovery-code access, transport routes, MFA policy enforcement, and user-facing setup remain open.
 **Requirements:** `docs/development-plan.md`, sections 7.1–7.2.
 
 ## Interoperable TOTP profile
@@ -17,7 +17,7 @@ The secret must be shown only during the authenticated enrollment flow. Do not l
 
 `RecoveryCodeStore` issues a caller-selected batch (bounded to 1–20) of 128-bit random Base64URL codes, persists only SHA-256 digests, and rotates outstanding codes transactionally. Codes are user-scoped, only active accounts may issue or consume them, they have no implicit TTL, and successful consumption is exactly once. `consume_in_transaction` lets the future recovery flow commit the code and recovery-session/action together; callers must use `BEGIN IMMEDIATE`, roll back on any downstream failure, and apply authentication rate limits before accepting attempts. Reissue failure rolls back invalidation of the prior batch. The plaintext is returned only in a zeroizing batch and can never be retrieved from storage.
 
-This is not a recovery kit or lost-device flow. No MFA state is associated with the codes yet, and no route turns one into a restricted recovery session. Recovery-code verification, backup/restore of encrypted credentials, enrollment cancellation, lost-device recovery, generic login MFA challenge, and policy enforcement remain follow-up work. The portable recovery kit is still blocked by ADR 0002's deferred format/security decision. Internal session-bound TOTP step-up exists, but does not consume recovery codes or itself authorize privileged actions.
+This is not a recovery kit or lost-device flow. No MFA state is associated with the codes yet, and no route turns one into a restricted recovery session. Recovery-code verification, backup/restore of encrypted credentials, pending-enrollment cancellation, active-credential replacement, lost-device recovery, generic login MFA challenge, and policy enforcement remain follow-up work. Optional TOTP can be disabled only with a current MFA proof; installation admins cannot disable their mandatory factor. The portable recovery kit is still blocked by ADR 0002's deferred format/security decision. Internal session-bound TOTP step-up exists, but does not consume recovery codes or itself authorize privileged actions.
 
 ## Sources
 
