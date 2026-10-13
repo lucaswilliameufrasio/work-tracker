@@ -112,6 +112,8 @@ Dependências candidatas: axum, tokio, tower-http, sqlx, serde, tracing, reqwest
 
 Build do frontend com dependências travadas, geração dos assets e embedding via rust-embed ou include_dir. A execução em produção não precisa de Node. Assets locais, incluindo fontes; nada carregado obrigatoriamente de CDN.
 
+As versões das ferramentas de desenvolvimento são fixadas por projeto em `.mise.toml`: Rust/Cargo 1.99.0, Node 24.21.0 e pnpm 11.21.0. Use `mise install` e execute build/testes com `mise exec -- ...`; não altere a configuração global do mise para satisfazer este repositório. `Cargo.toml` mantém `rust-version` como MSRV declarada, distinta do toolchain exato usado no gate.
+
 ## 4. Modelo de dados
 
 IDs internos opacos; UUIDv7 como escolha inicial. Datas de instantes em UTC; data de entrega como `YYYY-MM-DD`, sem converter em timestamp. Timezone IANA da organização define vencimento, agendas, dia do orçamento de email e horários exibidos; padrão sugerido `America/Sao_Paulo`, configurável. Sem fuso por usuário no v1. Timestamps de auditoria permanecem UTC. Usuário escolhe pt-BR/en, com fallback no locale da organização, sem alterar o relógio funcional.
@@ -2322,7 +2324,7 @@ Dependências: jobs/outbox mínimos começam na Fase 1; sino na Fase 2; email/al
 
 Use este documento como especificação. Comece pela Fase 0 e siga as dependências. Não troque Rust, SQLite ou o modelo de uma organização por instalação sem registrar problema concreto e proposta de mudança.
 
-1. Leia o repositório e instruções locais; registre o estado antes de editar.
+1. Leia o repositório e instruções locais; registre o estado antes de editar. Use os pins `.mise.toml` para todas as versões de ferramentas do projeto.
 2. Crie Cargo package, SPA e comandos de desenvolvimento/build reproduzíveis.
 3. Entregue uma fatia executável pequena por vez, com migration, regra de negócio e UI quando aplicável.
 4. Não invente integração funcional: validação de configuração precisa chamar o provider ou declarar explicitamente que é só validação local.
@@ -2489,3 +2491,7 @@ Migration 0022 cria `mfa_login_challenges` com token hash domain-separated, fing
 `docs/mfa-login-design.md` registra atores, transições, binding, módulos, alternativas e limites. Nove testes de integração cobrem digest-only sem sessão, fluxo admin com/sem fator, sessão MFA e replay, expiração exata, rate-limit de códigos errados, fingerprint após troca de senha, auditoria com rollback/retry e conclusão concorrente single-winner. A migration 0022 é aplicada no teste de evolução de audit, e `tests/foundation.rs` espera 22 migrations. Verificação focada `RUSTUP_TOOLCHAIN=1.99.0 cargo test --locked --test mfa_login --test password_authentication --test auth_rate_limit --test foundation --test mfa_credentials` passou: mfa_login 9, password authentication 3, rate limits 9, foundation 15, MFA credentials 15.
 
 `RUSTUP_TOOLCHAIN=1.99.0 PUXIRI_E2E_PORT=18513 DOCKER_CONTEXT=rootless make check` passou integralmente após o código e esta evidência documental: web build, Prettier, ESLint, Svelte-check (zero erros/avisos), Vitest14; Rust fmt, Clippy `-D warnings`, 42 testes unitários, todos os testes de integração/all-targets (incluindo MFA login9, MFA credentials15 e recovery12) e build; Playwright6; MinIO/S3 38. Docker rootless foi verificado e usado. `git diff --check` passou; evidência local/sintética, sem provider live.
+
+#### Toolchains locais via mise
+
+`.mise.toml` fixa Rust/Cargo 1.99.0, Node 24.21.0 e pnpm 11.21.0, alinhando o `packageManager` exato em `web/package.json`; README instrui `mise install` e `mise exec -- ...`. `mise current` e execuções pontuais confirmaram os três pins sem alterar config global. Gate integral `PUXIRI_E2E_PORT=18514 DOCKER_CONTEXT=rootless mise exec -- make check` passou com esses pins: web build/Prettier/ESLint/Svelte-check (zero erros/avisos)/Vitest14; Rust fmt/Clippy `-D warnings`, 42 unit tests, todos os testes de integração/all-targets/build; Playwright6; MinIO/S3 38. Docker rootless verificado/usado. `git diff --check` passou. Nenhum provider live foi chamado; evidência é local/sintética.
