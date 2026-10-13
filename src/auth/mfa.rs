@@ -1,13 +1,28 @@
+use aws_lc_rs::aead::{AES_256_GCM, Aad, NONCE_LEN, Nonce, RandomizedNonceKey};
 use chrono::{DateTime, Utc};
 use hmac::{Hmac, KeyInit, Mac};
 use rand_core::{OsRng, RngCore};
 use sha1::Sha1;
 use subtle::ConstantTimeEq;
 use thiserror::Error;
+use uuid::Uuid;
 use zeroize::Zeroizing;
+
+use super::master_key::{MasterKey, MasterKeyError};
 
 const TOTP_SECRET_BYTES: usize = 20;
 const MAX_WINDOW_STEPS: u8 = 1;
+const ENVELOPE_VERSION: u8 = 1;
+const KEY_ID_BYTES: usize = 16;
+const AEAD_TAG_BYTES: usize = 16;
+const CIPHERTEXT_BYTES: usize = TOTP_SECRET_BYTES + AEAD_TAG_BYTES;
+const VERSION_OFFSET: usize = 0;
+const KEY_ID_OFFSET: usize = VERSION_OFFSET + 1;
+const NONCE_OFFSET: usize = KEY_ID_OFFSET + KEY_ID_BYTES;
+const CIPHERTEXT_OFFSET: usize = NONCE_OFFSET + NONCE_LEN;
+const ENVELOPE_BYTES: usize = CIPHERTEXT_OFFSET + CIPHERTEXT_BYTES;
+const ENVELOPE_AAD_DOMAIN: &[u8] = b"puxiri totp secret envelope v1\0";
+const ENVELOPE_AAD_BYTES: usize = ENVELOPE_AAD_DOMAIN.len() + 1 + KEY_ID_BYTES + 16 + 16;
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum TotpError {
@@ -17,6 +32,22 @@ pub enum TotpError {
     InvalidSecret,
     #[error("secure TOTP secret generation failed")]
     RandomnessFailed,
+}
+
+#[derive(Debug, Error)]
+pub enum TotpSecretBoxError {
+    #[error("encrypted TOTP secret envelope is malformed")]
+    InvalidEnvelope,
+    #[error("encrypted TOTP secret envelope version is unsupported")]
+    UnsupportedVersion,
+    #[error("encrypted TOTP secret belongs to a different master key")]
+    MasterKeyMismatch,
+    #[error("encrypted TOTP secret authentication failed")]
+    AuthenticationFailed,
+    #[error("TOTP secret encryption operation failed")]
+    CryptographicOperationFailed,
+    #[error(transparent)]
+    MasterKey(#[from] MasterKeyError),
 }
 
 #[derive(Clone, Copy)]
@@ -152,10 +183,130 @@ impl TotpSecret {
     }
 }
 
+/// Versioned AES-256-GCM ciphertext. Its representation contains no plaintext
+/// TOTP secret and can be stored as one database blob.
+pub struct EncryptedTotpSecret(Zeroizing<[u8; ENVELOPE_BYTES]>);
+
+impl EncryptedTotpSecret {
+    pub fn from_bytes(value: &[u8]) -> Result<Self, TotpSecretBoxError> {
+        let envelope: [u8; ENVELOPE_BYTES] = value
+            .try_into()
+            .map_err(|_| TotpSecretBoxError::InvalidEnvelope)?;
+        Ok(Self(Zeroizing::new(envelope)))
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        self.0.as_slice()
+    }
+}
+
+pub struct TotpSecretBox {
+    master_key: MasterKey,
+}
+
+impl TotpSecretBox {
+    pub fn new(master_key: MasterKey) -> Self {
+        Self { master_key }
+    }
+
+    pub fn encrypt(
+        &self,
+        user_id: &Uuid,
+        credential_id: &Uuid,
+        secret: &TotpSecret,
+    ) -> Result<EncryptedTotpSecret, TotpSecretBoxError> {
+        let key_material = self
+            .master_key
+            .derive_totp_encryption_key(user_id, credential_id)?;
+        let cipher = RandomizedNonceKey::new(&AES_256_GCM, key_material.as_slice())
+            .map_err(|_| TotpSecretBoxError::CryptographicOperationFailed)?;
+        let key_id = self.master_key.key_id();
+        let aad = envelope_aad(user_id, credential_id, &key_id);
+        let mut ciphertext = Zeroizing::new(Vec::from(secret.0.as_slice()));
+        let nonce = cipher
+            .seal_in_place_append_tag(Aad::from(aad.as_slice()), &mut *ciphertext)
+            .map_err(|_| TotpSecretBoxError::CryptographicOperationFailed)?;
+        if ciphertext.len() != CIPHERTEXT_BYTES {
+            return Err(TotpSecretBoxError::CryptographicOperationFailed);
+        }
+
+        let mut envelope = Zeroizing::new([0_u8; ENVELOPE_BYTES]);
+        envelope[VERSION_OFFSET] = ENVELOPE_VERSION;
+        envelope[KEY_ID_OFFSET..NONCE_OFFSET].copy_from_slice(&key_id);
+        envelope[NONCE_OFFSET..CIPHERTEXT_OFFSET].copy_from_slice(nonce.as_ref());
+        envelope[CIPHERTEXT_OFFSET..].copy_from_slice(ciphertext.as_slice());
+        Ok(EncryptedTotpSecret(envelope))
+    }
+
+    pub fn decrypt(
+        &self,
+        user_id: &Uuid,
+        credential_id: &Uuid,
+        envelope: &EncryptedTotpSecret,
+    ) -> Result<TotpSecret, TotpSecretBoxError> {
+        if envelope.0[VERSION_OFFSET] != ENVELOPE_VERSION {
+            return Err(TotpSecretBoxError::UnsupportedVersion);
+        }
+
+        let key_id = self.master_key.key_id();
+        if envelope.0[KEY_ID_OFFSET..NONCE_OFFSET] != key_id {
+            return Err(TotpSecretBoxError::MasterKeyMismatch);
+        }
+
+        let key_material = self
+            .master_key
+            .derive_totp_encryption_key(user_id, credential_id)?;
+        let cipher = RandomizedNonceKey::new(&AES_256_GCM, key_material.as_slice())
+            .map_err(|_| TotpSecretBoxError::CryptographicOperationFailed)?;
+        let aad = envelope_aad(user_id, credential_id, &key_id);
+        let nonce_bytes: &[u8; NONCE_LEN] = envelope.0[NONCE_OFFSET..CIPHERTEXT_OFFSET]
+            .try_into()
+            .map_err(|_| TotpSecretBoxError::InvalidEnvelope)?;
+        let nonce = Nonce::try_assume_unique_for_key(nonce_bytes)
+            .map_err(|_| TotpSecretBoxError::InvalidEnvelope)?;
+        let mut plaintext = Zeroizing::new(envelope.0[CIPHERTEXT_OFFSET..].to_vec());
+        let opened = cipher
+            .open_in_place(nonce, Aad::from(aad.as_slice()), &mut plaintext)
+            .map_err(|_| TotpSecretBoxError::AuthenticationFailed)?;
+        if opened.len() != TOTP_SECRET_BYTES {
+            return Err(TotpSecretBoxError::InvalidEnvelope);
+        }
+
+        let secret: [u8; TOTP_SECRET_BYTES] = opened
+            .try_into()
+            .map_err(|_| TotpSecretBoxError::InvalidEnvelope)?;
+        Ok(TotpSecret(Zeroizing::new(secret)))
+    }
+}
+
+fn envelope_aad(
+    user_id: &Uuid,
+    credential_id: &Uuid,
+    key_id: &[u8; KEY_ID_BYTES],
+) -> [u8; ENVELOPE_AAD_BYTES] {
+    let mut aad = [0_u8; ENVELOPE_AAD_BYTES];
+    let mut offset = 0;
+    aad[offset..offset + ENVELOPE_AAD_DOMAIN.len()].copy_from_slice(ENVELOPE_AAD_DOMAIN);
+    offset += ENVELOPE_AAD_DOMAIN.len();
+    aad[offset] = ENVELOPE_VERSION;
+    offset += 1;
+    aad[offset..offset + KEY_ID_BYTES].copy_from_slice(key_id);
+    offset += KEY_ID_BYTES;
+    aad[offset..offset + 16].copy_from_slice(user_id.as_bytes());
+    offset += 16;
+    aad[offset..offset + 16].copy_from_slice(credential_id.as_bytes());
+    aad
+}
+
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::*;
     use chrono::TimeZone;
+    use tempfile::TempDir;
+
+    use crate::auth::master_key::MasterKeyStore;
 
     fn secret_from_ascii() -> TotpSecret {
         TotpSecret(Zeroizing::new(*b"12345678901234567890"))
@@ -163,6 +314,19 @@ mod tests {
 
     fn at(unix_seconds: i64) -> DateTime<Utc> {
         Utc.timestamp_opt(unix_seconds, 0).single().unwrap()
+    }
+
+    fn test_secret_box(directory: &Path, file_name: &str) -> TotpSecretBox {
+        let master_key = MasterKeyStore::load_or_create(&directory.join(file_name)).unwrap();
+        TotpSecretBox::new(master_key)
+    }
+
+    fn user_id() -> Uuid {
+        Uuid::from_u128(1)
+    }
+
+    fn credential_id() -> Uuid {
+        Uuid::from_u128(2)
     }
 
     #[test]
@@ -238,5 +402,97 @@ mod tests {
         assert!(TotpPolicy::new(30, 6, 2, 0).is_err());
         assert!(TotpPolicy::new(30, 6, 0, 2).is_err());
         assert_eq!(TotpPolicy::authenticator_default().step_seconds, 30);
+    }
+
+    #[test]
+    fn encrypted_secret_round_trips_without_storing_plaintext() {
+        let directory = TempDir::new().unwrap();
+        let secret_box = test_secret_box(directory.path(), "master.key");
+        let secret = secret_from_ascii();
+
+        let envelope = secret_box
+            .encrypt(&user_id(), &credential_id(), &secret)
+            .unwrap();
+        let restored = secret_box
+            .decrypt(&user_id(), &credential_id(), &envelope)
+            .unwrap();
+
+        assert!(restored.0.as_slice() == secret.0.as_slice());
+        assert_eq!(envelope.as_bytes().len(), ENVELOPE_BYTES);
+        assert!(
+            !envelope
+                .as_bytes()
+                .windows(TOTP_SECRET_BYTES)
+                .any(|window| window == secret.0.as_slice())
+        );
+    }
+
+    #[test]
+    fn encrypted_secret_is_bound_to_user_and_credential_ids() {
+        let directory = TempDir::new().unwrap();
+        let secret_box = test_secret_box(directory.path(), "master.key");
+        let secret = secret_from_ascii();
+        let envelope = secret_box
+            .encrypt(&user_id(), &credential_id(), &secret)
+            .unwrap();
+
+        assert!(matches!(
+            secret_box.decrypt(&Uuid::from_u128(3), &credential_id(), &envelope),
+            Err(TotpSecretBoxError::AuthenticationFailed)
+        ));
+        assert!(matches!(
+            secret_box.decrypt(&user_id(), &Uuid::from_u128(4), &envelope),
+            Err(TotpSecretBoxError::AuthenticationFailed)
+        ));
+    }
+
+    #[test]
+    fn encrypted_secret_rejects_wrong_master_key_and_modified_authenticated_bytes() {
+        let directory = TempDir::new().unwrap();
+        let secret_box = test_secret_box(directory.path(), "master.key");
+        let other_secret_box = test_secret_box(directory.path(), "other-master.key");
+        let secret = secret_from_ascii();
+        let envelope = secret_box
+            .encrypt(&user_id(), &credential_id(), &secret)
+            .unwrap();
+
+        assert!(matches!(
+            other_secret_box.decrypt(&user_id(), &credential_id(), &envelope),
+            Err(TotpSecretBoxError::MasterKeyMismatch)
+        ));
+
+        for index in [NONCE_OFFSET, CIPHERTEXT_OFFSET, ENVELOPE_BYTES - 1] {
+            let mut modified = envelope.as_bytes().to_vec();
+            modified[index] ^= 1;
+            let modified = EncryptedTotpSecret::from_bytes(&modified).unwrap();
+            assert!(matches!(
+                secret_box.decrypt(&user_id(), &credential_id(), &modified),
+                Err(TotpSecretBoxError::AuthenticationFailed)
+            ));
+        }
+    }
+
+    #[test]
+    fn encrypted_secret_rejects_malformed_and_unknown_envelopes() {
+        assert!(matches!(
+            EncryptedTotpSecret::from_bytes(&[0_u8; ENVELOPE_BYTES - 1]),
+            Err(TotpSecretBoxError::InvalidEnvelope)
+        ));
+
+        let directory = TempDir::new().unwrap();
+        let secret_box = test_secret_box(directory.path(), "master.key");
+        let secret = secret_from_ascii();
+        let mut encoded = secret_box
+            .encrypt(&user_id(), &credential_id(), &secret)
+            .unwrap()
+            .as_bytes()
+            .to_vec();
+        encoded[VERSION_OFFSET] = ENVELOPE_VERSION + 1;
+        let envelope = EncryptedTotpSecret::from_bytes(&encoded).unwrap();
+
+        assert!(matches!(
+            secret_box.decrypt(&user_id(), &credential_id(), &envelope),
+            Err(TotpSecretBoxError::UnsupportedVersion)
+        ));
     }
 }

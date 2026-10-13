@@ -6,6 +6,7 @@ rust-version = "1.94"
 publish = false
 
 [dependencies]
+aws-lc-rs = { version = "=1.18.2", default-features = false, features = ["aws-lc-sys"] }
 argon2 = { version = "=0.5.3", features = ["zeroize"] }
 axum = "0.8.9"
 base32 = "=0.5.1"

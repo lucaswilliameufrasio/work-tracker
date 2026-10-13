@@ -1,8 +1,10 @@
 use std::{path::Path, sync::Arc};
 
+use aws_lc_rs::hkdf::{HKDF_SHA256, Salt};
 use hmac::{Hmac, KeyInit, Mac};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
+use uuid::Uuid;
 use zeroize::Zeroizing;
 
 #[derive(Debug, Error)]
@@ -13,6 +15,8 @@ pub enum MasterKeyError {
     InvalidFile,
     #[error("secure random master key generation failed")]
     RandomnessFailed,
+    #[error("master-key subkey derivation failed")]
+    SubkeyDerivationFailed,
     #[error("master key file operations are not supported on this platform")]
     UnsupportedPlatform,
 }
@@ -40,6 +44,28 @@ impl MasterKey {
         mac.update(namespace);
         mac.update(value);
         mac.finalize().into_bytes().into()
+    }
+
+    pub(crate) fn derive_totp_encryption_key(
+        &self,
+        user_id: &Uuid,
+        credential_id: &Uuid,
+    ) -> Result<Zeroizing<[u8; 32]>, MasterKeyError> {
+        let salt = Salt::new(HKDF_SHA256, b"puxiri totp encryption extraction v1");
+        let pseudorandom_key = salt.extract(self.0.as_slice());
+        let info = [
+            b"puxiri totp encryption key v1".as_slice(),
+            user_id.as_bytes(),
+            credential_id.as_bytes(),
+        ];
+        let output_key_material = pseudorandom_key
+            .expand(&info, HKDF_SHA256)
+            .map_err(|_| MasterKeyError::SubkeyDerivationFailed)?;
+        let mut key = Zeroizing::new([0_u8; 32]);
+        output_key_material
+            .fill(&mut *key)
+            .map_err(|_| MasterKeyError::SubkeyDerivationFailed)?;
+        Ok(key)
     }
 }
 
