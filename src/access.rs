@@ -33,6 +33,7 @@ pub enum AccessCapability {
     ReadProjectContent,
     MutateIssues,
     ManageProjectSchema,
+    ReadProjectMembership,
     ManageProjectMembership,
     LeaveProject,
     ChangeProjectArchive,
@@ -110,6 +111,10 @@ impl AccessContext {
 
     pub fn organization_role(&self) -> Option<OrganizationRole> {
         self.organization_role
+    }
+
+    pub fn project_role(&self) -> Option<ProjectRole> {
+        self.project_role
     }
 }
 
@@ -367,6 +372,7 @@ pub fn authorize(
             context.organization_role == Some(OrganizationRole::Owner)
         }
         AccessCapability::ReadProjectContent => context.project_role.is_some(),
+        AccessCapability::ReadProjectMembership => context.project_role.is_some() || is_org_admin,
         AccessCapability::MutateIssues => {
             project_is_mutable
                 && matches!(
@@ -432,6 +438,7 @@ mod tests {
             AccessCapability::TransferOrganizationOwnership,
             AccessCapability::CreateProject,
             AccessCapability::ReadProjectContent,
+            AccessCapability::ReadProjectMembership,
             AccessCapability::MutateIssues,
             AccessCapability::ManageProjectSchema,
             AccessCapability::ManageProjectMembership,
@@ -523,6 +530,10 @@ mod tests {
         ));
         assert!(is_allowed(&manager, AccessCapability::ChangeProjectArchive));
         assert!(is_allowed(&manager, AccessCapability::ExportProject));
+        assert!(is_allowed(
+            &manager,
+            AccessCapability::ReadProjectMembership
+        ));
         assert!(is_allowed(&manager, AccessCapability::LeaveProject));
         assert!(!is_allowed(
             &manager,
@@ -544,6 +555,7 @@ mod tests {
         );
         assert!(is_allowed(&member, AccessCapability::ReadProjectContent));
         assert!(is_allowed(&member, AccessCapability::MutateIssues));
+        assert!(is_allowed(&member, AccessCapability::ReadProjectMembership));
         assert!(is_allowed(&member, AccessCapability::LeaveProject));
         assert!(!is_allowed(&member, AccessCapability::ManageProjectSchema));
         assert!(!is_allowed(
@@ -561,6 +573,7 @@ mod tests {
             false,
         );
         assert!(is_allowed(&viewer, AccessCapability::ReadProjectContent));
+        assert!(is_allowed(&viewer, AccessCapability::ReadProjectMembership));
         assert!(is_allowed(&viewer, AccessCapability::LeaveProject));
         assert!(!is_allowed(&viewer, AccessCapability::MutateIssues));
         assert!(!is_allowed(&viewer, AccessCapability::ManageProjectSchema));
@@ -569,6 +582,38 @@ mod tests {
             AccessCapability::ManageProjectMembership
         ));
         assert!(!is_allowed(&viewer, AccessCapability::ExportProject));
+    }
+
+    #[test]
+    fn organization_admins_can_read_project_roster_without_project_content_access() {
+        for organization_role in [OrganizationRole::Owner, OrganizationRole::Admin] {
+            let context = context(
+                AccountState::Active,
+                false,
+                Some(organization_role),
+                None,
+                true,
+                false,
+            );
+            assert!(is_allowed(
+                &context,
+                AccessCapability::ReadProjectMembership
+            ));
+            assert!(!is_allowed(&context, AccessCapability::ReadProjectContent));
+        }
+
+        let organization_member = context(
+            AccountState::Active,
+            false,
+            Some(OrganizationRole::Member),
+            None,
+            false,
+            false,
+        );
+        assert!(!is_allowed(
+            &organization_member,
+            AccessCapability::ReadProjectMembership
+        ));
     }
 
     #[test]
@@ -597,6 +642,10 @@ mod tests {
                 false,
             );
             assert!(!is_allowed(&archived, AccessCapability::LeaveProject));
+            assert!(is_allowed(
+                &archived,
+                AccessCapability::ReadProjectMembership
+            ));
         }
 
         let organization_admin = context(
@@ -627,6 +676,10 @@ mod tests {
             &guest_member,
             AccessCapability::ReadProjectContent
         ));
+        assert!(is_allowed(
+            &guest_member,
+            AccessCapability::ReadProjectMembership
+        ));
         assert!(is_allowed(&guest_member, AccessCapability::MutateIssues));
         assert!(!is_allowed(
             &guest_member,
@@ -649,6 +702,10 @@ mod tests {
         assert!(is_allowed(
             &guest_viewer,
             AccessCapability::ReadProjectContent
+        ));
+        assert!(is_allowed(
+            &guest_viewer,
+            AccessCapability::ReadProjectMembership
         ));
         assert!(!is_allowed(&guest_viewer, AccessCapability::MutateIssues));
     }
@@ -682,6 +739,10 @@ mod tests {
         assert!(!is_allowed(
             &installation_admin,
             AccessCapability::ReadProjectContent
+        ));
+        assert!(!is_allowed(
+            &installation_admin,
+            AccessCapability::ReadProjectMembership
         ));
 
         let privileged_admin = context(

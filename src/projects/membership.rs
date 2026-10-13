@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use sqlx::{SqlitePool, Transaction};
+use sqlx::{Row, SqlitePool, Transaction};
 use thiserror::Error;
 
 use crate::{
@@ -19,9 +19,17 @@ pub enum ProjectMembershipChange {
     Removed,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectMembershipRecord {
+    pub user_id: String,
+    pub display_name: String,
+    pub role: ProjectRole,
+    pub primary_email: Option<String>,
+}
+
 #[derive(Debug, Error)]
 pub enum ProjectMembershipError {
-    #[error("actor cannot manage this project's membership")]
+    #[error("actor cannot access this project's membership")]
     Forbidden,
     #[error("target is not eligible for this membership change")]
     TargetUnavailable,
@@ -53,6 +61,68 @@ pub struct ProjectMembershipStore {
 impl ProjectMembershipStore {
     pub fn new(pool: SqlitePool) -> Self {
         Self { pool }
+    }
+
+    /// Lists project participants. Explicit project members see display names
+    /// and roles; project managers and organization owners/admins also see
+    /// confirmed primary email addresses for management. The actor ID must
+    /// come from an already validated request session.
+    pub async fn list(
+        &self,
+        actor_user_id: &str,
+        project_id: &str,
+    ) -> Result<Vec<ProjectMembershipRecord>, ProjectMembershipError> {
+        let mut transaction = self.pool.begin().await?;
+        let context = AccessStore::load_project_context_in_transaction(
+            &mut transaction,
+            actor_user_id,
+            project_id,
+            false,
+        )
+        .await?
+        .ok_or(ProjectMembershipError::Forbidden)?;
+        if authorize(&context, AccessCapability::ReadProjectMembership).is_err() {
+            transaction.rollback().await?;
+            return Err(ProjectMembershipError::Forbidden);
+        }
+
+        let can_read_email = context.project_role() == Some(ProjectRole::Manager)
+            || matches!(
+                context.organization_role(),
+                Some(OrganizationRole::Owner | OrganizationRole::Admin)
+            );
+        let rows = sqlx::query(
+            "SELECT project_members.user_id, users.display_name, project_members.role, \
+                    CASE WHEN ? = 1 THEN ( \
+                        SELECT user_emails.address FROM user_emails \
+                        WHERE user_emails.user_id = project_members.user_id \
+                          AND user_emails.is_primary = 1 \
+                          AND user_emails.confirmed_at IS NOT NULL \
+                        LIMIT 1 \
+                    ) ELSE NULL END AS primary_email \
+             FROM project_members \
+             JOIN users ON users.id = project_members.user_id \
+             WHERE project_members.project_id = ? \
+             ORDER BY users.display_name COLLATE NOCASE, project_members.user_id",
+        )
+        .bind(if can_read_email { 1_i64 } else { 0_i64 })
+        .bind(project_id)
+        .fetch_all(&mut *transaction)
+        .await?;
+
+        let mut members = Vec::with_capacity(rows.len());
+        for row in rows {
+            let role = row.try_get::<String, _>("role")?;
+            members.push(ProjectMembershipRecord {
+                user_id: row.try_get("user_id")?,
+                display_name: row.try_get("display_name")?,
+                role: parse_project_role(&role)?,
+                primary_email: row.try_get("primary_email")?,
+            });
+        }
+
+        transaction.commit().await?;
+        Ok(members)
     }
 
     /// Adds an active organization member or changes their project role.
