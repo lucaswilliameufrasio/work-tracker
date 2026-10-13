@@ -10,6 +10,7 @@ use zeroize::Zeroizing;
 
 use super::master_key::{MasterKey, MasterKeyError};
 
+pub mod step_up;
 pub mod store;
 
 const TOTP_SECRET_BYTES: usize = 20;

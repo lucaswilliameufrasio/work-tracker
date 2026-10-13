@@ -6,8 +6,8 @@ use uuid::Uuid;
 use crate::audit::{self, AuditEventKind, AuditEventResult, AuditEventTarget};
 
 use super::{
-    EmailAddressError, normalize_email_address, reauthentication::RecentReauthentication,
-    time::format_timestamp,
+    EmailAddressError, mfa::step_up::RecentMfaProof, normalize_email_address,
+    reauthentication::RecentReauthentication, time::format_timestamp,
 };
 
 #[derive(Debug, Error)]
@@ -22,7 +22,7 @@ pub enum EmailAddressManagementError {
     LastAddress,
     #[error("the final confirmed email address cannot be removed")]
     LastConfirmedAddress,
-    #[error("a recent password reauthentication is required")]
+    #[error("recent sensitive-action authentication is required")]
     ReauthenticationRequired,
     #[error("installation-admin email changes require a recent MFA verification")]
     MfaRequired,
@@ -45,26 +45,70 @@ pub struct EmailAddressStore {
     pool: SqlitePool,
 }
 
+enum RecentEmailProof<'a> {
+    Password(&'a RecentReauthentication),
+    Mfa(&'a RecentMfaProof),
+}
+
+impl RecentEmailProof<'_> {
+    fn user_id(&self) -> &str {
+        match self {
+            Self::Password(proof) => proof.user_id.as_str(),
+            Self::Mfa(proof) => proof.user_id.as_str(),
+        }
+    }
+
+    fn is_current_at(&self, now: DateTime<Utc>) -> bool {
+        match self {
+            Self::Password(proof) => proof.is_current_at(now),
+            Self::Mfa(proof) => proof.is_current_at(now),
+        }
+    }
+
+    fn is_mfa(&self) -> bool {
+        matches!(self, Self::Mfa(_))
+    }
+}
+
 impl EmailAddressStore {
     pub fn new(pool: SqlitePool) -> Self {
         Self { pool }
     }
 
-    /// Adds an unconfirmed address. Callers must require recent
-    /// reauthentication before invoking this sensitive account operation.
+    /// Adds an unconfirmed address after recent password reauthentication.
     pub async fn add_pending(
         &self,
         proof: &RecentReauthentication,
         address: &str,
         now: DateTime<Utc>,
     ) -> Result<EmailAddressRecord, EmailAddressManagementError> {
+        self.add_pending_with_proof(RecentEmailProof::Password(proof), address, now)
+            .await
+    }
+
+    pub async fn add_pending_with_mfa(
+        &self,
+        proof: &RecentMfaProof,
+        address: &str,
+        now: DateTime<Utc>,
+    ) -> Result<EmailAddressRecord, EmailAddressManagementError> {
+        self.add_pending_with_proof(RecentEmailProof::Mfa(proof), address, now)
+            .await
+    }
+
+    async fn add_pending_with_proof(
+        &self,
+        proof: RecentEmailProof<'_>,
+        address: &str,
+        now: DateTime<Utc>,
+    ) -> Result<EmailAddressRecord, EmailAddressManagementError> {
         let email = normalize_email_address(address)?;
-        let user_id = proof.user_id.as_str();
+        let user_id = proof.user_id();
         let email_id = Uuid::now_v7().to_string();
         let now_text = format_timestamp(now);
         let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         self.require_active_user(&mut transaction, user_id).await?;
-        self.require_recent_reauthentication(&mut transaction, proof, user_id, now)
+        self.require_recent_authentication(&mut transaction, &proof, user_id, now)
             .await?;
         let already_used = sqlx::query_scalar::<_, i64>(
             "SELECT EXISTS(SELECT 1 FROM user_emails WHERE address_key = ?)",
@@ -141,17 +185,37 @@ impl EmailAddressStore {
     }
 
     /// Promotes only an already-confirmed address and changes the primary
-    /// pointer atomically. The caller must require recent reauthentication.
+    /// pointer atomically after recent password reauthentication.
     pub async fn set_primary(
         &self,
         proof: &RecentReauthentication,
         email_id: &str,
         now: DateTime<Utc>,
     ) -> Result<bool, EmailAddressManagementError> {
-        let user_id = proof.user_id.as_str();
+        self.set_primary_with_proof(RecentEmailProof::Password(proof), email_id, now)
+            .await
+    }
+
+    pub async fn set_primary_with_mfa(
+        &self,
+        proof: &RecentMfaProof,
+        email_id: &str,
+        now: DateTime<Utc>,
+    ) -> Result<bool, EmailAddressManagementError> {
+        self.set_primary_with_proof(RecentEmailProof::Mfa(proof), email_id, now)
+            .await
+    }
+
+    async fn set_primary_with_proof(
+        &self,
+        proof: RecentEmailProof<'_>,
+        email_id: &str,
+        now: DateTime<Utc>,
+    ) -> Result<bool, EmailAddressManagementError> {
+        let user_id = proof.user_id();
         let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         self.require_active_user(&mut transaction, user_id).await?;
-        self.require_recent_reauthentication(&mut transaction, proof, user_id, now)
+        self.require_recent_authentication(&mut transaction, &proof, user_id, now)
             .await?;
         let confirmed = sqlx::query_scalar::<_, i64>(
             "SELECT EXISTS(SELECT 1 FROM user_emails \
@@ -197,18 +261,38 @@ impl EmailAddressStore {
     }
 
     /// Removes an owned address and cascades its pending verification/reset
-    /// tokens. A primary removal promotes another confirmed address first.
-    /// The caller must require recent reauthentication.
+    /// tokens. A primary removal promotes another confirmed address first;
+    /// this variant requires recent password reauthentication.
     pub async fn remove(
         &self,
         proof: &RecentReauthentication,
         email_id: &str,
         now: DateTime<Utc>,
     ) -> Result<bool, EmailAddressManagementError> {
-        let user_id = proof.user_id.as_str();
+        self.remove_with_proof(RecentEmailProof::Password(proof), email_id, now)
+            .await
+    }
+
+    pub async fn remove_with_mfa(
+        &self,
+        proof: &RecentMfaProof,
+        email_id: &str,
+        now: DateTime<Utc>,
+    ) -> Result<bool, EmailAddressManagementError> {
+        self.remove_with_proof(RecentEmailProof::Mfa(proof), email_id, now)
+            .await
+    }
+
+    async fn remove_with_proof(
+        &self,
+        proof: RecentEmailProof<'_>,
+        email_id: &str,
+        now: DateTime<Utc>,
+    ) -> Result<bool, EmailAddressManagementError> {
+        let user_id = proof.user_id();
         let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         self.require_active_user(&mut transaction, user_id).await?;
-        self.require_recent_reauthentication(&mut transaction, proof, user_id, now)
+        self.require_recent_authentication(&mut transaction, &proof, user_id, now)
             .await?;
         let target = sqlx::query(
             "SELECT is_primary, confirmed_at FROM user_emails \
@@ -312,31 +396,52 @@ impl EmailAddressStore {
         Ok(())
     }
 
-    async fn require_recent_reauthentication(
+    async fn require_recent_authentication(
         &self,
         transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-        proof: &RecentReauthentication,
+        proof: &RecentEmailProof<'_>,
         user_id: &str,
         now: DateTime<Utc>,
     ) -> Result<(), EmailAddressManagementError> {
-        if proof.user_id != user_id || !proof.is_current_at(now) {
+        if proof.user_id() != user_id || !proof.is_current_at(now) {
             return Err(EmailAddressManagementError::ReauthenticationRequired);
         }
-        let active_session = sqlx::query_scalar::<_, i64>(
-            "SELECT EXISTS( \
-                 SELECT 1 FROM sessions \
-                 JOIN users ON users.id = sessions.user_id \
-                 WHERE sessions.id = ? AND sessions.user_id = ? \
-                   AND sessions.token_hash = ? \
-                   AND sessions.reauthenticated_at = ? \
-                   AND sessions.revoked_at IS NULL AND users.state = 'active')",
-        )
-        .bind(&proof.session_id)
-        .bind(user_id)
-        .bind(&proof.token_digest)
-        .bind(format_timestamp(proof.authenticated_at))
-        .fetch_one(&mut **transaction)
-        .await?;
+        let active_session = match proof {
+            RecentEmailProof::Password(proof) => {
+                sqlx::query_scalar::<_, i64>(
+                    "SELECT EXISTS( \
+                         SELECT 1 FROM sessions \
+                         JOIN users ON users.id = sessions.user_id \
+                         WHERE sessions.id = ? AND sessions.user_id = ? \
+                           AND sessions.token_hash = ? \
+                           AND sessions.reauthenticated_at = ? \
+                           AND sessions.revoked_at IS NULL AND users.state = 'active')",
+                )
+                .bind(&proof.session_id)
+                .bind(user_id)
+                .bind(&proof.token_digest)
+                .bind(format_timestamp(proof.authenticated_at))
+                .fetch_one(&mut **transaction)
+                .await?
+            }
+            RecentEmailProof::Mfa(proof) => {
+                sqlx::query_scalar::<_, i64>(
+                    "SELECT EXISTS( \
+                         SELECT 1 FROM sessions \
+                         JOIN users ON users.id = sessions.user_id \
+                         WHERE sessions.id = ? AND sessions.user_id = ? \
+                           AND sessions.token_hash = ? \
+                           AND sessions.mfa_authenticated_at = ? \
+                           AND sessions.revoked_at IS NULL AND users.state = 'active')",
+                )
+                .bind(&proof.session_id)
+                .bind(user_id)
+                .bind(&proof.token_digest)
+                .bind(format_timestamp(proof.authenticated_at))
+                .fetch_one(&mut **transaction)
+                .await?
+            }
+        };
         if active_session != 1 {
             return Err(EmailAddressManagementError::ReauthenticationRequired);
         }
@@ -347,7 +452,7 @@ impl EmailAddressStore {
         .bind(user_id)
         .fetch_one(&mut **transaction)
         .await?;
-        if installation_admin == 1 {
+        if installation_admin == 1 && !proof.is_mfa() {
             return Err(EmailAddressManagementError::MfaRequired);
         }
         Ok(())

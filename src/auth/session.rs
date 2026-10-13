@@ -1,5 +1,5 @@
 use chrono::{DateTime, TimeDelta, Utc};
-use sqlx::{Row, SqlitePool};
+use sqlx::{Row, Sqlite, SqlitePool, Transaction};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -93,6 +93,14 @@ pub struct SessionSummary {
     pub is_current: bool,
 }
 
+pub(crate) struct MfaSessionAssurance {
+    pub(crate) session_id: String,
+    pub(crate) user_id: String,
+    pub(crate) authenticated_at: DateTime<Utc>,
+    pub(crate) valid_until: DateTime<Utc>,
+}
+
+#[derive(Clone)]
 struct SessionRow {
     id: String,
     user_id: String,
@@ -111,6 +119,10 @@ pub struct SessionStore {
 impl SessionStore {
     pub fn new(pool: SqlitePool, policy: SessionPolicy) -> Self {
         Self { pool, policy }
+    }
+
+    pub(crate) async fn begin_immediate(&self) -> Result<Transaction<'_, Sqlite>, SessionError> {
+        Ok(self.pool.begin_with("BEGIN IMMEDIATE").await?)
     }
 
     pub async fn issue(
@@ -255,6 +267,228 @@ impl SessionStore {
             return Ok(None);
         };
         Ok(self.validated_row(row, now).map(|(session, _)| session))
+    }
+
+    pub(crate) async fn current_for_mfa_step_up_in_transaction(
+        &self,
+        transaction: &mut Transaction<'_, Sqlite>,
+        token: &SessionToken,
+        now: DateTime<Utc>,
+    ) -> Result<Option<AuthenticatedSession>, SessionError> {
+        let token_hash = token.digest().to_vec();
+        let row = sqlx::query(
+            "SELECT sessions.id, sessions.user_id, sessions.created_at, \
+                    sessions.last_activity_at, sessions.expires_at, \
+                    users.state AS account_state \
+             FROM sessions JOIN users ON users.id = sessions.user_id \
+             WHERE sessions.token_hash = ? AND sessions.revoked_at IS NULL",
+        )
+        .bind(&token_hash)
+        .fetch_optional(&mut **transaction)
+        .await?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let session_row = SessionRow {
+            id: row.try_get("id")?,
+            user_id: row.try_get("user_id")?,
+            created_at: row.try_get("created_at")?,
+            last_activity_at: row.try_get("last_activity_at")?,
+            expires_at: row.try_get("expires_at")?,
+            account_state: row.try_get("account_state")?,
+        };
+        Ok(self
+            .validated_row(session_row, now)
+            .map(|(session, _)| session))
+    }
+
+    /// Rotates the exact live bearer after its MFA factor has been verified in
+    /// the same transaction. It preserves the original absolute deadline and
+    /// never copies password reauthentication assurance.
+    pub(crate) async fn rotate_after_mfa_in_transaction(
+        &self,
+        transaction: &mut Transaction<'_, Sqlite>,
+        token: &SessionToken,
+        now: DateTime<Utc>,
+    ) -> Result<Option<IssuedSession>, SessionError> {
+        let token_hash = token.digest().to_vec();
+        let row = sqlx::query(
+            "SELECT sessions.id, sessions.user_id, sessions.created_at, \
+                    sessions.last_activity_at, sessions.expires_at, \
+                    users.state AS account_state \
+             FROM sessions JOIN users ON users.id = sessions.user_id \
+             WHERE sessions.token_hash = ? AND sessions.revoked_at IS NULL",
+        )
+        .bind(&token_hash)
+        .fetch_optional(&mut **transaction)
+        .await?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let session_row = SessionRow {
+            id: row.try_get("id")?,
+            user_id: row.try_get("user_id")?,
+            created_at: row.try_get("created_at")?,
+            last_activity_at: row.try_get("last_activity_at")?,
+            expires_at: row.try_get("expires_at")?,
+            account_state: row.try_get("account_state")?,
+        };
+        let Some((session, _)) = self.validated_row(session_row.clone(), now) else {
+            return Ok(None);
+        };
+        let Some(created_at) = parse_timestamp(&session_row.created_at) else {
+            return Ok(None);
+        };
+        let Some(persisted_expiry) = parse_timestamp(&session_row.expires_at) else {
+            return Ok(None);
+        };
+        let Some(absolute_expiry) = created_at.checked_add_signed(self.policy.absolute_lifetime)
+        else {
+            return Ok(None);
+        };
+        let Some(inactivity_expiry) = now.checked_add_signed(self.policy.inactivity_lifetime)
+        else {
+            return Ok(None);
+        };
+        let expires_at = persisted_expiry.min(absolute_expiry).min(inactivity_expiry);
+        if expires_at <= now {
+            return Ok(None);
+        }
+
+        let new_session_id = Uuid::now_v7().to_string();
+        let new_token = SessionToken::generate()?;
+        let now_text = format_timestamp(now);
+        let expires_at_text = format_timestamp(expires_at);
+        let created_at_text = format_timestamp(created_at);
+        let revoked = sqlx::query(
+            "UPDATE sessions SET revoked_at = ? \
+             WHERE id = ? AND user_id = ? AND token_hash = ? AND revoked_at IS NULL \
+               AND EXISTS (SELECT 1 FROM users \
+                           WHERE users.id = sessions.user_id AND users.state = 'active')",
+        )
+        .bind(&now_text)
+        .bind(&session.id)
+        .bind(&session.user_id)
+        .bind(&token_hash)
+        .execute(&mut **transaction)
+        .await?;
+        if revoked.rows_affected() != 1 {
+            return Ok(None);
+        }
+
+        let inserted = sqlx::query(
+            "INSERT INTO sessions \
+             (id, token_hash, user_id, created_at, last_activity_at, expires_at, \
+              reauthenticated_at, revoked_at, mfa_authenticated_at) \
+             SELECT ?, ?, users.id, ?, ?, ?, NULL, NULL, ? \
+             FROM users WHERE users.id = ? AND users.state = 'active'",
+        )
+        .bind(&new_session_id)
+        .bind(new_token.digest().as_slice())
+        .bind(created_at_text)
+        .bind(&now_text)
+        .bind(&expires_at_text)
+        .bind(&now_text)
+        .bind(&session.user_id)
+        .execute(&mut **transaction)
+        .await?;
+        if inserted.rows_affected() != 1 {
+            return Ok(None);
+        }
+
+        audit::append_in_transaction(
+            transaction,
+            Some(&session.user_id),
+            AuditEventKind::SessionRevoked,
+            AuditEventResult::Success,
+            &AuditEventTarget::session(&session.id),
+            now,
+        )
+        .await?;
+        audit::append_in_transaction(
+            transaction,
+            Some(&session.user_id),
+            AuditEventKind::SessionMfaElevated,
+            AuditEventResult::Success,
+            &AuditEventTarget::session(&new_session_id),
+            now,
+        )
+        .await?;
+
+        Ok(Some(IssuedSession {
+            id: new_session_id,
+            token: new_token,
+            expires_at,
+        }))
+    }
+
+    pub(crate) async fn recent_mfa_assurance(
+        &self,
+        token: &SessionToken,
+        now: DateTime<Utc>,
+    ) -> Result<Option<MfaSessionAssurance>, SessionError> {
+        let token_hash = token.digest().to_vec();
+        let row = sqlx::query(
+            "SELECT sessions.id, sessions.user_id, sessions.created_at, \
+                    sessions.last_activity_at, sessions.expires_at, \
+                    sessions.mfa_authenticated_at, users.state AS account_state \
+             FROM sessions JOIN users ON users.id = sessions.user_id \
+             WHERE sessions.token_hash = ? AND sessions.revoked_at IS NULL",
+        )
+        .bind(&token_hash)
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let session_row = SessionRow {
+            id: row.try_get("id")?,
+            user_id: row.try_get("user_id")?,
+            created_at: row.try_get("created_at")?,
+            last_activity_at: row.try_get("last_activity_at")?,
+            expires_at: row.try_get("expires_at")?,
+            account_state: row.try_get("account_state")?,
+        };
+        let Some((session, last_activity_at)) = self.validated_row(session_row.clone(), now) else {
+            return Ok(None);
+        };
+        let Some(authenticated_at_text) =
+            row.try_get::<Option<String>, _>("mfa_authenticated_at")?
+        else {
+            return Ok(None);
+        };
+        let Some(authenticated_at) = parse_timestamp(&authenticated_at_text) else {
+            return Ok(None);
+        };
+        let age = now.signed_duration_since(authenticated_at);
+        if age < TimeDelta::zero() || age > TimeDelta::minutes(10) {
+            return Ok(None);
+        }
+        let Some(created_at) = parse_timestamp(&session_row.created_at) else {
+            return Ok(None);
+        };
+        let Some(persisted_expiry) = parse_timestamp(&session_row.expires_at) else {
+            return Ok(None);
+        };
+        let Some(absolute_expiry) = created_at.checked_add_signed(self.policy.absolute_lifetime)
+        else {
+            return Ok(None);
+        };
+        let Some(inactivity_expiry) =
+            last_activity_at.checked_add_signed(self.policy.inactivity_lifetime)
+        else {
+            return Ok(None);
+        };
+        let valid_until = persisted_expiry.min(absolute_expiry).min(inactivity_expiry);
+        if now >= valid_until {
+            return Ok(None);
+        }
+        Ok(Some(MfaSessionAssurance {
+            session_id: session.id,
+            user_id: session.user_id,
+            authenticated_at,
+            valid_until,
+        }))
     }
 
     pub async fn revoke(
