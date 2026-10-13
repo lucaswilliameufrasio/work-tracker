@@ -27,6 +27,7 @@ pub enum ProjectRole {
 pub enum AccessCapability {
     ConfigureInstallationSettings,
     ReadOperationalHealth,
+    ReadOrganizationDirectory,
     ManageOrganizationMembership,
     TransferOrganizationOwnership,
     CreateProject,
@@ -365,6 +366,10 @@ pub fn authorize(
         AccessCapability::ConfigureInstallationSettings | AccessCapability::BanInstallationUser => {
             context.installation_admin
         }
+        AccessCapability::ReadOrganizationDirectory => matches!(
+            context.organization_role,
+            Some(OrganizationRole::Owner | OrganizationRole::Admin | OrganizationRole::Member)
+        ),
         AccessCapability::ManageOrganizationMembership | AccessCapability::CreateProject => {
             is_org_admin
         }
@@ -434,6 +439,7 @@ mod tests {
         let capabilities = [
             AccessCapability::ConfigureInstallationSettings,
             AccessCapability::ReadOperationalHealth,
+            AccessCapability::ReadOrganizationDirectory,
             AccessCapability::ManageOrganizationMembership,
             AccessCapability::TransferOrganizationOwnership,
             AccessCapability::CreateProject,
@@ -471,6 +477,10 @@ mod tests {
             assert!(is_allowed(
                 &principal,
                 AccessCapability::ManageOrganizationMembership
+            ));
+            assert!(is_allowed(
+                &principal,
+                AccessCapability::ReadOrganizationDirectory
             ));
             assert_eq!(
                 is_allowed(&principal, AccessCapability::TransferOrganizationOwnership),
@@ -613,6 +623,41 @@ mod tests {
         assert!(!is_allowed(
             &organization_member,
             AccessCapability::ReadProjectMembership
+        ));
+    }
+
+    #[test]
+    fn organization_directory_is_available_to_non_guests_but_not_guests() {
+        for organization_role in [
+            OrganizationRole::Owner,
+            OrganizationRole::Admin,
+            OrganizationRole::Member,
+        ] {
+            let context = context(
+                AccountState::Active,
+                false,
+                Some(organization_role),
+                None,
+                false,
+                false,
+            );
+            assert!(is_allowed(
+                &context,
+                AccessCapability::ReadOrganizationDirectory
+            ));
+        }
+
+        let guest = context(
+            AccountState::Active,
+            false,
+            Some(OrganizationRole::Guest),
+            None,
+            false,
+            false,
+        );
+        assert!(!is_allowed(
+            &guest,
+            AccessCapability::ReadOrganizationDirectory
         ));
     }
 

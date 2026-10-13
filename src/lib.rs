@@ -5,4 +5,5 @@ pub mod config;
 pub mod db;
 pub mod http;
 pub mod issues;
+pub mod organizations;
 pub mod projects;
