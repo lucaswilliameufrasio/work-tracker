@@ -10,12 +10,13 @@ use puxiri::{
         mfa::{
             TotpSecretBox,
             recovery::{
-                MfaRecoveryAccess, MfaRecoveryAuthentication, MfaRecoveryService, MfaRecoveryToken,
+                MfaRecoveryAccess, MfaRecoveryAuthentication, MfaRecoveryEnrollment,
+                MfaRecoveryService, MfaRecoveryToken,
             },
             store::TotpCredentialStore,
         },
         rate_limit::{AuthRateLimitPolicies, AuthRateLimitPolicy, AuthRateLimiter},
-        recovery::{RecoveryCodePolicy, RecoveryCodeStore},
+        recovery::{RecoveryCodeBatch, RecoveryCodePolicy, RecoveryCodeStore},
     },
     db::Database,
 };
@@ -219,15 +220,73 @@ fn rejected(outcome: MfaRecoveryAuthentication) -> bool {
 
 async fn recovery_code_is_unused(fixture: &Fixture, code: &str) -> bool {
     let digest = Sha256::digest(code.as_bytes());
-    let consumed_at: Option<String> = sqlx::query_scalar(
-        "SELECT consumed_at FROM recovery_codes WHERE user_id = ? AND code_hash = ?",
+    let state: (Option<String>, Option<String>) = sqlx::query_as(
+        "SELECT consumed_at, invalidated_at FROM recovery_codes \
+         WHERE user_id = ? AND code_hash = ?",
     )
     .bind(&fixture.user_id)
     .bind(digest.as_slice())
     .fetch_one(fixture.database.pool())
     .await
     .unwrap();
-    consumed_at.is_none()
+    state.0.is_none() && state.1.is_none()
+}
+
+async fn begin_replacement(
+    fixture: &Fixture,
+    access: &MfaRecoveryAccess,
+    now: DateTime<Utc>,
+) -> MfaRecoveryEnrollment {
+    fixture
+        .service
+        .begin_totp_replacement(access.token(), now)
+        .await
+        .unwrap()
+        .expect("replacement enrollment should start")
+}
+
+fn code_for_enrollment(enrollment: &MfaRecoveryEnrollment, now: DateTime<Utc>) -> String {
+    let step = u64::try_from(now.timestamp()).unwrap() / 30;
+    totp_code(enrollment.secret_for_display(), step)
+}
+
+async fn complete_replacement(
+    fixture: &Fixture,
+    access: &MfaRecoveryAccess,
+    enrollment: &MfaRecoveryEnrollment,
+    count: u8,
+    now: DateTime<Utc>,
+) -> Option<RecoveryCodeBatch> {
+    fixture
+        .service
+        .complete_totp_replacement(
+            access.token(),
+            &code_for_enrollment(enrollment, now),
+            RecoveryCodePolicy::new(count).unwrap(),
+            now,
+        )
+        .await
+        .unwrap()
+}
+
+async fn insert_mfa_session(fixture: &Fixture) -> String {
+    let session_id = Uuid::now_v7().to_string();
+    let token_hash = Sha256::digest(session_id.as_bytes());
+    sqlx::query(
+        "INSERT INTO sessions \
+         (id, token_hash, user_id, created_at, last_activity_at, expires_at, \
+          reauthenticated_at, revoked_at, mfa_authenticated_at) \
+         VALUES (?, ?, ?, '2026-10-13T12:00:00.000000000Z', \
+                 '2026-10-13T12:00:00.000000000Z', '2026-10-20T12:00:00.000000000Z', \
+                 NULL, NULL, '2026-10-13T11:59:00.000000000Z')",
+    )
+    .bind(&session_id)
+    .bind(token_hash.as_slice())
+    .bind(&fixture.user_id)
+    .execute(fixture.database.pool())
+    .await
+    .unwrap();
+    session_id
 }
 
 #[tokio::test]
@@ -674,4 +733,260 @@ async fn expired_recovery_token_cannot_start_replacement_totp() {
         .await
         .unwrap();
     assert_eq!(pending_count, 0);
+}
+
+#[tokio::test]
+async fn completing_recovery_replaces_totp_rotates_codes_and_revokes_old_sessions_atomically() {
+    let _guard = KDF_TEST_LOCK.lock().await;
+    let fixture = fixture(true, false).await;
+    let access = start_recovery(&fixture, fixture.first_code.as_str(), fixture.now).await;
+    let enrollment =
+        begin_replacement(&fixture, &access, fixture.now + TimeDelta::seconds(1)).await;
+    let session_id = insert_mfa_session(&fixture).await;
+    let old_credential_id: String = sqlx::query_scalar(
+        "SELECT id FROM mfa_credentials WHERE user_id = ? AND activated_at IS NOT NULL",
+    )
+    .bind(&fixture.user_id)
+    .fetch_one(fixture.database.pool())
+    .await
+    .unwrap();
+    let completed_at = fixture.now + TimeDelta::minutes(1);
+    let valid_code = code_for_enrollment(&enrollment, completed_at);
+    let mut invalid_code = valid_code.clone();
+    let last = invalid_code.pop().unwrap();
+    invalid_code.push(if last == '0' { '1' } else { '0' });
+
+    assert!(
+        fixture
+            .service
+            .complete_totp_replacement(
+                access.token(),
+                &invalid_code,
+                RecoveryCodePolicy::new(3).unwrap(),
+                completed_at,
+            )
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(recovery_code_is_unused(&fixture, fixture.second_code.as_str()).await);
+    let still_active_id: String = sqlx::query_scalar(
+        "SELECT id FROM mfa_credentials WHERE user_id = ? AND activated_at IS NOT NULL",
+    )
+    .bind(&fixture.user_id)
+    .fetch_one(fixture.database.pool())
+    .await
+    .unwrap();
+    assert_eq!(still_active_id, old_credential_id);
+
+    let new_codes = fixture
+        .service
+        .complete_totp_replacement(
+            access.token(),
+            &valid_code,
+            RecoveryCodePolicy::new(3).unwrap(),
+            completed_at,
+        )
+        .await
+        .unwrap()
+        .expect("valid replacement code should complete recovery");
+    let displayed_codes: Vec<Zeroizing<String>> = new_codes
+        .codes()
+        .map(|code| Zeroizing::new(code.to_owned()))
+        .collect();
+    assert_eq!(displayed_codes.len(), 3);
+    assert!(displayed_codes.iter().all(|code| code.len() == 22));
+
+    let (new_credential_id, last_accepted_step): (String, i64) = sqlx::query_as(
+        "SELECT id, last_accepted_step FROM mfa_credentials \
+         WHERE user_id = ? AND activated_at IS NOT NULL",
+    )
+    .bind(&fixture.user_id)
+    .fetch_one(fixture.database.pool())
+    .await
+    .unwrap();
+    assert_ne!(new_credential_id, old_credential_id);
+    assert_eq!(last_accepted_step, completed_at.timestamp() / 30);
+
+    let (session_revoked_at, session_mfa_at): (Option<String>, Option<String>) =
+        sqlx::query_as("SELECT revoked_at, mfa_authenticated_at FROM sessions WHERE id = ?")
+            .bind(&session_id)
+            .fetch_one(fixture.database.pool())
+            .await
+            .unwrap();
+    assert!(session_revoked_at.is_some());
+    assert_eq!(session_mfa_at, None);
+    assert!(
+        !fixture
+            .service
+            .validate(access.token(), completed_at)
+            .await
+            .unwrap()
+    );
+
+    let (completed, invalidated): (Option<String>, Option<String>) = sqlx::query_as(
+        "SELECT completed_at, invalidated_at FROM mfa_recovery_sessions WHERE id = ?",
+    )
+    .bind(access.id())
+    .fetch_one(fixture.database.pool())
+    .await
+    .unwrap();
+    assert!(completed.is_some());
+    assert_eq!(invalidated, None);
+    let active_code_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM recovery_codes \
+         WHERE user_id = ? AND consumed_at IS NULL AND invalidated_at IS NULL",
+    )
+    .bind(&fixture.user_id)
+    .fetch_one(fixture.database.pool())
+    .await
+    .unwrap();
+    assert_eq!(active_code_count, 3);
+    assert!(!recovery_code_is_unused(&fixture, fixture.second_code.as_str()).await);
+    let pending_enrollment_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM mfa_recovery_enrollments")
+            .fetch_one(fixture.database.pool())
+            .await
+            .unwrap();
+    assert_eq!(pending_enrollment_count, 0);
+    let completion_audit_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM audit_events WHERE target_id = ? \
+         AND event_kind = 'auth.mfa.recovery_completed'",
+    )
+    .bind(access.id())
+    .fetch_one(fixture.database.pool())
+    .await
+    .unwrap();
+    assert_eq!(completion_audit_count, 1);
+}
+
+#[tokio::test]
+async fn recovery_completion_audit_failure_rolls_back_factor_codes_and_session_revocation() {
+    let _guard = KDF_TEST_LOCK.lock().await;
+    let fixture = fixture(true, false).await;
+    let access = start_recovery(&fixture, fixture.first_code.as_str(), fixture.now).await;
+    let enrollment =
+        begin_replacement(&fixture, &access, fixture.now + TimeDelta::seconds(1)).await;
+    let session_id = insert_mfa_session(&fixture).await;
+    let old_credential_id: String = sqlx::query_scalar(
+        "SELECT id FROM mfa_credentials WHERE user_id = ? AND activated_at IS NOT NULL",
+    )
+    .bind(&fixture.user_id)
+    .fetch_one(fixture.database.pool())
+    .await
+    .unwrap();
+    let completed_at = fixture.now + TimeDelta::minutes(1);
+    let code = code_for_enrollment(&enrollment, completed_at);
+    sqlx::query(
+        "CREATE TRIGGER fail_mfa_recovery_completion_audit BEFORE INSERT ON audit_events \
+         WHEN NEW.event_kind = 'auth.mfa.recovery_completed' \
+         BEGIN SELECT RAISE(ABORT, 'fixture MFA recovery completion audit failure'); END",
+    )
+    .execute(fixture.database.pool())
+    .await
+    .unwrap();
+
+    assert!(
+        fixture
+            .service
+            .complete_totp_replacement(
+                access.token(),
+                &code,
+                RecoveryCodePolicy::new(3).unwrap(),
+                completed_at,
+            )
+            .await
+            .is_err()
+    );
+    let still_active_id: String = sqlx::query_scalar(
+        "SELECT id FROM mfa_credentials WHERE user_id = ? AND activated_at IS NOT NULL",
+    )
+    .bind(&fixture.user_id)
+    .fetch_one(fixture.database.pool())
+    .await
+    .unwrap();
+    assert_eq!(still_active_id, old_credential_id);
+    assert!(recovery_code_is_unused(&fixture, fixture.second_code.as_str()).await);
+    let active_code_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM recovery_codes \
+         WHERE user_id = ? AND consumed_at IS NULL AND invalidated_at IS NULL",
+    )
+    .bind(&fixture.user_id)
+    .fetch_one(fixture.database.pool())
+    .await
+    .unwrap();
+    assert_eq!(active_code_count, 1);
+    let (completed, invalidated): (Option<String>, Option<String>) = sqlx::query_as(
+        "SELECT completed_at, invalidated_at FROM mfa_recovery_sessions WHERE id = ?",
+    )
+    .bind(access.id())
+    .fetch_one(fixture.database.pool())
+    .await
+    .unwrap();
+    assert_eq!(completed, None);
+    assert_eq!(invalidated, None);
+    let (session_revoked_at, session_mfa_at): (Option<String>, Option<String>) =
+        sqlx::query_as("SELECT revoked_at, mfa_authenticated_at FROM sessions WHERE id = ?")
+            .bind(&session_id)
+            .fetch_one(fixture.database.pool())
+            .await
+            .unwrap();
+    assert_eq!(session_revoked_at, None);
+    assert!(session_mfa_at.is_some());
+
+    sqlx::query("DROP TRIGGER fail_mfa_recovery_completion_audit")
+        .execute(fixture.database.pool())
+        .await
+        .unwrap();
+    assert!(
+        complete_replacement(&fixture, &access, &enrollment, 3, completed_at)
+            .await
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn concurrent_recovery_completion_rotates_factor_and_codes_only_once() {
+    let _guard = KDF_TEST_LOCK.lock().await;
+    let fixture = fixture(true, false).await;
+    let access = start_recovery(&fixture, fixture.first_code.as_str(), fixture.now).await;
+    let enrollment =
+        begin_replacement(&fixture, &access, fixture.now + TimeDelta::seconds(1)).await;
+    let completed_at = fixture.now + TimeDelta::minutes(1);
+    let code = code_for_enrollment(&enrollment, completed_at);
+    let (first, second) = tokio::join!(
+        fixture.service.complete_totp_replacement(
+            access.token(),
+            &code,
+            RecoveryCodePolicy::new(3).unwrap(),
+            completed_at,
+        ),
+        fixture.service.complete_totp_replacement(
+            access.token(),
+            &code,
+            RecoveryCodePolicy::new(3).unwrap(),
+            completed_at,
+        ),
+    );
+    let outcomes = [first.unwrap(), second.unwrap()];
+    assert_eq!(outcomes.iter().filter(|result| result.is_some()).count(), 1);
+    assert_eq!(outcomes.iter().filter(|result| result.is_none()).count(), 1);
+    let active_code_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM recovery_codes \
+         WHERE user_id = ? AND consumed_at IS NULL AND invalidated_at IS NULL",
+    )
+    .bind(&fixture.user_id)
+    .fetch_one(fixture.database.pool())
+    .await
+    .unwrap();
+    assert_eq!(active_code_count, 3);
+    let completion_audit_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM audit_events WHERE target_id = ? \
+         AND event_kind = 'auth.mfa.recovery_completed'",
+    )
+    .bind(access.id())
+    .fetch_one(fixture.database.pool())
+    .await
+    .unwrap();
+    assert_eq!(completion_audit_count, 1);
 }

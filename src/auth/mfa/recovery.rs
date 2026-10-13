@@ -16,9 +16,11 @@ use super::super::{
     credentials::{CredentialError, CredentialStore},
     normalize_email_address,
     rate_limit::{AuthRateLimitError, AuthRateLimiter},
-    recovery::{RecoveryCodeError, RecoveryCodeStore},
+    recovery::{RecoveryCodeBatch, RecoveryCodeError, RecoveryCodePolicy, RecoveryCodeStore},
 };
-use super::{TotpError, TotpSecret, TotpSecretBox, TotpSecretBoxError};
+use super::{
+    EncryptedTotpSecret, TotpError, TotpPolicy, TotpSecret, TotpSecretBox, TotpSecretBoxError,
+};
 use crate::auth::time::format_timestamp;
 
 const RECOVERY_TOKEN_BYTES: usize = 32;
@@ -446,6 +448,165 @@ impl MfaRecoveryService {
             secret: secret.reveal_for_enrollment(),
             expires_at,
         }))
+    }
+
+    /// Confirms the replacement TOTP and atomically replaces the active
+    /// credential, rotates recovery codes, completes this recovery token, and
+    /// revokes all ordinary sessions so old MFA assurance cannot survive.
+    /// `None` means the token/enrollment/code was not eligible; no state is
+    /// changed in that case. The returned codes are display-once values.
+    pub async fn complete_totp_replacement(
+        &self,
+        token: &MfaRecoveryToken,
+        code: &str,
+        recovery_code_policy: RecoveryCodePolicy,
+        now: DateTime<Utc>,
+    ) -> Result<Option<RecoveryCodeBatch>, MfaRecoveryError> {
+        let now_text = format_timestamp(now);
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let Some(principal) = self
+            .current_principal_in_transaction(&mut transaction, token, now)
+            .await?
+        else {
+            transaction.rollback().await?;
+            return Ok(None);
+        };
+
+        let enrollment = sqlx::query(
+            "SELECT credential_id, secret_envelope, expires_at \
+             FROM mfa_recovery_enrollments \
+             WHERE recovery_session_id = ? AND expires_at > ?",
+        )
+        .bind(&principal.recovery_session_id)
+        .bind(&now_text)
+        .fetch_optional(&mut *transaction)
+        .await?;
+        let Some(enrollment) = enrollment else {
+            transaction.rollback().await?;
+            return Ok(None);
+        };
+
+        let credential_id_text: String = enrollment.try_get("credential_id")?;
+        let credential_id =
+            Uuid::parse_str(&credential_id_text).map_err(|_| MfaRecoveryError::InvalidState)?;
+        let user_id =
+            Uuid::parse_str(&principal.user_id).map_err(|_| MfaRecoveryError::InvalidState)?;
+        let expires_at_text: String = enrollment.try_get("expires_at")?;
+        let expires_at = DateTime::parse_from_rfc3339(&expires_at_text)
+            .map_err(|_| MfaRecoveryError::InvalidState)?
+            .with_timezone(&Utc);
+        if expires_at <= now || expires_at > principal.expires_at {
+            transaction.rollback().await?;
+            return Ok(None);
+        }
+
+        let envelope_bytes: Vec<u8> = enrollment.try_get("secret_envelope")?;
+        let envelope = EncryptedTotpSecret::from_bytes(&envelope_bytes)?;
+        let secret = self
+            .secret_box
+            .decrypt(&user_id, &credential_id, &envelope)?;
+        let Some(matched_step) =
+            secret.matching_step(code, now, None, TotpPolicy::authenticator_default())
+        else {
+            transaction.rollback().await?;
+            return Ok(None);
+        };
+        let matched_step =
+            i64::try_from(matched_step).map_err(|_| MfaRecoveryError::InvalidState)?;
+
+        let old_credential_id: Option<String> = sqlx::query_scalar(
+            "SELECT id FROM mfa_credentials \
+             WHERE user_id = ? AND activated_at IS NOT NULL",
+        )
+        .bind(&principal.user_id)
+        .fetch_optional(&mut *transaction)
+        .await?;
+        let Some(old_credential_id) = old_credential_id else {
+            transaction.rollback().await?;
+            return Ok(None);
+        };
+        let deleted = sqlx::query(
+            "DELETE FROM mfa_credentials \
+             WHERE id = ? AND user_id = ? AND activated_at IS NOT NULL",
+        )
+        .bind(old_credential_id)
+        .bind(&principal.user_id)
+        .execute(&mut *transaction)
+        .await?;
+        if deleted.rows_affected() != 1 {
+            transaction.rollback().await?;
+            return Ok(None);
+        }
+
+        let activated_at = format_timestamp(now);
+        sqlx::query(
+            "INSERT INTO mfa_credentials \
+             (id, user_id, secret_envelope, created_at, expires_at, activated_at, last_accepted_step) \
+             VALUES (?, ?, ?, ?, NULL, ?, ?)",
+        )
+        .bind(&credential_id_text)
+        .bind(&principal.user_id)
+        .bind(&envelope_bytes)
+        .bind(&activated_at)
+        .bind(&activated_at)
+        .bind(matched_step)
+        .execute(&mut *transaction)
+        .await?;
+
+        let recovery_codes = self
+            .recovery_codes
+            .issue_in_transaction(
+                &mut transaction,
+                &principal.user_id,
+                recovery_code_policy,
+                now,
+            )
+            .await?;
+        sqlx::query(
+            "DELETE FROM mfa_recovery_enrollments \
+             WHERE credential_id = ? AND recovery_session_id = ?",
+        )
+        .bind(&credential_id_text)
+        .bind(&principal.recovery_session_id)
+        .execute(&mut *transaction)
+        .await?;
+        let completed = sqlx::query(
+            "UPDATE mfa_recovery_sessions SET completed_at = ? \
+             WHERE id = ? AND user_id = ? AND completed_at IS NULL \
+               AND invalidated_at IS NULL AND expires_at > ?",
+        )
+        .bind(&now_text)
+        .bind(&principal.recovery_session_id)
+        .bind(&principal.user_id)
+        .bind(&now_text)
+        .execute(&mut *transaction)
+        .await?;
+        if completed.rows_affected() != 1 {
+            transaction.rollback().await?;
+            return Ok(None);
+        }
+
+        sqlx::query(
+            "UPDATE sessions SET revoked_at = COALESCE(revoked_at, ?), \
+                                  mfa_authenticated_at = NULL \
+             WHERE user_id = ?",
+        )
+        .bind(&now_text)
+        .bind(&principal.user_id)
+        .execute(&mut *transaction)
+        .await?;
+        audit::append_in_transaction(
+            &mut transaction,
+            Some(&principal.user_id),
+            AuditEventKind::MfaRecoveryCompleted,
+            AuditEventResult::Success,
+            &AuditEventTarget::mfa_recovery_session(&principal.recovery_session_id),
+            now,
+        )
+        .await?;
+        transaction.commit().await?;
+
+        Ok(Some(recovery_codes))
     }
 
     async fn current_principal_in_transaction(

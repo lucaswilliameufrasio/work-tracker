@@ -30,6 +30,7 @@ pub enum AuditEventKind {
     TotpDisabled,
     MfaRecoveryStarted,
     MfaRecoveryEnrollmentStarted,
+    MfaRecoveryCompleted,
 }
 
 impl AuditEventKind {
@@ -52,6 +53,7 @@ impl AuditEventKind {
             Self::TotpDisabled => "auth.mfa.totp_disabled",
             Self::MfaRecoveryStarted => "auth.mfa.recovery_started",
             Self::MfaRecoveryEnrollmentStarted => "auth.mfa.recovery_enrollment_started",
+            Self::MfaRecoveryCompleted => "auth.mfa.recovery_completed",
         }
     }
 }

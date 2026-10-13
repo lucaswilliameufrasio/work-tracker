@@ -73,19 +73,36 @@ impl RecoveryCodeStore {
         policy: RecoveryCodePolicy,
         now: DateTime<Utc>,
     ) -> Result<RecoveryCodeBatch, RecoveryCodeError> {
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let batch = self
+            .issue_in_transaction(&mut transaction, user_id, policy, now)
+            .await?;
+        transaction.commit().await?;
+        Ok(batch)
+    }
+
+    /// Rotates the active batch in a caller-owned `BEGIN IMMEDIATE` transaction.
+    /// Recovery completion uses this to commit code rotation with factor
+    /// replacement and recovery-token invalidation. The caller must roll back
+    /// if any later operation fails.
+    pub(crate) async fn issue_in_transaction(
+        &self,
+        transaction: &mut Transaction<'_, Sqlite>,
+        user_id: &str,
+        policy: RecoveryCodePolicy,
+        now: DateTime<Utc>,
+    ) -> Result<RecoveryCodeBatch, RecoveryCodeError> {
         let mut generated = Vec::with_capacity(usize::from(policy.code_count));
         for _ in 0..policy.code_count {
             generated.push(generate_code()?);
         }
 
         let now_text = format_timestamp(now);
-        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let state = sqlx::query_scalar::<_, String>("SELECT state FROM users WHERE id = ?")
             .bind(user_id)
-            .fetch_optional(&mut *transaction)
+            .fetch_optional(&mut **transaction)
             .await?;
         if state.as_deref() != Some("active") {
-            transaction.rollback().await?;
             return Err(RecoveryCodeError::UserNotActive);
         }
 
@@ -95,7 +112,7 @@ impl RecoveryCodeStore {
         )
         .bind(&now_text)
         .bind(user_id)
-        .execute(&mut *transaction)
+        .execute(&mut **transaction)
         .await?;
 
         for code in &generated {
@@ -108,11 +125,10 @@ impl RecoveryCodeStore {
             .bind(user_id)
             .bind(code.digest.as_slice())
             .bind(&now_text)
-            .execute(&mut *transaction)
+            .execute(&mut **transaction)
             .await?;
         }
 
-        transaction.commit().await?;
         Ok(RecoveryCodeBatch {
             codes: generated.into_iter().map(|code| code.value).collect(),
         })
