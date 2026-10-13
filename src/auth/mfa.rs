@@ -10,6 +10,7 @@ use zeroize::Zeroizing;
 
 use super::master_key::{MasterKey, MasterKeyError};
 
+pub mod recovery;
 pub mod step_up;
 pub mod store;
 

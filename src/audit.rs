@@ -28,6 +28,7 @@ pub enum AuditEventKind {
     TotpVerified,
     SessionMfaElevated,
     TotpDisabled,
+    MfaRecoveryStarted,
 }
 
 impl AuditEventKind {
@@ -48,6 +49,7 @@ impl AuditEventKind {
             Self::TotpVerified => "auth.mfa.totp_verified",
             Self::SessionMfaElevated => "auth.session.mfa_elevated",
             Self::TotpDisabled => "auth.mfa.totp_disabled",
+            Self::MfaRecoveryStarted => "auth.mfa.recovery_started",
         }
     }
 }
@@ -105,6 +107,13 @@ impl AuditEventTarget {
     pub fn mfa_credential(id: impl Into<String>) -> Self {
         Self {
             kind: "mfa_credential",
+            id: id.into(),
+        }
+    }
+
+    pub fn mfa_recovery_session(id: impl Into<String>) -> Self {
+        Self {
+            kind: "mfa_recovery_session",
             id: id.into(),
         }
     }

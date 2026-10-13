@@ -1,7 +1,7 @@
 use std::net::IpAddr;
 
 use chrono::{DateTime, TimeDelta, Utc};
-use sqlx::{Row, SqliteConnection, SqlitePool};
+use sqlx::{Row, Sqlite, SqliteConnection, SqlitePool, Transaction};
 use thiserror::Error;
 
 use super::{master_key::MasterKey, time::format_timestamp};
@@ -253,6 +253,21 @@ impl AuthRateLimiter {
         sqlx::query("DELETE FROM auth_rate_limit_buckets WHERE subject_hash = ?")
             .bind(key.as_slice())
             .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    pub(crate) async fn record_success_in_transaction(
+        &self,
+        transaction: &mut Transaction<'_, Sqlite>,
+        identity_key: &str,
+    ) -> Result<(), AuthRateLimitError> {
+        let key = self
+            .master_key
+            .keyed_digest(b"identity", identity_key.as_bytes());
+        sqlx::query("DELETE FROM auth_rate_limit_buckets WHERE subject_hash = ?")
+            .bind(key.as_slice())
+            .execute(&mut **transaction)
             .await?;
         Ok(())
     }
