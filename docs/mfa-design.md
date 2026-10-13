@@ -1,6 +1,6 @@
 # TOTP multi-factor authentication — feature design
 
-**Status:** TOTP and hash-only recovery-code primitives are implemented; no enrollment, persistence of TOTP secrets, recovery access flow, or login step-up is wired.
+**Status:** TOTP, encrypted credential persistence, pending enrollment, and internal session-bound step-up are implemented; recovery-code access, transport routes, MFA policy enforcement, and user-facing setup remain open.
 **Requirements:** `docs/development-plan.md`, sections 7.1–7.2.
 
 ## Interoperable TOTP profile
@@ -11,13 +11,13 @@ Validation checks every candidate step with constant-time code comparison, rejec
 
 ## Secret lifecycle boundary
 
-The secret must be shown only during the authenticated enrollment flow. Do not log, retain in browser storage, or persist the Base32 value. TOTP keys must be encrypted at rest and decrypted only for verification. The product's authenticated-encryption/AAD and key-rotation contract has not yet been selected, so no MFA secret table or activation route is added here. Installation-admin TOTP is not yet mandatory in the product because there is no enrollment/recovery flow.
+The secret must be shown only during the authenticated enrollment flow. Do not log, retain in browser storage, or persist the Base32 value. TOTP keys are persisted only in the ADR 0003 encrypted envelope and decrypted for verification. Internal persistence/enrollment is described in `docs/mfa-enrollment-design.md`; internal session rotation and recent assurance are described in `docs/mfa-session-step-up-design.md`. Neither design adds an HTTP/MCP enrollment route, QR/otpauth flow, or user-facing setup. Installation-admin TOTP is a product requirement but is not yet enforced through a product transport or bootstrap flow.
 
 ## One-time recovery codes
 
 `RecoveryCodeStore` issues a caller-selected batch (bounded to 1–20) of 128-bit random Base64URL codes, persists only SHA-256 digests, and rotates outstanding codes transactionally. Codes are user-scoped, only active accounts may issue or consume them, they have no implicit TTL, and successful consumption is exactly once. `consume_in_transaction` lets the future recovery flow commit the code and recovery-session/action together; callers must use `BEGIN IMMEDIATE`, roll back on any downstream failure, and apply authentication rate limits before accepting attempts. Reissue failure rolls back invalidation of the prior batch. The plaintext is returned only in a zeroizing batch and can never be retrieved from storage.
 
-This is not a recovery kit or lost-device flow. No MFA state is associated with the codes yet, and no route turns one into a restricted recovery session. MFA reauthentication, backup/restore of encrypted credentials, enrollment cancellation, lost-device recovery, and generic login step-up remain follow-up work. The portable recovery kit is still blocked by ADR 0002's deferred format/security decision.
+This is not a recovery kit or lost-device flow. No MFA state is associated with the codes yet, and no route turns one into a restricted recovery session. Recovery-code verification, backup/restore of encrypted credentials, enrollment cancellation, lost-device recovery, generic login MFA challenge, and policy enforcement remain follow-up work. The portable recovery kit is still blocked by ADR 0002's deferred format/security decision. Internal session-bound TOTP step-up exists, but does not consume recovery codes or itself authorize privileged actions.
 
 ## Sources
 

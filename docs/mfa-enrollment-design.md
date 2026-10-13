@@ -1,12 +1,12 @@
 # MFA TOTP enrollment and credential storage
 
-- **Status:** Internal persistence/enrollment implemented in slice 192; transport and privileged assurance remain open
+- **Status:** Internal persistence/enrollment implemented in slice 192; session-bound assurance/rotation is implemented separately in slice 193. Transport and privileged policy enforcement remain open.
 - **Date:** 2026-10-13
 - **Related:** [ADR 0003 — TOTP secret encryption profile](adr/0003-totp-secret-encryption.md), `docs/development-plan.md` sections 7.1–7.2
 
 ## Boundary and actor
 
-The actor is an active user configuring an authenticator for their own account. This slice supplies internal SQLite services only. A future HTTP caller must establish the authenticated session, current account state, CSRF/Origin policy, rate limits, and authorization before calling them. An arbitrary user UUID is not proof of identity. No setup wizard, browser flow, route, QR/otpauth URL, or session MFA assurance is added.
+The actor is an active user configuring an authenticator for their own account. Slice 192 supplies internal SQLite persistence services only. A future HTTP caller must establish the authenticated session, current account state, CSRF/Origin policy, rate limits, and authorization before calling them. An arbitrary user UUID is not proof of identity. No setup wizard, browser flow, enrollment route, QR/otpauth URL, or user-facing assurance UI is added. Session-bound assurance is the separate internal capability in `docs/mfa-session-step-up-design.md`.
 
 ## Credential lifecycle
 
@@ -34,7 +34,7 @@ Confirmation checks the RFC 6238 default profile (30-second steps, six digits, �
 
 ## Explicit exclusions
 
-There is no disable/revoke or replace-active operation, recovery-code flow, admin-MFA enforcement, password-only privileged path, session-bound proof, recent-assurance window, HTTP/MCP route, frontend, rate-limit wiring, audit viewer, automatic expiry sweeper, or master-key rotation. The transaction-level verification result is not by itself an authenticated-session proof and grants no capability. Installation-admin privileged operations stay fail-closed until a separate slice binds verified TOTP to the exact current session and protected mutation.
+There is no disable/revoke or replace-active operation, recovery-code access flow, MFA-required login challenge, HTTP/MCP route, frontend, CSRF/Origin or rate-limit wiring, audit viewer, automatic expiry sweeper, master-key rotation, or general admin-policy enforcement. The transaction-level credential verification result is not by itself authenticated-session proof and grants no capability; the separate step-up service binds TOTP to a rotated session, while each protected operation still needs its own authorization and proof check. Installation-admin actions not explicitly wired to that proof remain fail-closed.
 
 ## Implementation evidence
 
