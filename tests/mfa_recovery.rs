@@ -9,7 +9,9 @@ use puxiri::{
         master_key::MasterKeyStore,
         mfa::{
             TotpSecretBox,
-            recovery::{MfaRecoveryAuthentication, MfaRecoveryService, MfaRecoveryToken},
+            recovery::{
+                MfaRecoveryAccess, MfaRecoveryAuthentication, MfaRecoveryService, MfaRecoveryToken,
+            },
             store::TotpCredentialStore,
         },
         rate_limit::{AuthRateLimitPolicies, AuthRateLimitPolicy, AuthRateLimiter},
@@ -170,6 +172,7 @@ async fn fixture(with_totp: bool, installation_admin: bool) -> Fixture {
         TimeDelta::minutes(1),
     )
     .unwrap();
+    let secret_box = TotpSecretBox::new(master_key.clone());
     let rate_limiter = AuthRateLimiter::open(
         database.pool().clone(),
         master_key,
@@ -183,6 +186,7 @@ async fn fixture(with_totp: bool, installation_admin: bool) -> Fixture {
         recovery_codes.clone(),
         rate_limiter,
         password_hash,
+        secret_box,
     );
 
     Fixture {
@@ -195,6 +199,18 @@ async fn fixture(with_totp: bool, installation_admin: bool) -> Fixture {
         second_code,
         now,
     }
+}
+
+async fn start_recovery(fixture: &Fixture, code: &str, now: DateTime<Utc>) -> MfaRecoveryAccess {
+    let outcome = fixture
+        .service
+        .start(EMAIL, fixture.password.clone(), code, CLIENT_IP, now)
+        .await
+        .unwrap();
+    let MfaRecoveryAuthentication::Started(access) = outcome else {
+        panic!("expected restricted recovery access");
+    };
+    access
 }
 
 fn rejected(outcome: MfaRecoveryAuthentication) -> bool {
@@ -536,4 +552,126 @@ async fn recovery_audit_failure_rolls_back_code_consumption_and_token_creation()
         .await
         .unwrap();
     assert!(matches!(retry, MfaRecoveryAuthentication::Started(_)));
+}
+
+#[tokio::test]
+async fn recovery_token_starts_one_encrypted_replacement_and_preserves_active_totp() {
+    let _guard = KDF_TEST_LOCK.lock().await;
+    let fixture = fixture(true, false).await;
+    let access = start_recovery(&fixture, fixture.first_code.as_str(), fixture.now).await;
+
+    let enrollment = fixture
+        .service
+        .begin_totp_replacement(access.token(), fixture.now + TimeDelta::seconds(1))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(enrollment.expires_at(), access.expires_at());
+    assert_eq!(enrollment.secret_for_display().len(), 32);
+
+    let active_totp_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM mfa_credentials \
+         WHERE user_id = ? AND activated_at IS NOT NULL",
+    )
+    .bind(&fixture.user_id)
+    .fetch_one(fixture.database.pool())
+    .await
+    .unwrap();
+    assert_eq!(active_totp_count, 1);
+
+    let stored_envelope: Vec<u8> = sqlx::query_scalar(
+        "SELECT secret_envelope FROM mfa_recovery_enrollments \
+         WHERE recovery_session_id = ?",
+    )
+    .bind(access.id())
+    .fetch_one(fixture.database.pool())
+    .await
+    .unwrap();
+    assert_eq!(stored_envelope.len(), 65);
+    assert!(!String::from_utf8_lossy(&stored_envelope).contains(enrollment.secret_for_display()));
+
+    let duplicate = fixture
+        .service
+        .begin_totp_replacement(access.token(), fixture.now + TimeDelta::seconds(2))
+        .await
+        .unwrap();
+    assert!(duplicate.is_none());
+    let enrollment_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM mfa_recovery_enrollments \
+         WHERE recovery_session_id = ?",
+    )
+    .bind(access.id())
+    .fetch_one(fixture.database.pool())
+    .await
+    .unwrap();
+    assert_eq!(enrollment_count, 1);
+    assert!(
+        fixture
+            .service
+            .validate(access.token(), fixture.now + TimeDelta::seconds(2))
+            .await
+            .unwrap()
+    );
+}
+
+#[tokio::test]
+async fn recovery_enrollment_audit_failure_rolls_back_encrypted_secret_persistence() {
+    let _guard = KDF_TEST_LOCK.lock().await;
+    let fixture = fixture(true, false).await;
+    let access = start_recovery(&fixture, fixture.first_code.as_str(), fixture.now).await;
+    sqlx::query(
+        "CREATE TRIGGER fail_mfa_recovery_enrollment_audit BEFORE INSERT ON audit_events \
+         WHEN NEW.event_kind = 'auth.mfa.recovery_enrollment_started' \
+         BEGIN SELECT RAISE(ABORT, 'fixture MFA recovery enrollment audit failure'); END",
+    )
+    .execute(fixture.database.pool())
+    .await
+    .unwrap();
+
+    assert!(
+        fixture
+            .service
+            .begin_totp_replacement(access.token(), fixture.now + TimeDelta::seconds(1))
+            .await
+            .is_err()
+    );
+    let pending_count: i64 = sqlx::query_scalar("SELECT count(*) FROM mfa_recovery_enrollments")
+        .fetch_one(fixture.database.pool())
+        .await
+        .unwrap();
+    assert_eq!(pending_count, 0);
+
+    sqlx::query("DROP TRIGGER fail_mfa_recovery_enrollment_audit")
+        .execute(fixture.database.pool())
+        .await
+        .unwrap();
+    assert!(
+        fixture
+            .service
+            .begin_totp_replacement(access.token(), fixture.now + TimeDelta::seconds(2))
+            .await
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn expired_recovery_token_cannot_start_replacement_totp() {
+    let _guard = KDF_TEST_LOCK.lock().await;
+    let fixture = fixture(true, false).await;
+    let access = start_recovery(&fixture, fixture.first_code.as_str(), fixture.now).await;
+
+    assert!(
+        fixture
+            .service
+            .begin_totp_replacement(access.token(), access.expires_at())
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let pending_count: i64 = sqlx::query_scalar("SELECT count(*) FROM mfa_recovery_enrollments")
+        .fetch_one(fixture.database.pool())
+        .await
+        .unwrap();
+    assert_eq!(pending_count, 0);
 }

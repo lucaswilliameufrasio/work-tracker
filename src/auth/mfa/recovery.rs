@@ -4,7 +4,7 @@ use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{DateTime, TimeDelta, Utc};
 use rand_core::{OsRng, RngCore};
 use sha2::{Digest, Sha256};
-use sqlx::SqlitePool;
+use sqlx::{Row, Sqlite, SqlitePool, Transaction};
 use thiserror::Error;
 use uuid::Uuid;
 use zeroize::Zeroizing;
@@ -18,6 +18,7 @@ use super::super::{
     rate_limit::{AuthRateLimitError, AuthRateLimiter},
     recovery::{RecoveryCodeError, RecoveryCodeStore},
 };
+use super::{TotpError, TotpSecret, TotpSecretBox, TotpSecretBoxError};
 use crate::auth::time::format_timestamp;
 
 const RECOVERY_TOKEN_BYTES: usize = 32;
@@ -85,6 +86,26 @@ pub struct MfaRecoveryAccess {
     expires_at: DateTime<Utc>,
 }
 
+pub struct MfaRecoveryEnrollment {
+    credential_id: Uuid,
+    secret: Zeroizing<String>,
+    expires_at: DateTime<Utc>,
+}
+
+impl MfaRecoveryEnrollment {
+    pub fn credential_id(&self) -> Uuid {
+        self.credential_id
+    }
+
+    pub fn secret_for_display(&self) -> &str {
+        self.secret.as_str()
+    }
+
+    pub fn expires_at(&self) -> DateTime<Utc> {
+        self.expires_at
+    }
+}
+
 impl MfaRecoveryAccess {
     pub fn id(&self) -> &str {
         &self.id
@@ -120,6 +141,12 @@ pub enum MfaRecoveryError {
     Audit(#[from] AuditEventError),
     #[error("MFA recovery deadline is outside the supported timestamp range")]
     DeadlineOutOfRange,
+    #[error("MFA recovery state is malformed")]
+    InvalidState,
+    #[error(transparent)]
+    Totp(#[from] TotpError),
+    #[error(transparent)]
+    SecretBox(#[from] TotpSecretBoxError),
     #[error(transparent)]
     Token(#[from] MfaRecoveryTokenError),
 }
@@ -140,6 +167,7 @@ pub struct MfaRecoveryService {
     recovery_codes: RecoveryCodeStore,
     rate_limiter: AuthRateLimiter,
     dummy_hash: String,
+    secret_box: TotpSecretBox,
 }
 
 impl MfaRecoveryService {
@@ -149,6 +177,7 @@ impl MfaRecoveryService {
         recovery_codes: RecoveryCodeStore,
         rate_limiter: AuthRateLimiter,
         dummy_hash: String,
+        secret_box: TotpSecretBox,
     ) -> Self {
         Self {
             pool,
@@ -156,6 +185,7 @@ impl MfaRecoveryService {
             recovery_codes,
             rate_limiter,
             dummy_hash,
+            secret_box,
         }
     }
 
@@ -340,6 +370,124 @@ impl MfaRecoveryService {
         Ok(exists == 1)
     }
 
+    /// Creates one pending replacement TOTP enrollment for a live recovery
+    /// token. The active credential is retained until a later confirmation.
+    pub async fn begin_totp_replacement(
+        &self,
+        token: &MfaRecoveryToken,
+        now: DateTime<Utc>,
+    ) -> Result<Option<MfaRecoveryEnrollment>, MfaRecoveryError> {
+        let now_text = format_timestamp(now);
+        let max_expires_at = now
+            .checked_add_signed(RECOVERY_SESSION_LIFETIME)
+            .ok_or(MfaRecoveryError::DeadlineOutOfRange)?;
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let Some(principal) = self
+            .current_principal_in_transaction(&mut transaction, token, now)
+            .await?
+        else {
+            transaction.rollback().await?;
+            return Ok(None);
+        };
+
+        sqlx::query("DELETE FROM mfa_recovery_enrollments WHERE expires_at <= ?")
+            .bind(&now_text)
+            .execute(&mut *transaction)
+            .await?;
+        let existing_enrollment: i64 = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM mfa_recovery_enrollments \
+             WHERE recovery_session_id = ?)",
+        )
+        .bind(&principal.recovery_session_id)
+        .fetch_one(&mut *transaction)
+        .await?;
+        if existing_enrollment == 1 {
+            transaction.rollback().await?;
+            return Ok(None);
+        }
+
+        let user_id =
+            Uuid::parse_str(&principal.user_id).map_err(|_| MfaRecoveryError::InvalidState)?;
+        let credential_id = Uuid::now_v7();
+        let secret = TotpSecret::generate()?;
+        let encrypted_secret = self.secret_box.encrypt(&user_id, &credential_id, &secret)?;
+        let expires_at = max_expires_at.min(principal.expires_at);
+        if expires_at <= now {
+            transaction.rollback().await?;
+            return Ok(None);
+        }
+        let credential_id_text = credential_id.to_string();
+        let expires_at_text = format_timestamp(expires_at);
+        sqlx::query(
+            "INSERT INTO mfa_recovery_enrollments \
+             (credential_id, recovery_session_id, secret_envelope, created_at, expires_at) \
+             VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(&credential_id_text)
+        .bind(&principal.recovery_session_id)
+        .bind(encrypted_secret.as_bytes())
+        .bind(&now_text)
+        .bind(&expires_at_text)
+        .execute(&mut *transaction)
+        .await?;
+        audit::append_in_transaction(
+            &mut transaction,
+            Some(&principal.user_id),
+            AuditEventKind::MfaRecoveryEnrollmentStarted,
+            AuditEventResult::Success,
+            &AuditEventTarget::mfa_credential(&credential_id_text),
+            now,
+        )
+        .await?;
+        transaction.commit().await?;
+
+        Ok(Some(MfaRecoveryEnrollment {
+            credential_id,
+            secret: secret.reveal_for_enrollment(),
+            expires_at,
+        }))
+    }
+
+    async fn current_principal_in_transaction(
+        &self,
+        transaction: &mut Transaction<'_, Sqlite>,
+        token: &MfaRecoveryToken,
+        now: DateTime<Utc>,
+    ) -> Result<Option<MfaRecoveryPrincipal>, MfaRecoveryError> {
+        let row = sqlx::query(
+            "SELECT mfa_recovery_sessions.id, mfa_recovery_sessions.user_id, \
+                    mfa_recovery_sessions.expires_at \
+             FROM mfa_recovery_sessions \
+             JOIN users ON users.id = mfa_recovery_sessions.user_id \
+             WHERE mfa_recovery_sessions.token_hash = ? \
+               AND mfa_recovery_sessions.expires_at > ? \
+               AND mfa_recovery_sessions.completed_at IS NULL \
+               AND mfa_recovery_sessions.invalidated_at IS NULL \
+               AND users.state = 'active' \
+               AND NOT EXISTS (SELECT 1 FROM installation_admins \
+                               WHERE installation_admins.user_id = users.id) \
+               AND EXISTS (SELECT 1 FROM mfa_credentials \
+                           WHERE mfa_credentials.user_id = users.id \
+                             AND mfa_credentials.activated_at IS NOT NULL)",
+        )
+        .bind(token.digest().as_slice())
+        .bind(format_timestamp(now))
+        .fetch_optional(&mut **transaction)
+        .await?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let expires_at_text: String = row.try_get("expires_at")?;
+        let expires_at = DateTime::parse_from_rfc3339(&expires_at_text)
+            .map_err(|_| MfaRecoveryError::InvalidState)?
+            .with_timezone(&Utc);
+        Ok(Some(MfaRecoveryPrincipal {
+            recovery_session_id: row.try_get("id")?,
+            user_id: row.try_get("user_id")?,
+            expires_at,
+        }))
+    }
+
     async fn reject_attempt(
         &self,
         client_ip: IpAddr,
@@ -352,4 +500,10 @@ impl MfaRecoveryService {
             .await?;
         Ok(MfaRecoveryAuthentication::Rejected { blocked_until })
     }
+}
+
+struct MfaRecoveryPrincipal {
+    recovery_session_id: String,
+    user_id: String,
+    expires_at: DateTime<Utc>,
 }

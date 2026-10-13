@@ -1105,6 +1105,12 @@ async fn mfa_migrations_preserve_audit_history_and_reinstate_immutability() {
         .execute(&pool)
         .await
         .unwrap();
+    sqlx::raw_sql(include_str!(
+        "../migrations/0020_mfa_recovery_enrollment.sql"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
 
     let preserved = sqlx::query(
         "SELECT event_kind, actor_user_id, target_kind, target_id \
@@ -1118,6 +1124,18 @@ async fn mfa_migrations_preserve_audit_history_and_reinstate_immutability() {
         "INSERT INTO audit_events \
          (id, event_kind, result, actor_user_id, target_kind, target_id, occurred_at) \
          VALUES (?, 'auth.mfa.totp_disabled', 'success', ?, 'mfa_credential', ?, \
+                 '2026-10-10T12:00:00.000000000Z')",
+    )
+    .bind(Uuid::now_v7().to_string())
+    .bind(&actor_id)
+    .bind(Uuid::now_v7().to_string())
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO audit_events \
+         (id, event_kind, result, actor_user_id, target_kind, target_id, occurred_at) \
+         VALUES (?, 'auth.mfa.recovery_enrollment_started', 'success', ?, 'mfa_credential', ?, \
                  '2026-10-10T12:00:00.000000000Z')",
     )
     .bind(Uuid::now_v7().to_string())
