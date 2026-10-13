@@ -22,6 +22,10 @@ pub enum AuditEventKind {
     SessionRevoked,
     SessionsRevoked,
     ProjectCreated,
+    TotpEnrollmentStarted,
+    TotpEnrollmentConfirmed,
+    TotpEnrollmentExpired,
+    TotpVerified,
 }
 
 impl AuditEventKind {
@@ -36,6 +40,10 @@ impl AuditEventKind {
             Self::SessionRevoked => "auth.session.revoked",
             Self::SessionsRevoked => "auth.sessions.revoked",
             Self::ProjectCreated => "project.created",
+            Self::TotpEnrollmentStarted => "auth.mfa.totp_enrollment_started",
+            Self::TotpEnrollmentConfirmed => "auth.mfa.totp_enrollment_confirmed",
+            Self::TotpEnrollmentExpired => "auth.mfa.totp_enrollment_expired",
+            Self::TotpVerified => "auth.mfa.totp_verified",
         }
     }
 }
@@ -86,6 +94,13 @@ impl AuditEventTarget {
     pub fn project(id: impl Into<String>) -> Self {
         Self {
             kind: "project",
+            id: id.into(),
+        }
+    }
+
+    pub fn mfa_credential(id: impl Into<String>) -> Self {
+        Self {
+            kind: "mfa_credential",
             id: id.into(),
         }
     }

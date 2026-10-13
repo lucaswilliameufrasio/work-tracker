@@ -10,6 +10,8 @@ use zeroize::Zeroizing;
 
 use super::master_key::{MasterKey, MasterKeyError};
 
+pub mod store;
+
 const TOTP_SECRET_BYTES: usize = 20;
 const MAX_WINDOW_STEPS: u8 = 1;
 const ENVELOPE_VERSION: u8 = 1;
@@ -200,6 +202,7 @@ impl EncryptedTotpSecret {
     }
 }
 
+#[derive(Clone)]
 pub struct TotpSecretBox {
     master_key: MasterKey,
 }
