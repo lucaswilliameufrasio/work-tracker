@@ -54,7 +54,8 @@ async fn append_records_only_actor_operation_opaque_target_and_time() {
 
     let row = sqlx::query(
         "SELECT id, event_kind, result, actor_user_id, target_kind, target_id, \
-                subject_user_id, project_role_before, project_role_after, occurred_at \
+                subject_user_id, project_role_before, project_role_after, \
+                organization_role_before, organization_role_after, occurred_at \
          FROM audit_events WHERE id = ?",
     )
     .bind(&event_id)
@@ -88,6 +89,16 @@ async fn append_records_only_actor_operation_opaque_target_and_time() {
         None
     );
     assert_eq!(
+        row.try_get::<Option<String>, _>("organization_role_before")
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        row.try_get::<Option<String>, _>("organization_role_after")
+            .unwrap(),
+        None
+    );
+    assert_eq!(
         row.try_get::<String, _>("occurred_at").unwrap(),
         "2026-10-10T12:00:00.000000000Z"
     );
@@ -112,6 +123,8 @@ async fn append_records_only_actor_operation_opaque_target_and_time() {
             "subject_user_id",
             "project_role_before",
             "project_role_after",
+            "organization_role_before",
+            "organization_role_after",
             "occurred_at"
         ]
     );
