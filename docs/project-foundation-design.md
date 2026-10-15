@@ -26,6 +26,7 @@ The key is unique within its organization and immutable by both omission of an u
 
 - `src/access.rs` owns current account/org-role loading and capability policy.
 - `src/projects/` owns project creation, project input validation, and persistence.
+- `src/projects/queries.rs` owns the bounded accessible-project listing for navigation; its explicit-membership contract is described in [project listing](project-listing-design.md). Organization/installation administration never broadens this list.
 - `issue_types` and `statuses` are project-owned configuration catalogs; project creation seeds them in the same transaction as project identity, manager membership, and audit.
 - `src/audit.rs` owns the allowlisted event kind/target and appends it to the caller-owned transaction.
 - SQLite migrations own the project/membership constraints and the backward-compatible extension of the existing audit allowlists.

@@ -4,6 +4,9 @@ use thiserror::Error;
 use uuid::Uuid;
 
 pub mod membership;
+mod queries;
+
+pub use queries::{ProjectListOptions, ProjectListPage, ProjectReadError, ProjectSummary};
 
 use crate::{
     access::{AccessCapability, AccessStore, AccessStoreError, authorize},
