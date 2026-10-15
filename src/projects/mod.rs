@@ -57,6 +57,24 @@ pub enum ProjectCreationError {
     Audit(#[from] AuditEventError),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProjectArchiveChange {
+    Changed,
+    Unchanged,
+}
+
+#[derive(Debug, Error)]
+pub enum ProjectArchiveError {
+    #[error("project is missing or not available for this operation")]
+    Unavailable,
+    #[error("current access state is invalid")]
+    AccessState(#[from] AccessStoreError),
+    #[error("project archive persistence failed: {0}")]
+    Database(#[from] sqlx::Error),
+    #[error("project archive audit persistence failed: {0}")]
+    Audit(#[from] AuditEventError),
+}
+
 #[derive(Clone)]
 pub struct ProjectStore {
     pool: SqlitePool,
@@ -65,6 +83,68 @@ pub struct ProjectStore {
 impl ProjectStore {
     pub fn new(pool: SqlitePool) -> Self {
         Self { pool }
+    }
+
+    /// Sets the desired archive state for an already-authenticated actor.
+    /// Authorization, state and audit are evaluated in the same transaction.
+    /// This does not grant content access or resume future automation rules.
+    pub async fn set_archived(
+        &self,
+        actor_user_id: &str,
+        project_id: &str,
+        archived: bool,
+        now: DateTime<Utc>,
+    ) -> Result<ProjectArchiveChange, ProjectArchiveError> {
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let context = AccessStore::load_project_context_in_transaction(
+            &mut transaction,
+            actor_user_id,
+            project_id,
+            false,
+        )
+        .await?;
+        let Some(context) = context else {
+            transaction.rollback().await?;
+            return Err(ProjectArchiveError::Unavailable);
+        };
+        if authorize(&context, AccessCapability::ChangeProjectArchive).is_err() {
+            transaction.rollback().await?;
+            return Err(ProjectArchiveError::Unavailable);
+        }
+
+        let timestamp = format_timestamp(now);
+        let archived_at = if archived { Some(&timestamp) } else { None };
+        let update = sqlx::query(
+            "UPDATE projects SET archived_at = ?, updated_at = ? \
+             WHERE id = ? AND (archived_at IS NOT NULL) != ?",
+        )
+        .bind(archived_at)
+        .bind(&timestamp)
+        .bind(project_id)
+        .bind(archived)
+        .execute(&mut *transaction)
+        .await?;
+        if update.rows_affected() == 0 {
+            transaction.rollback().await?;
+            return Ok(ProjectArchiveChange::Unchanged);
+        }
+
+        let event_kind = if archived {
+            AuditEventKind::ProjectArchived
+        } else {
+            AuditEventKind::ProjectReopened
+        };
+        audit::append_in_transaction(
+            &mut transaction,
+            Some(actor_user_id),
+            event_kind,
+            AuditEventResult::Success,
+            &AuditEventTarget::project(project_id),
+            now,
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(ProjectArchiveChange::Changed)
     }
 
     /// Creates a project and grants its creator the initial manager role.

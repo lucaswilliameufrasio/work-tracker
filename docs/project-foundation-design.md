@@ -20,7 +20,7 @@ The key is unique within its organization and immutable by both omission of an u
 - `project_members` owns explicit `manager`/`member`/`viewer` access. A composite foreign key requires organization membership; database triggers prevent a guest from being a manager and prevent changing an existing manager's organization role to guest.
 - Creation derives project membership from the creator's successful project-creation authorization, not from organization role as an implicit content grant. The transaction rechecks persisted state under SQLite's writer lock to avoid authorizing from a stale pre-transaction context.
 - Audit records contain only the actor, operation, target project ID, outcome, and timestamp; no project name, key, description, or content is copied into the audit row.
-- Projects are archived rather than permanently deleted. This foundation provides no archive mutation; slice 188 seeds issue types/statuses and slice 189 adds issue creation, but neither provides a usable Kanban workflow.
+- Projects are archived rather than permanently deleted. Slice 210 adds the internal transactional archive/reopen operation described in [project archive lifecycle](project-archive-design.md); it does not provide a usable Kanban workflow or resume automations.
 
 ## Modules and contract
 
@@ -34,4 +34,4 @@ The public command returns a project ID and validated project fields on success.
 
 ## Delivery boundary
 
-Integration tests use the real SQLite file/migrations and verify the complete project transaction, persisted membership/default catalogs/audit, locale-specific names, denial and rollback paths, duplicate-key concurrency, guest constraints, and preservation of pre-existing audit rows and projects during migrations. Routes, UI, issue listing/update, catalog editing, invitations, assigning other project members/managers, archive/restore, Kanban, idempotency keys, and last-manager/owner administration remain later slices; issue creation has its own contract and tests in `docs/issue-creation-design.md`.
+Integration tests use the real SQLite file/migrations and verify the complete project transaction, persisted membership/default catalogs/audit, locale-specific names, denial and rollback paths, duplicate-key concurrency, guest constraints, and preservation of pre-existing audit rows and projects during migrations. Issue reads, invitations, membership management and archive/reopen are implemented in subsequent internal slices; routes, UI, issue updates, catalog editing, Kanban and idempotency keys remain pending. Issue creation has its own contract in `docs/issue-creation-design.md`; archive/reopen is covered by `tests/project_archive.rs`.
