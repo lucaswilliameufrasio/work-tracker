@@ -146,6 +146,13 @@ fn invitation_store(database: &Database) -> OrganizationInvitationStore {
     OrganizationInvitationStore::new(database.pool().clone(), InvitationPolicy::initial())
 }
 
+fn invitation_sessions(database: &Database) -> SessionStore {
+    SessionStore::new(
+        database.pool().clone(),
+        SessionPolicy::initial(TimeDelta::minutes(5)).unwrap(),
+    )
+}
+
 #[tokio::test]
 async fn organization_admin_can_issue_reissue_list_and_cancel_hash_only_invites() {
     let directory = TempDir::new().unwrap();
@@ -445,20 +452,20 @@ async fn project_manager_can_invite_only_guests_to_projects_they_manage() {
         .await
         .unwrap();
     assert_eq!(issued.result, InvitationIssueResult::Created);
-    let invited_guest = create_user(
-        &database,
-        "Invited guest",
-        None,
-        Some(("guest@example.test", true)),
-    )
-    .await;
     let token =
         puxiri::invitations::OrganizationInvitationToken::parse(issued.token.expose()).unwrap();
-    let proof = make_reauthentication(&database, &invited_guest, at("2026-10-15T09:00:15Z")).await;
-    invitations
-        .accept(&proof, &token, at("2026-10-15T09:00:30Z"))
+    let registered = invitations
+        .register(
+            &token,
+            "Invited guest",
+            "a valid guest registration password".to_owned(),
+            &PasswordService::default(),
+            &invitation_sessions(&database),
+            at("2026-10-15T09:00:30Z"),
+        )
         .await
         .unwrap();
+    let invited_guest = registered.user_id;
     let guest_role: String =
         sqlx::query_scalar("SELECT role FROM organization_members WHERE user_id = ?")
             .bind(&invited_guest)
@@ -663,6 +670,325 @@ async fn accepting_invite_requires_a_confirmed_matching_email_and_applies_roles_
 }
 
 #[tokio::test]
+async fn invite_only_registration_creates_confirmed_account_memberships_and_session_atomically() {
+    let _guard = INVITATION_TEST_KDF_LOCK.lock().await;
+    let directory = TempDir::new().unwrap();
+    let database = Database::open(directory.path()).await.unwrap();
+    create_organization(&database).await;
+    let owner = create_user(&database, "Owner", Some("owner"), None).await;
+    let project_id = create_project(&database, &owner, "SIGN").await;
+    let invitations = invitation_store(&database);
+    let issued = invitations
+        .issue(
+            &owner,
+            "New.User+work@Example.Test",
+            OrganizationInviteRole::Member,
+            &[InvitationProjectAssignment {
+                project_id: project_id.clone(),
+                role: ProjectRole::Viewer,
+            }],
+            at("2026-10-15T09:00:00Z"),
+        )
+        .await
+        .unwrap();
+    let token =
+        puxiri::invitations::OrganizationInvitationToken::parse(issued.token.expose()).unwrap();
+    let password_service = PasswordService::default();
+    let sessions = invitation_sessions(&database);
+    let now = at("2026-10-15T09:01:00Z");
+
+    let registered = invitations
+        .register(
+            &token,
+            "  New User  ",
+            "a valid registration password".to_owned(),
+            &password_service,
+            &sessions,
+            now,
+        )
+        .await
+        .unwrap();
+    assert_eq!(registered.invitation_id, issued.id);
+    assert_eq!(registered.role, OrganizationInviteRole::Member);
+    assert_eq!(registered.projects.len(), 1);
+
+    let account = sqlx::query(
+        "SELECT users.display_name, users.state, user_emails.address, \
+                user_emails.address_key, user_emails.is_primary, user_emails.confirmed_at, \
+                password_credentials.password_hash \
+         FROM users \
+         JOIN user_emails ON user_emails.user_id = users.id \
+         JOIN password_credentials ON password_credentials.user_id = users.id \
+         WHERE users.id = ?",
+    )
+    .bind(&registered.user_id)
+    .fetch_one(database.pool())
+    .await
+    .unwrap();
+    assert_eq!(
+        account.try_get::<String, _>("display_name").unwrap(),
+        "New User"
+    );
+    assert_eq!(account.try_get::<String, _>("state").unwrap(), "active");
+    assert_eq!(
+        account.try_get::<String, _>("address").unwrap(),
+        "New.User+work@Example.Test"
+    );
+    assert_eq!(
+        account.try_get::<String, _>("address_key").unwrap(),
+        "new.user+work@example.test"
+    );
+    assert_eq!(account.try_get::<i64, _>("is_primary").unwrap(), 1);
+    assert_eq!(
+        account
+            .try_get::<Option<String>, _>("confirmed_at")
+            .unwrap()
+            .as_deref(),
+        Some("2026-10-15T09:01:00.000000000Z")
+    );
+    let password_hash = account.try_get::<String, _>("password_hash").unwrap();
+    assert!(password_hash.starts_with("$argon2id$"));
+    assert!(
+        password_service
+            .verify("a valid registration password".to_owned(), password_hash,)
+            .await
+            .unwrap()
+    );
+
+    let organization_role: String =
+        sqlx::query_scalar("SELECT role FROM organization_members WHERE user_id = ?")
+            .bind(&registered.user_id)
+            .fetch_one(database.pool())
+            .await
+            .unwrap();
+    let project_role: String =
+        sqlx::query_scalar("SELECT role FROM project_members WHERE project_id = ? AND user_id = ?")
+            .bind(&project_id)
+            .bind(&registered.user_id)
+            .fetch_one(database.pool())
+            .await
+            .unwrap();
+    assert_eq!(organization_role, "member");
+    assert_eq!(project_role, "viewer");
+    let authenticated = sessions
+        .validate(&registered.session.token, now)
+        .await
+        .unwrap();
+    assert_eq!(
+        authenticated.map(|session| session.user_id),
+        Some(registered.user_id.clone())
+    );
+
+    let account_audit_events: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM audit_events WHERE actor_user_id = ? \
+         AND event_kind IN ( \
+             'auth.email.address_added', 'auth.email.address_confirmed', \
+             'auth.password.changed', 'organization.invite.accepted', \
+             'organization.member.added', 'project.member.added' \
+         )",
+    )
+    .bind(&registered.user_id)
+    .fetch_one(database.pool())
+    .await
+    .unwrap();
+    assert_eq!(account_audit_events, 6);
+
+    assert!(matches!(
+        invitations
+            .register(
+                &token,
+                "Another Name",
+                "a valid registration password".to_owned(),
+                &password_service,
+                &sessions,
+                now,
+            )
+            .await,
+        Err(OrganizationInvitationError::InvitationAlreadyAccepted)
+    ));
+}
+
+#[tokio::test]
+async fn invite_registration_rejects_existing_accounts_and_invalid_fields_without_consuming_invite()
+{
+    let _guard = INVITATION_TEST_KDF_LOCK.lock().await;
+    let directory = TempDir::new().unwrap();
+    let database = Database::open(directory.path()).await.unwrap();
+    create_organization(&database).await;
+    let owner = create_user(&database, "Owner", Some("owner"), None).await;
+    let existing_user = create_user(
+        &database,
+        "Existing account",
+        None,
+        Some(("existing@example.test", true)),
+    )
+    .await;
+    let invitations = invitation_store(&database);
+    let issued = invitations
+        .issue(
+            &owner,
+            "existing@example.test",
+            OrganizationInviteRole::Member,
+            &[],
+            at("2026-10-15T09:00:00Z"),
+        )
+        .await
+        .unwrap();
+    let unused_issued = invitations
+        .issue(
+            &owner,
+            "unused@example.test",
+            OrganizationInviteRole::Member,
+            &[],
+            at("2026-10-15T09:00:30Z"),
+        )
+        .await
+        .unwrap();
+    let token =
+        puxiri::invitations::OrganizationInvitationToken::parse(issued.token.expose()).unwrap();
+    let unused_token =
+        puxiri::invitations::OrganizationInvitationToken::parse(unused_issued.token.expose())
+            .unwrap();
+    let password_service = PasswordService::default();
+    let sessions = invitation_sessions(&database);
+    let now = at("2026-10-15T09:01:00Z");
+
+    assert!(matches!(
+        invitations
+            .register(
+                &token,
+                "New Duplicate",
+                "a valid registration password".to_owned(),
+                &password_service,
+                &sessions,
+                now,
+            )
+            .await,
+        Err(OrganizationInvitationError::AccountAlreadyExists)
+    ));
+    assert!(matches!(
+        invitations
+            .register(
+                &unused_token,
+                "   ",
+                "a valid registration password".to_owned(),
+                &password_service,
+                &sessions,
+                now,
+            )
+            .await,
+        Err(OrganizationInvitationError::InvalidDisplayName)
+    ));
+    assert!(matches!(
+        invitations
+            .register(
+                &unused_token,
+                "Valid Name",
+                "short".to_owned(),
+                &password_service,
+                &sessions,
+                now,
+            )
+            .await,
+        Err(OrganizationInvitationError::Password(_))
+    ));
+
+    let accepted_at: Option<String> =
+        sqlx::query_scalar("SELECT accepted_at FROM organization_invites WHERE id = ?")
+            .bind(&unused_issued.id)
+            .fetch_one(database.pool())
+            .await
+            .unwrap();
+    let users: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users")
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
+    assert!(accepted_at.is_none());
+    assert_eq!(users, 2);
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT id FROM users WHERE id = ?")
+            .bind(&existing_user)
+            .fetch_one(database.pool())
+            .await
+            .unwrap(),
+        existing_user
+    );
+}
+
+#[tokio::test]
+async fn registration_audit_failure_rolls_back_account_invite_memberships_and_session() {
+    let _guard = INVITATION_TEST_KDF_LOCK.lock().await;
+    let directory = TempDir::new().unwrap();
+    let database = Database::open(directory.path()).await.unwrap();
+    create_organization(&database).await;
+    let owner = create_user(&database, "Owner", Some("owner"), None).await;
+    let invitations = invitation_store(&database);
+    let issued = invitations
+        .issue(
+            &owner,
+            "rollback-registration@example.test",
+            OrganizationInviteRole::Member,
+            &[],
+            at("2026-10-15T09:00:00Z"),
+        )
+        .await
+        .unwrap();
+    let token =
+        puxiri::invitations::OrganizationInvitationToken::parse(issued.token.expose()).unwrap();
+    sqlx::query(
+        "CREATE TRIGGER reject_invite_registration_audit \
+         BEFORE INSERT ON audit_events \
+         WHEN NEW.event_kind = 'organization.invite.accepted' \
+         BEGIN SELECT RAISE(ABORT, 'forced invite registration audit failure'); END",
+    )
+    .execute(database.pool())
+    .await
+    .unwrap();
+    let sessions = invitation_sessions(&database);
+
+    assert!(matches!(
+        invitations
+            .register(
+                &token,
+                "Rollback User",
+                "a valid registration password".to_owned(),
+                &PasswordService::default(),
+                &sessions,
+                at("2026-10-15T09:01:00Z"),
+            )
+            .await,
+        Err(OrganizationInvitationError::Audit(_))
+    ));
+
+    let accepted_at: Option<String> =
+        sqlx::query_scalar("SELECT accepted_at FROM organization_invites WHERE id = ?")
+            .bind(&issued.id)
+            .fetch_one(database.pool())
+            .await
+            .unwrap();
+    let registered_users: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE id != ?")
+        .bind(&owner)
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
+    let registrations: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM user_emails \
+         WHERE address_key = 'rollback-registration@example.test'",
+    )
+    .fetch_one(database.pool())
+    .await
+    .unwrap();
+    let sessions_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sessions")
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
+    assert!(accepted_at.is_none());
+    assert_eq!(registered_users, 0);
+    assert_eq!(registrations, 0);
+    assert_eq!(sessions_count, 0);
+}
+
+#[tokio::test]
 async fn acceptance_rejects_expired_tokens_and_disabled_policy_blocks_issue_and_acceptance() {
     let _guard = INVITATION_TEST_KDF_LOCK.lock().await;
     let directory = TempDir::new().unwrap();
@@ -718,6 +1044,19 @@ async fn acceptance_rejects_expired_tokens_and_disabled_policy_blocks_issue_and_
     ));
     assert!(matches!(
         disabled.accept(&proof, &token, expired_at).await,
+        Err(OrganizationInvitationError::Disabled)
+    ));
+    assert!(matches!(
+        disabled
+            .register(
+                &token,
+                "Invitee",
+                "a valid registration password".to_owned(),
+                &PasswordService::default(),
+                &invitation_sessions(&database),
+                expired_at,
+            )
+            .await,
         Err(OrganizationInvitationError::Disabled)
     ));
 }

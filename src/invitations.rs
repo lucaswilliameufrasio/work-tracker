@@ -16,7 +16,9 @@ use crate::{
     },
     audit::{self, AuditEventError, AuditEventKind, AuditEventResult, AuditEventTarget},
     auth::{
-        EmailAddressError, normalize_email_address, reauthentication::RecentReauthentication,
+        EmailAddressError, PasswordError, PasswordService, normalize_email_address,
+        reauthentication::RecentReauthentication,
+        session::{IssuedSession, SessionError, SessionStore},
         time::format_timestamp,
     },
 };
@@ -116,6 +118,10 @@ pub enum OrganizationInvitationError {
     EmailNotConfirmed,
     #[error("the accepting account already belongs to the organization")]
     AlreadyOrganizationMember,
+    #[error("an account already uses the invited email; sign in to accept this invitation")]
+    AccountAlreadyExists,
+    #[error("display name must not be empty")]
+    InvalidDisplayName,
     #[error("recent password reauthentication is required")]
     ReauthenticationRequired,
     #[error("invitation expiry is outside the supported timestamp range")]
@@ -126,6 +132,10 @@ pub enum OrganizationInvitationError {
     CorruptState,
     #[error("invitation token operation failed: {0}")]
     Token(#[from] InvitationTokenError),
+    #[error("registration password was rejected: {0}")]
+    Password(#[from] PasswordError),
+    #[error("registration session creation failed: {0}")]
+    Session(#[from] SessionError),
     #[error("invitation authorization context could not be loaded: {0}")]
     Access(#[from] AccessStoreError),
     #[error("invitation persistence failed: {0}")]
@@ -210,6 +220,22 @@ pub struct AcceptedOrganizationInvitation {
     pub invitation_id: String,
     pub role: OrganizationInviteRole,
     pub projects: Vec<InvitationProjectAssignment>,
+}
+
+pub struct RegisteredOrganizationInvitee {
+    pub user_id: String,
+    pub invitation_id: String,
+    pub role: OrganizationInviteRole,
+    pub projects: Vec<InvitationProjectAssignment>,
+    pub session: IssuedSession,
+}
+
+struct PendingOrganizationInvitation {
+    id: String,
+    email: String,
+    email_key: String,
+    role: OrganizationInviteRole,
+    projects: Vec<InvitationProjectAssignment>,
 }
 
 #[derive(Clone, Copy)]
@@ -578,43 +604,14 @@ impl OrganizationInvitationStore {
         let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         require_current_reauthentication(&mut transaction, proof, now).await?;
         let user_id = proof.user_id.as_str();
-        let invitation = sqlx::query(
-            "SELECT id, email_key, role, expires_at, accepted_at, canceled_at \
-             FROM organization_invites WHERE organization_id = 1 AND token_hash = ?",
-        )
-        .bind(token.digest().to_vec())
-        .fetch_optional(&mut *transaction)
-        .await?;
-        let Some(invitation) = invitation else {
-            return Err(OrganizationInvitationError::InvalidToken);
-        };
-        if invitation
-            .try_get::<Option<String>, _>("accepted_at")?
-            .is_some()
-        {
-            return Err(OrganizationInvitationError::InvitationAlreadyAccepted);
-        }
-        if invitation
-            .try_get::<Option<String>, _>("canceled_at")?
-            .is_some()
-        {
-            return Err(OrganizationInvitationError::InvitationNotPending);
-        }
-
-        let expires_at = parse_timestamp(&invitation.try_get::<String, _>("expires_at")?)?;
-        if expires_at <= now {
-            return Err(OrganizationInvitationError::InvitationExpired);
-        }
-        let invitation_id = invitation.try_get::<String, _>("id")?;
-        let email_key = invitation.try_get::<String, _>("email_key")?;
-        let role = OrganizationInviteRole::parse(&invitation.try_get::<String, _>("role")?)?;
+        let invitation = load_pending_invitation(&mut transaction, token, now).await?;
 
         let confirmed_email = sqlx::query_scalar::<_, i64>(
             "SELECT EXISTS(SELECT 1 FROM user_emails \
              WHERE user_id = ? AND address_key = ? AND confirmed_at IS NOT NULL)",
         )
         .bind(user_id)
-        .bind(email_key)
+        .bind(&invitation.email_key)
         .fetch_one(&mut *transaction)
         .await?;
         if confirmed_email == 0 {
@@ -632,110 +629,293 @@ impl OrganizationInvitationStore {
             return Err(OrganizationInvitationError::AlreadyOrganizationMember);
         }
 
-        let projects = load_invitation_projects(&mut transaction, &invitation_id).await?;
-        if role == OrganizationInviteRole::Guest && projects.is_empty() {
-            return Err(OrganizationInvitationError::CorruptState);
+        let accepted = complete_invitation(&mut transaction, user_id, &invitation, now).await?;
+        transaction.commit().await?;
+        Ok(accepted)
+    }
+
+    /// Registers a new account from an invite-only link. Possession of the
+    /// invite token proves control of its addressed email under the product's
+    /// invitation contract; no second confirmation email is required. Hashing
+    /// happens before the writer transaction, then invite consumption, account
+    /// creation, memberships, audit rows, and the initial session commit once.
+    pub async fn register(
+        &self,
+        token: &OrganizationInvitationToken,
+        display_name: &str,
+        password: String,
+        password_service: &PasswordService,
+        sessions: &SessionStore,
+        now: DateTime<Utc>,
+    ) -> Result<RegisteredOrganizationInvitee, OrganizationInvitationError> {
+        if !self.policy.enabled {
+            return Err(OrganizationInvitationError::Disabled);
         }
-        if role == OrganizationInviteRole::Guest
-            && projects
-                .iter()
-                .any(|assignment| assignment.role == ProjectRole::Manager)
-        {
-            return Err(OrganizationInvitationError::CorruptState);
-        }
-        for assignment in &projects {
-            ensure_project_is_active(&mut transaction, &assignment.project_id).await?;
+        let display_name = display_name.trim();
+        if display_name.is_empty() {
+            return Err(OrganizationInvitationError::InvalidDisplayName);
         }
 
+        let mut preflight = self.pool.begin().await?;
+        let invitation = load_pending_invitation(&mut preflight, token, now).await?;
+        ensure_invitation_email_is_unclaimed(&mut preflight, &invitation.email_key).await?;
+        preflight.commit().await?;
+
+        let password_hash = password_service.hash(password).await?;
+        let user_id = Uuid::now_v7().to_string();
+        let email_id = Uuid::now_v7().to_string();
         let now_text = format_timestamp(now);
-        let consumed = sqlx::query(
-            "UPDATE organization_invites SET accepted_at = ? \
-             WHERE id = ? AND organization_id = 1 AND accepted_at IS NULL \
-               AND canceled_at IS NULL AND expires_at > ?",
-        )
-        .bind(&now_text)
-        .bind(&invitation_id)
-        .bind(&now_text)
-        .execute(&mut *transaction)
-        .await?;
-        if consumed.rows_affected() != 1 {
-            return Err(OrganizationInvitationError::InvitationNotPending);
-        }
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let invitation = load_pending_invitation(&mut transaction, token, now).await?;
+        ensure_invitation_email_is_unclaimed(&mut transaction, &invitation.email_key).await?;
 
         sqlx::query(
-            "INSERT INTO organization_members \
-             (organization_id, user_id, role, created_at) VALUES (1, ?, ?, ?)",
+            "INSERT INTO users \
+             (id, display_name, state, created_at, updated_at) \
+             VALUES (?, ?, 'active', ?, ?)",
         )
-        .bind(user_id)
-        .bind(role.as_str())
+        .bind(&user_id)
+        .bind(display_name)
+        .bind(&now_text)
+        .bind(&now_text)
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(
+            "INSERT INTO user_emails \
+             (id, user_id, address, address_key, is_primary, confirmed_at, created_at) \
+             VALUES (?, ?, ?, ?, 1, ?, ?)",
+        )
+        .bind(&email_id)
+        .bind(&user_id)
+        .bind(&invitation.email)
+        .bind(&invitation.email_key)
+        .bind(&now_text)
+        .bind(&now_text)
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(
+            "INSERT INTO password_credentials (user_id, password_hash, changed_at) \
+             VALUES (?, ?, ?)",
+        )
+        .bind(&user_id)
+        .bind(&password_hash)
         .bind(&now_text)
         .execute(&mut *transaction)
         .await?;
 
-        for assignment in &projects {
-            let inserted = sqlx::query(
-                "INSERT INTO project_members \
-                 (project_id, organization_id, user_id, role, created_at) \
-                 SELECT projects.id, projects.organization_id, ?, ?, ? \
-                 FROM projects WHERE projects.id = ? \
-                   AND projects.organization_id = 1 AND projects.archived_at IS NULL",
-            )
-            .bind(user_id)
-            .bind(project_role_as_str(assignment.role))
-            .bind(&now_text)
-            .bind(&assignment.project_id)
-            .execute(&mut *transaction)
-            .await?;
-            if inserted.rows_affected() != 1 {
-                return Err(OrganizationInvitationError::ProjectUnavailable);
-            }
-        }
-
-        append_invite_event(
-            &mut transaction,
-            user_id,
-            AuditEventKind::OrganizationInviteAccepted,
-            &invitation_id,
-            now,
-        )
-        .await?;
-        audit::append_in_transaction(
-            &mut transaction,
-            Some(user_id),
-            AuditEventKind::OrganizationMemberAdded,
-            AuditEventResult::Success,
-            &AuditEventTarget::organization_membership(
-                user_id,
-                None,
-                Some(role.organization_role()),
+        for (event_kind, target) in [
+            (
+                AuditEventKind::EmailAddressAdded,
+                AuditEventTarget::email_address(&email_id),
             ),
-            now,
-        )
-        .await?;
-        for assignment in &projects {
+            (
+                AuditEventKind::EmailAddressConfirmed,
+                AuditEventTarget::email_address(&email_id),
+            ),
+        ] {
             audit::append_in_transaction(
                 &mut transaction,
-                Some(user_id),
-                AuditEventKind::ProjectMemberAdded,
+                Some(&user_id),
+                event_kind,
                 AuditEventResult::Success,
-                &AuditEventTarget::project_membership(
-                    &assignment.project_id,
-                    user_id,
-                    None,
-                    Some(assignment.role),
-                ),
+                &target,
                 now,
             )
             .await?;
         }
+        audit::append_in_transaction(
+            &mut transaction,
+            Some(&user_id),
+            AuditEventKind::PasswordChanged,
+            AuditEventResult::Success,
+            &AuditEventTarget::user(&user_id),
+            now,
+        )
+        .await?;
 
+        let accepted = complete_invitation(&mut transaction, &user_id, &invitation, now).await?;
+        let session = sessions
+            .issue_for_active_user_in_transaction(&mut transaction, &user_id, now)
+            .await?;
         transaction.commit().await?;
-        Ok(AcceptedOrganizationInvitation {
-            invitation_id,
-            role,
-            projects,
+
+        Ok(RegisteredOrganizationInvitee {
+            user_id,
+            invitation_id: accepted.invitation_id,
+            role: accepted.role,
+            projects: accepted.projects,
+            session,
         })
     }
+}
+
+async fn load_pending_invitation(
+    transaction: &mut Transaction<'_, sqlx::Sqlite>,
+    token: &OrganizationInvitationToken,
+    now: DateTime<Utc>,
+) -> Result<PendingOrganizationInvitation, OrganizationInvitationError> {
+    let invitation = sqlx::query(
+        "SELECT id, email, email_key, role, expires_at, accepted_at, canceled_at \
+         FROM organization_invites WHERE organization_id = 1 AND token_hash = ?",
+    )
+    .bind(token.digest().to_vec())
+    .fetch_optional(&mut **transaction)
+    .await?;
+    let Some(invitation) = invitation else {
+        return Err(OrganizationInvitationError::InvalidToken);
+    };
+    if invitation
+        .try_get::<Option<String>, _>("accepted_at")?
+        .is_some()
+    {
+        return Err(OrganizationInvitationError::InvitationAlreadyAccepted);
+    }
+    if invitation
+        .try_get::<Option<String>, _>("canceled_at")?
+        .is_some()
+    {
+        return Err(OrganizationInvitationError::InvitationNotPending);
+    }
+
+    let expires_at = parse_timestamp(&invitation.try_get::<String, _>("expires_at")?)?;
+    if expires_at <= now {
+        return Err(OrganizationInvitationError::InvitationExpired);
+    }
+    let id = invitation.try_get::<String, _>("id")?;
+    let role = OrganizationInviteRole::parse(&invitation.try_get::<String, _>("role")?)?;
+    let projects = load_invitation_projects(transaction, &id).await?;
+    if role == OrganizationInviteRole::Guest && projects.is_empty() {
+        return Err(OrganizationInvitationError::CorruptState);
+    }
+    if role == OrganizationInviteRole::Guest
+        && projects
+            .iter()
+            .any(|assignment| assignment.role == ProjectRole::Manager)
+    {
+        return Err(OrganizationInvitationError::CorruptState);
+    }
+    for assignment in &projects {
+        ensure_project_is_active(transaction, &assignment.project_id).await?;
+    }
+
+    Ok(PendingOrganizationInvitation {
+        id,
+        email: invitation.try_get("email")?,
+        email_key: invitation.try_get("email_key")?,
+        role,
+        projects,
+    })
+}
+
+async fn ensure_invitation_email_is_unclaimed(
+    transaction: &mut Transaction<'_, sqlx::Sqlite>,
+    email_key: &str,
+) -> Result<(), OrganizationInvitationError> {
+    let already_registered = sqlx::query_scalar::<_, i64>(
+        "SELECT EXISTS(SELECT 1 FROM user_emails WHERE address_key = ?)",
+    )
+    .bind(email_key)
+    .fetch_one(&mut **transaction)
+    .await?;
+    if already_registered != 0 {
+        return Err(OrganizationInvitationError::AccountAlreadyExists);
+    }
+    Ok(())
+}
+
+async fn complete_invitation(
+    transaction: &mut Transaction<'_, sqlx::Sqlite>,
+    user_id: &str,
+    invitation: &PendingOrganizationInvitation,
+    now: DateTime<Utc>,
+) -> Result<AcceptedOrganizationInvitation, OrganizationInvitationError> {
+    let now_text = format_timestamp(now);
+    let consumed = sqlx::query(
+        "UPDATE organization_invites SET accepted_at = ? \
+         WHERE id = ? AND organization_id = 1 AND accepted_at IS NULL \
+           AND canceled_at IS NULL AND expires_at > ?",
+    )
+    .bind(&now_text)
+    .bind(&invitation.id)
+    .bind(&now_text)
+    .execute(&mut **transaction)
+    .await?;
+    if consumed.rows_affected() != 1 {
+        return Err(OrganizationInvitationError::InvitationNotPending);
+    }
+
+    sqlx::query(
+        "INSERT INTO organization_members \
+         (organization_id, user_id, role, created_at) VALUES (1, ?, ?, ?)",
+    )
+    .bind(user_id)
+    .bind(invitation.role.as_str())
+    .bind(&now_text)
+    .execute(&mut **transaction)
+    .await?;
+
+    for assignment in &invitation.projects {
+        let inserted = sqlx::query(
+            "INSERT INTO project_members \
+             (project_id, organization_id, user_id, role, created_at) \
+             SELECT projects.id, projects.organization_id, ?, ?, ? \
+             FROM projects WHERE projects.id = ? \
+               AND projects.organization_id = 1 AND projects.archived_at IS NULL",
+        )
+        .bind(user_id)
+        .bind(project_role_as_str(assignment.role))
+        .bind(&now_text)
+        .bind(&assignment.project_id)
+        .execute(&mut **transaction)
+        .await?;
+        if inserted.rows_affected() != 1 {
+            return Err(OrganizationInvitationError::ProjectUnavailable);
+        }
+    }
+
+    append_invite_event(
+        transaction,
+        user_id,
+        AuditEventKind::OrganizationInviteAccepted,
+        &invitation.id,
+        now,
+    )
+    .await?;
+    audit::append_in_transaction(
+        transaction,
+        Some(user_id),
+        AuditEventKind::OrganizationMemberAdded,
+        AuditEventResult::Success,
+        &AuditEventTarget::organization_membership(
+            user_id,
+            None,
+            Some(invitation.role.organization_role()),
+        ),
+        now,
+    )
+    .await?;
+    for assignment in &invitation.projects {
+        audit::append_in_transaction(
+            transaction,
+            Some(user_id),
+            AuditEventKind::ProjectMemberAdded,
+            AuditEventResult::Success,
+            &AuditEventTarget::project_membership(
+                &assignment.project_id,
+                user_id,
+                None,
+                Some(assignment.role),
+            ),
+            now,
+        )
+        .await?;
+    }
+
+    Ok(AcceptedOrganizationInvitation {
+        invitation_id: invitation.id.clone(),
+        role: invitation.role,
+        projects: invitation.projects.clone(),
+    })
 }
 
 async fn load_organization_context(

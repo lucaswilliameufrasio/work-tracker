@@ -164,6 +164,50 @@ impl SessionStore {
         })
     }
 
+    /// Issues a session inside a caller-owned transaction. This is reserved
+    /// for flows that create the active account and its authenticated session
+    /// atomically; callers must establish the account's authentication proof
+    /// before invoking it.
+    pub(crate) async fn issue_for_active_user_in_transaction(
+        &self,
+        transaction: &mut Transaction<'_, Sqlite>,
+        user_id: &str,
+        now: DateTime<Utc>,
+    ) -> Result<IssuedSession, SessionError> {
+        let expires_at = now
+            .checked_add_signed(self.policy.absolute_lifetime)
+            .ok_or(SessionError::DeadlineOutOfRange)?;
+        let session_id = Uuid::now_v7().to_string();
+        let token = SessionToken::generate()?;
+        let token_hash = token.digest().to_vec();
+        let now_text = format_timestamp(now);
+        let expires_at_text = format_timestamp(expires_at);
+
+        let result = sqlx::query(
+            "INSERT INTO sessions \
+             (id, token_hash, user_id, created_at, last_activity_at, expires_at) \
+             SELECT ?, ?, id, ?, ?, ? FROM users WHERE id = ? AND state = 'active'",
+        )
+        .bind(&session_id)
+        .bind(token_hash)
+        .bind(&now_text)
+        .bind(&now_text)
+        .bind(expires_at_text)
+        .bind(user_id)
+        .execute(&mut **transaction)
+        .await?;
+
+        if result.rows_affected() != 1 {
+            return Err(SessionError::UserNotActive);
+        }
+
+        Ok(IssuedSession {
+            id: session_id,
+            token,
+            expires_at,
+        })
+    }
+
     /// Issues a session only if the exact password PHC verified by the caller
     /// is still current and belongs to this confirmed email. This closes the
     /// verify-then-password-reset race that could otherwise create a fresh
