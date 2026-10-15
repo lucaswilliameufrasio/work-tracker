@@ -41,6 +41,8 @@ pub enum AccessCapability {
     ChangeProjectArchive,
     ExportProject,
     BanInstallationUser,
+    DeactivateOwnAccount,
+    ReactivateInstallationUser,
     DownloadFullBackup,
 }
 
@@ -403,9 +405,10 @@ pub fn authorize(
 
     let allowed = match capability {
         AccessCapability::ReadOperationalHealth => context.installation_admin,
-        AccessCapability::ConfigureInstallationSettings | AccessCapability::BanInstallationUser => {
-            context.installation_admin
-        }
+        AccessCapability::ConfigureInstallationSettings
+        | AccessCapability::BanInstallationUser
+        | AccessCapability::ReactivateInstallationUser => context.installation_admin,
+        AccessCapability::DeactivateOwnAccount => true,
         AccessCapability::ReadOrganizationDirectory => matches!(
             context.organization_role,
             Some(OrganizationRole::Owner | OrganizationRole::Admin | OrganizationRole::Member)
@@ -495,6 +498,8 @@ mod tests {
             AccessCapability::ChangeProjectArchive,
             AccessCapability::ExportProject,
             AccessCapability::BanInstallationUser,
+            AccessCapability::DeactivateOwnAccount,
+            AccessCapability::ReactivateInstallationUser,
             AccessCapability::DownloadFullBackup,
         ];
 
@@ -594,6 +599,40 @@ mod tests {
         assert!(!is_allowed(
             &unaffiliated,
             AccessCapability::LeaveOrganization
+        ));
+    }
+
+    #[test]
+    fn active_users_can_request_self_deactivation_but_only_installation_admins_can_reactivate() {
+        let member = context(
+            AccountState::Active,
+            false,
+            Some(OrganizationRole::Member),
+            None,
+            false,
+            false,
+        );
+        assert!(is_allowed(&member, AccessCapability::DeactivateOwnAccount));
+        assert!(!is_allowed(
+            &member,
+            AccessCapability::ReactivateInstallationUser
+        ));
+
+        let installation_admin = context(
+            AccountState::Active,
+            true,
+            Some(OrganizationRole::Member),
+            None,
+            false,
+            false,
+        );
+        assert!(is_allowed(
+            &installation_admin,
+            AccessCapability::DeactivateOwnAccount
+        ));
+        assert!(is_allowed(
+            &installation_admin,
+            AccessCapability::ReactivateInstallationUser
         ));
     }
 

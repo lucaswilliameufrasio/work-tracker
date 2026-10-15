@@ -22,10 +22,18 @@ pub enum AccountAdministrationError {
     Forbidden,
     #[error("target account does not exist")]
     TargetNotFound,
-    #[error("only an active account can be banned")]
+    #[error("target account is not active")]
     TargetNotActive,
     #[error("target account is not currently banned")]
     TargetNotBanned,
+    #[error("target account is not currently disabled")]
+    TargetNotDisabled,
+    #[error("transfer organization ownership before disabling this account")]
+    LastOrganizationOwner,
+    #[error("another active installation admin must remain before disabling this account")]
+    LastInstallationAdmin,
+    #[error("another active project manager must remain for every managed project")]
+    LastProjectManager,
     #[error("persisted account state is invalid")]
     CorruptState,
     #[error("ban reason must be non-empty, single-line, and at most 500 characters")]
@@ -38,10 +46,11 @@ pub enum AccountAdministrationError {
     Audit(#[from] AuditEventError),
 }
 
-/// Internal, transactionally audited account ban and restoration operations.
+/// Internal, transactionally audited account lifecycle operations.
 /// Callers must pass an actor ID from a validated session; the store reloads
-/// and rechecks the current installation-admin grant in its write transaction.
-/// Transport and administrator-facing audit browsing are separate boundaries.
+/// and rechecks current account and installation-admin state in its write
+/// transaction. Transport and administrator-facing audit browsing are
+/// separate boundaries.
 #[derive(Clone)]
 pub struct AccountAdministrationStore {
     pool: SqlitePool,
@@ -66,7 +75,12 @@ impl AccountAdministrationStore {
         let reason = validate_ban_reason(reason)?;
         let now_text = format_timestamp(now);
         let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-        require_installation_admin(&mut transaction, actor_user_id).await?;
+        require_installation_admin(
+            &mut transaction,
+            actor_user_id,
+            AccessCapability::BanInstallationUser,
+        )
+        .await?;
 
         let state = load_account_state(&mut transaction, target_user_id).await?;
         match state {
@@ -120,7 +134,12 @@ impl AccountAdministrationStore {
     ) -> Result<AccountStatusChange, AccountAdministrationError> {
         let now_text = format_timestamp(now);
         let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-        require_installation_admin(&mut transaction, actor_user_id).await?;
+        require_installation_admin(
+            &mut transaction,
+            actor_user_id,
+            AccessCapability::BanInstallationUser,
+        )
+        .await?;
 
         let state = load_account_state(&mut transaction, target_user_id).await?;
         match state {
@@ -161,11 +180,135 @@ impl AccountAdministrationStore {
 
         Ok(AccountStatusChange::Changed)
     }
+
+    /// Disables only the account identified by the caller's validated session.
+    /// The account's memberships and authored work remain, but the transition
+    /// is refused if it would leave the organization without an owner, the
+    /// installation without an active administrator, or a managed project
+    /// without an active manager.
+    pub async fn disable_self(
+        &self,
+        user_id: &str,
+        now: DateTime<Utc>,
+    ) -> Result<AccountStatusChange, AccountAdministrationError> {
+        let now_text = format_timestamp(now);
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let context =
+            AccessStore::load_organization_context_in_transaction(&mut transaction, user_id, false)
+                .await?;
+        let Some(context) = context else {
+            transaction.rollback().await?;
+            return Err(AccountAdministrationError::TargetNotFound);
+        };
+
+        match context.account_state() {
+            AccountState::Active => {
+                if authorize(&context, AccessCapability::DeactivateOwnAccount).is_err() {
+                    transaction.rollback().await?;
+                    return Err(AccountAdministrationError::TargetNotActive);
+                }
+            }
+            AccountState::Disabled => {
+                transaction.rollback().await?;
+                return Ok(AccountStatusChange::Unchanged);
+            }
+            AccountState::Banned => {
+                transaction.rollback().await?;
+                return Err(AccountAdministrationError::TargetNotActive);
+            }
+        }
+
+        ensure_deactivation_preserves_responsible_accounts(&mut transaction, user_id).await?;
+        let update = sqlx::query(
+            "UPDATE users SET state = 'disabled', updated_at = ? \
+             WHERE id = ? AND state = 'active'",
+        )
+        .bind(&now_text)
+        .bind(user_id)
+        .execute(&mut *transaction)
+        .await?;
+        if update.rows_affected() != 1 {
+            transaction.rollback().await?;
+            return Err(AccountAdministrationError::TargetNotActive);
+        }
+
+        invalidate_account_credentials(&mut transaction, user_id, &now_text).await?;
+        audit::append_in_transaction(
+            &mut transaction,
+            Some(user_id),
+            AuditEventKind::UserDisabled,
+            AuditEventResult::Success,
+            &AuditEventTarget::user(user_id),
+            now,
+        )
+        .await?;
+        transaction.commit().await?;
+
+        Ok(AccountStatusChange::Changed)
+    }
+
+    /// Reactivates a disabled account for an active installation admin.
+    /// Revoked sessions and one-time credentials are not restored.
+    pub async fn reactivate(
+        &self,
+        actor_user_id: &str,
+        target_user_id: &str,
+        now: DateTime<Utc>,
+    ) -> Result<AccountStatusChange, AccountAdministrationError> {
+        let now_text = format_timestamp(now);
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        require_installation_admin(
+            &mut transaction,
+            actor_user_id,
+            AccessCapability::ReactivateInstallationUser,
+        )
+        .await?;
+
+        let state = load_account_state(&mut transaction, target_user_id).await?;
+        match state {
+            AccountState::Disabled => {}
+            AccountState::Active => {
+                transaction.rollback().await?;
+                return Ok(AccountStatusChange::Unchanged);
+            }
+            AccountState::Banned => {
+                transaction.rollback().await?;
+                return Err(AccountAdministrationError::TargetNotDisabled);
+            }
+        }
+
+        let update = sqlx::query(
+            "UPDATE users SET state = 'active', updated_at = ? \
+             WHERE id = ? AND state = 'disabled'",
+        )
+        .bind(&now_text)
+        .bind(target_user_id)
+        .execute(&mut *transaction)
+        .await?;
+        if update.rows_affected() != 1 {
+            transaction.rollback().await?;
+            return Err(AccountAdministrationError::TargetNotDisabled);
+        }
+
+        audit::append_in_transaction(
+            &mut transaction,
+            Some(actor_user_id),
+            AuditEventKind::UserReactivated,
+            AuditEventResult::Success,
+            &AuditEventTarget::user(target_user_id),
+            now,
+        )
+        .await?;
+        transaction.commit().await?;
+
+        Ok(AccountStatusChange::Changed)
+    }
 }
 
 async fn require_installation_admin(
     transaction: &mut Transaction<'_, sqlx::Sqlite>,
     actor_user_id: &str,
+    capability: AccessCapability,
 ) -> Result<(), AccountAdministrationError> {
     let context =
         AccessStore::load_organization_context_in_transaction(transaction, actor_user_id, false)
@@ -173,7 +316,7 @@ async fn require_installation_admin(
     let Some(context) = context else {
         return Err(AccountAdministrationError::Forbidden);
     };
-    if authorize(&context, AccessCapability::BanInstallationUser).is_err() {
+    if authorize(&context, capability).is_err() {
         return Err(AccountAdministrationError::Forbidden);
     }
     Ok(())
@@ -281,4 +424,83 @@ fn validate_ban_reason(reason: &str) -> Result<&str, AccountAdministrationError>
         return Err(AccountAdministrationError::InvalidReason);
     }
     Ok(reason)
+}
+
+async fn ensure_deactivation_preserves_responsible_accounts(
+    transaction: &mut Transaction<'_, sqlx::Sqlite>,
+    user_id: &str,
+) -> Result<(), AccountAdministrationError> {
+    let is_organization_owner: bool = sqlx::query_scalar(
+        "SELECT EXISTS ( \
+             SELECT 1 FROM organization_members \
+             WHERE organization_id = 1 AND user_id = ? AND role = 'owner' \
+         )",
+    )
+    .bind(user_id)
+    .fetch_one(&mut **transaction)
+    .await?;
+    if is_organization_owner {
+        let other_active_owners: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM organization_members \
+             JOIN users ON users.id = organization_members.user_id \
+             WHERE organization_members.organization_id = 1 \
+               AND organization_members.role = 'owner' \
+               AND users.state = 'active' \
+               AND organization_members.user_id != ?",
+        )
+        .bind(user_id)
+        .fetch_one(&mut **transaction)
+        .await?;
+        if other_active_owners == 0 {
+            return Err(AccountAdministrationError::LastOrganizationOwner);
+        }
+    }
+
+    let is_installation_admin: bool =
+        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM installation_admins WHERE user_id = ?)")
+            .bind(user_id)
+            .fetch_one(&mut **transaction)
+            .await?;
+    if is_installation_admin {
+        let other_active_admins: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM installation_admins \
+             JOIN users ON users.id = installation_admins.user_id \
+             WHERE users.state = 'active' AND installation_admins.user_id != ?",
+        )
+        .bind(user_id)
+        .fetch_one(&mut **transaction)
+        .await?;
+        if other_active_admins == 0 {
+            return Err(AccountAdministrationError::LastInstallationAdmin);
+        }
+    }
+
+    let managed_projects: Vec<String> = sqlx::query_scalar(
+        "SELECT project_id FROM project_members \
+         WHERE user_id = ? AND role = 'manager' ORDER BY project_id",
+    )
+    .bind(user_id)
+    .fetch_all(&mut **transaction)
+    .await?;
+    for project_id in managed_projects {
+        let has_other_active_manager: bool = sqlx::query_scalar(
+            "SELECT EXISTS ( \
+                 SELECT 1 FROM project_members \
+                 JOIN users ON users.id = project_members.user_id \
+                 WHERE project_members.project_id = ? \
+                   AND project_members.role = 'manager' \
+                   AND project_members.user_id != ? \
+                   AND users.state = 'active' \
+             )",
+        )
+        .bind(project_id)
+        .bind(user_id)
+        .fetch_one(&mut **transaction)
+        .await?;
+        if !has_other_active_manager {
+            return Err(AccountAdministrationError::LastProjectManager);
+        }
+    }
+
+    Ok(())
 }

@@ -48,6 +48,8 @@ pub enum AuditEventKind {
     OrganizationInviteAccepted,
     UserBanned,
     UserUnbanned,
+    UserDisabled,
+    UserReactivated,
 }
 
 impl AuditEventKind {
@@ -83,6 +85,8 @@ impl AuditEventKind {
             Self::OrganizationInviteAccepted => "organization.invite.accepted",
             Self::UserBanned => "auth.user.banned",
             Self::UserUnbanned => "auth.user.unbanned",
+            Self::UserDisabled => "auth.user.disabled",
+            Self::UserReactivated => "auth.user.reactivated",
         }
     }
 }
