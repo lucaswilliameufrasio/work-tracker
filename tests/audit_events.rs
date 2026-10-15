@@ -452,6 +452,192 @@ async fn account_deactivation_audit_migration_preserves_existing_audit_rows() {
 }
 
 #[tokio::test]
+async fn account_anonymization_migration_preserves_audit_and_allows_only_one_way_invite_redaction()
+{
+    let directory = TempDir::new().unwrap();
+    let database_path = directory
+        .path()
+        .join("account-anonymization-migration.sqlite3");
+    let options = sqlx::sqlite::SqliteConnectOptions::new()
+        .filename(&database_path)
+        .create_if_missing(true)
+        .foreign_keys(true);
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(options)
+        .await
+        .unwrap();
+    let migration_directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
+    let mut migration_paths = fs::read_dir(migration_directory)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().is_some_and(|extension| extension == "sql"))
+        .collect::<Vec<_>>();
+    migration_paths.sort();
+
+    let mut account_anonymization_migration = None;
+    for migration_path in migration_paths {
+        if migration_path
+            .file_name()
+            .is_some_and(|name| name == "0028_account_anonymization.sql")
+        {
+            account_anonymization_migration = Some(migration_path);
+            break;
+        }
+        let migration = fs::read_to_string(migration_path).unwrap();
+        sqlx::raw_sql(sqlx::AssertSqlSafe(migration))
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
+    sqlx::query(
+        "INSERT INTO organizations \
+         (id, name, locale, timezone, created_at, updated_at) \
+         VALUES (1, 'Migration test', 'en', 'UTC', 'now', 'now')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let actor_id = Uuid::now_v7().to_string();
+    let target_id = Uuid::now_v7().to_string();
+    for (user_id, display_name) in [
+        (&actor_id, "Migration actor"),
+        (&target_id, "Migration target"),
+    ] {
+        sqlx::query(
+            "INSERT INTO users (id, display_name, state, created_at, updated_at) \
+             VALUES (?, ?, 'active', 'now', 'now')",
+        )
+        .bind(user_id)
+        .bind(display_name)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    let event_id = Uuid::now_v7().to_string();
+    sqlx::query(
+        "INSERT INTO audit_events \
+         (id, event_kind, result, actor_user_id, target_kind, target_id, reason, occurred_at) \
+         VALUES (?, 'auth.user.banned', 'success', ?, 'user', ?, 'historic reason', 'now')",
+    )
+    .bind(&event_id)
+    .bind(&actor_id)
+    .bind(&target_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let invite_id = Uuid::now_v7().to_string();
+    sqlx::query(
+        "INSERT INTO organization_invites \
+         (id, email, email_key, role, token_hash, created_by_user_id, created_at, expires_at) \
+         VALUES (?, 'privacy@example.test', 'privacy@example.test', 'member', ?, ?, \
+                 'now', '2099-01-01T00:00:00.000000000Z')",
+    )
+    .bind(&invite_id)
+    .bind(vec![41_u8; 32])
+    .bind(&actor_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let migration = fs::read_to_string(account_anonymization_migration.unwrap()).unwrap();
+    sqlx::raw_sql(sqlx::AssertSqlSafe(migration))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let preserved = sqlx::query("SELECT event_kind, reason FROM audit_events WHERE id = ?")
+        .bind(&event_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        preserved.try_get::<String, _>("event_kind").unwrap(),
+        "auth.user.banned"
+    );
+    assert_eq!(
+        preserved.try_get::<Option<String>, _>("reason").unwrap(),
+        Some("historic reason".to_owned())
+    );
+    let redaction_state: Option<String> =
+        sqlx::query_scalar("SELECT recipient_redacted_at FROM organization_invites WHERE id = ?")
+            .bind(&invite_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(redaction_state.is_none());
+    assert!(
+        sqlx::query(
+            "INSERT INTO users (id, display_name, state, anonymized_at, created_at, updated_at) \
+             VALUES (?, 'Pre-anonymized', 'active', '2026-10-15T09:00:00Z', 'now', 'now')",
+        )
+        .bind(Uuid::now_v7().to_string())
+        .execute(&pool)
+        .await
+        .is_err()
+    );
+    assert!(
+        sqlx::query("UPDATE organization_invites SET email = 'changed@example.test' WHERE id = ?")
+            .bind(&invite_id)
+            .execute(&pool)
+            .await
+            .is_err()
+    );
+
+    let redacted_email = format!("redacted+{invite_id}@invalid.invalid");
+    sqlx::query(
+        "UPDATE organization_invites \
+         SET email = ?, email_key = ?, recipient_redacted_at = '2026-10-15T09:00:00Z', \
+             canceled_at = '2026-10-15T09:00:00Z' \
+         WHERE id = ?",
+    )
+    .bind(&redacted_email)
+    .bind(&redacted_email)
+    .bind(&invite_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert!(
+        sqlx::query("UPDATE organization_invites SET email = 'again@example.test' WHERE id = ?",)
+            .bind(&invite_id)
+            .execute(&pool)
+            .await
+            .is_err()
+    );
+
+    sqlx::query(
+        "INSERT INTO audit_events \
+         (id, event_kind, result, actor_user_id, target_kind, target_id, occurred_at) \
+         VALUES (?, 'auth.user.anonymized', 'success', ?, 'user', ?, 'now')",
+    )
+    .bind(Uuid::now_v7().to_string())
+    .bind(&actor_id)
+    .bind(&target_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert!(
+        sqlx::query(
+            "INSERT INTO audit_events \
+             (id, event_kind, result, target_kind, target_id, occurred_at) \
+             VALUES (?, 'auth.user.anonymized', 'success', 'user', ?, 'now')",
+        )
+        .bind(Uuid::now_v7().to_string())
+        .bind(&target_id)
+        .execute(&pool)
+        .await
+        .is_err()
+    );
+
+    let foreign_key_violations = sqlx::query("PRAGMA foreign_key_check")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert!(foreign_key_violations.is_empty());
+}
+
+#[tokio::test]
 async fn event_and_protected_write_share_the_callers_transaction() {
     let directory = TempDir::new().unwrap();
     let database = Database::open(directory.path()).await.unwrap();

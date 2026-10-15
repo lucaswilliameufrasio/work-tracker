@@ -191,7 +191,7 @@ pub enum OrganizationInvitationStatus {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OrganizationInvitationRecord {
     pub id: String,
-    pub email: String,
+    pub email: Option<String>,
     pub role: OrganizationInviteRole,
     pub status: OrganizationInvitationStatus,
     pub created_by_user_id: String,
@@ -465,8 +465,8 @@ impl OrganizationInvitationStore {
         }
 
         let rows = sqlx::query(
-            "SELECT id, email, role, created_by_user_id, created_at, expires_at, \
-                    accepted_at, canceled_at \
+            "SELECT id, email, recipient_redacted_at, role, created_by_user_id, \
+                    created_at, expires_at, accepted_at, canceled_at \
              FROM organization_invites WHERE organization_id = 1 \
              ORDER BY created_at DESC, id DESC",
         )
@@ -507,10 +507,17 @@ impl OrganizationInvitationStore {
                 parse_optional_timestamp(row.try_get::<Option<String>, _>("accepted_at")?)?;
             let canceled_at =
                 parse_optional_timestamp(row.try_get::<Option<String>, _>("canceled_at")?)?;
+            let recipient_redacted_at = parse_optional_timestamp(
+                row.try_get::<Option<String>, _>("recipient_redacted_at")?,
+            )?;
             let status = invitation_status(accepted_at, canceled_at, expires_at, now);
             invitations.push(OrganizationInvitationRecord {
                 id: id.clone(),
-                email: row.try_get("email")?,
+                email: if recipient_redacted_at.is_some() {
+                    None
+                } else {
+                    Some(row.try_get("email")?)
+                },
                 role: OrganizationInviteRole::parse(&row.try_get::<String, _>("role")?)?,
                 status,
                 created_by_user_id: row.try_get("created_by_user_id")?,

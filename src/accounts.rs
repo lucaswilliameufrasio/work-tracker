@@ -18,7 +18,7 @@ pub enum AccountStatusChange {
 
 #[derive(Debug, Error)]
 pub enum AccountAdministrationError {
-    #[error("actor cannot ban or restore installation accounts")]
+    #[error("actor is not authorized for this account lifecycle operation")]
     Forbidden,
     #[error("target account does not exist")]
     TargetNotFound,
@@ -28,12 +28,18 @@ pub enum AccountAdministrationError {
     TargetNotBanned,
     #[error("target account is not currently disabled")]
     TargetNotDisabled,
-    #[error("transfer organization ownership before disabling this account")]
+    #[error(
+        "ensure another active organization owner before disabling or anonymizing this account"
+    )]
     LastOrganizationOwner,
-    #[error("another active installation admin must remain before disabling this account")]
+    #[error(
+        "ensure another active installation admin before disabling or anonymizing this account"
+    )]
     LastInstallationAdmin,
-    #[error("another active project manager must remain for every managed project")]
+    #[error("ensure another active project manager before disabling or anonymizing this account")]
     LastProjectManager,
+    #[error("an anonymized account cannot be restored or returned to active state")]
+    AnonymizedAccount,
     #[error("persisted account state is invalid")]
     CorruptState,
     #[error("ban reason must be non-empty, single-line, and at most 500 characters")]
@@ -83,6 +89,10 @@ impl AccountAdministrationStore {
         .await?;
 
         let state = load_account_state(&mut transaction, target_user_id).await?;
+        if is_account_anonymized(&mut transaction, target_user_id).await? {
+            transaction.rollback().await?;
+            return Err(AccountAdministrationError::AnonymizedAccount);
+        }
         match state {
             AccountState::Banned => {
                 invalidate_account_credentials(&mut transaction, target_user_id, &now_text).await?;
@@ -142,6 +152,10 @@ impl AccountAdministrationStore {
         .await?;
 
         let state = load_account_state(&mut transaction, target_user_id).await?;
+        if is_account_anonymized(&mut transaction, target_user_id).await? {
+            transaction.rollback().await?;
+            return Err(AccountAdministrationError::AnonymizedAccount);
+        }
         match state {
             AccountState::Banned => {}
             AccountState::Active => {
@@ -265,6 +279,10 @@ impl AccountAdministrationStore {
         .await?;
 
         let state = load_account_state(&mut transaction, target_user_id).await?;
+        if is_account_anonymized(&mut transaction, target_user_id).await? {
+            transaction.rollback().await?;
+            return Err(AccountAdministrationError::AnonymizedAccount);
+        }
         match state {
             AccountState::Disabled => {}
             AccountState::Active => {
@@ -294,6 +312,77 @@ impl AccountAdministrationStore {
             &mut transaction,
             Some(actor_user_id),
             AuditEventKind::UserReactivated,
+            AuditEventResult::Success,
+            &AuditEventTarget::user(target_user_id),
+            now,
+        )
+        .await?;
+        transaction.commit().await?;
+
+        Ok(AccountStatusChange::Changed)
+    }
+
+    /// Irreversibly removes login and contact identities while retaining the
+    /// account row, memberships, and authored-work references.
+    pub async fn anonymize(
+        &self,
+        actor_user_id: &str,
+        target_user_id: &str,
+        now: DateTime<Utc>,
+    ) -> Result<AccountStatusChange, AccountAdministrationError> {
+        let now_text = format_timestamp(now);
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let actor_context = AccessStore::load_organization_context_in_transaction(
+            &mut transaction,
+            actor_user_id,
+            false,
+        )
+        .await?;
+        let Some(actor_context) = actor_context else {
+            transaction.rollback().await?;
+            return Err(AccountAdministrationError::Forbidden);
+        };
+        if authorize(
+            &actor_context,
+            AccessCapability::AnonymizeInstallationAccount,
+        )
+        .is_err()
+            || actor_user_id == target_user_id
+        {
+            transaction.rollback().await?;
+            return Err(AccountAdministrationError::Forbidden);
+        }
+
+        load_account_state(&mut transaction, target_user_id).await?;
+        if is_account_anonymized(&mut transaction, target_user_id).await? {
+            transaction.rollback().await?;
+            return Ok(AccountStatusChange::Unchanged);
+        }
+        ensure_deactivation_preserves_responsible_accounts(&mut transaction, target_user_id)
+            .await?;
+
+        redact_organization_invite_recipients(&mut transaction, target_user_id, &now_text).await?;
+        let update = sqlx::query(
+            "UPDATE users \
+             SET display_name = 'Usuário removido', state = 'disabled', \
+                 anonymized_at = ?, updated_at = ? \
+             WHERE id = ? AND anonymized_at IS NULL",
+        )
+        .bind(&now_text)
+        .bind(&now_text)
+        .bind(target_user_id)
+        .execute(&mut *transaction)
+        .await?;
+        if update.rows_affected() != 1 {
+            transaction.rollback().await?;
+            return Err(AccountAdministrationError::AnonymizedAccount);
+        }
+
+        delete_account_credentials(&mut transaction, target_user_id).await?;
+        audit::append_in_transaction(
+            &mut transaction,
+            Some(actor_user_id),
+            AuditEventKind::UserAnonymized,
             AuditEventResult::Success,
             &AuditEventTarget::user(target_user_id),
             now,
@@ -337,6 +426,84 @@ async fn load_account_state(
         "disabled" => Ok(AccountState::Disabled),
         _ => Err(AccountAdministrationError::CorruptState),
     }
+}
+
+async fn is_account_anonymized(
+    transaction: &mut Transaction<'_, sqlx::Sqlite>,
+    user_id: &str,
+) -> Result<bool, sqlx::Error> {
+    let anonymized_at: Option<String> =
+        sqlx::query_scalar("SELECT anonymized_at FROM users WHERE id = ?")
+            .bind(user_id)
+            .fetch_one(&mut **transaction)
+            .await?;
+    Ok(anonymized_at.is_some())
+}
+
+async fn redact_organization_invite_recipients(
+    transaction: &mut Transaction<'_, sqlx::Sqlite>,
+    user_id: &str,
+    now: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "UPDATE organization_invites \
+         SET email = 'redacted+' || id || '@invalid.invalid', \
+             email_key = lower(trim('redacted+' || id || '@invalid.invalid')), \
+             recipient_redacted_at = ? \
+         WHERE recipient_redacted_at IS NULL \
+           AND email_key IN (SELECT address_key FROM user_emails WHERE user_id = ?) \
+           AND (accepted_at IS NOT NULL OR canceled_at IS NOT NULL)",
+    )
+    .bind(now)
+    .bind(user_id)
+    .execute(&mut **transaction)
+    .await?;
+
+    sqlx::query(
+        "UPDATE organization_invites \
+         SET email = 'redacted+' || id || '@invalid.invalid', \
+             email_key = lower(trim('redacted+' || id || '@invalid.invalid')), \
+             recipient_redacted_at = ?, canceled_at = ? \
+         WHERE recipient_redacted_at IS NULL \
+           AND email_key IN (SELECT address_key FROM user_emails WHERE user_id = ?) \
+           AND accepted_at IS NULL AND canceled_at IS NULL",
+    )
+    .bind(now)
+    .bind(now)
+    .bind(user_id)
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
+}
+
+async fn delete_account_credentials(
+    transaction: &mut Transaction<'_, sqlx::Sqlite>,
+    user_id: &str,
+) -> Result<(), sqlx::Error> {
+    for query in [
+        "DELETE FROM mfa_login_challenges WHERE user_id = ?",
+        "DELETE FROM mfa_recovery_enrollments \
+         WHERE recovery_session_id IN ( \
+             SELECT id FROM mfa_recovery_sessions WHERE user_id = ? \
+         )",
+        "DELETE FROM mfa_recovery_sessions WHERE user_id = ?",
+        "DELETE FROM mfa_credentials WHERE user_id = ?",
+        "DELETE FROM recovery_codes WHERE user_id = ?",
+        "DELETE FROM sessions WHERE user_id = ?",
+        "DELETE FROM password_reset_tokens WHERE user_id = ?",
+        "DELETE FROM email_verification_tokens \
+         WHERE email_id IN (SELECT id FROM user_emails WHERE user_id = ?)",
+        "DELETE FROM password_credentials WHERE user_id = ?",
+        "DELETE FROM auth_identities WHERE user_id = ?",
+        "DELETE FROM user_emails WHERE user_id = ?",
+        "DELETE FROM installation_admins WHERE user_id = ?",
+    ] {
+        sqlx::query(query)
+            .bind(user_id)
+            .execute(&mut **transaction)
+            .await?;
+    }
+    Ok(())
 }
 
 async fn invalidate_account_credentials(

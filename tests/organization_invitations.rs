@@ -243,6 +243,7 @@ async fn organization_admin_can_issue_reissue_list_and_cancel_hash_only_invites(
         .unwrap();
     assert_eq!(old.status, OrganizationInvitationStatus::Canceled);
     assert_eq!(current.status, OrganizationInvitationStatus::Pending);
+    assert_eq!(current.email.as_deref(), Some("future.user@example.test"));
     assert_eq!(current.projects.len(), 1);
     assert_eq!(current.projects[0].role, ProjectRole::Member);
 

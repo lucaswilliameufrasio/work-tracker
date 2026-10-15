@@ -43,6 +43,7 @@ pub enum AccessCapability {
     BanInstallationUser,
     DeactivateOwnAccount,
     ReactivateInstallationUser,
+    AnonymizeInstallationAccount,
     DownloadFullBackup,
 }
 
@@ -408,6 +409,9 @@ pub fn authorize(
         AccessCapability::ConfigureInstallationSettings
         | AccessCapability::BanInstallationUser
         | AccessCapability::ReactivateInstallationUser => context.installation_admin,
+        AccessCapability::AnonymizeInstallationAccount => {
+            context.installation_admin || context.organization_role == Some(OrganizationRole::Owner)
+        }
         AccessCapability::DeactivateOwnAccount => true,
         AccessCapability::ReadOrganizationDirectory => matches!(
             context.organization_role,
@@ -500,6 +504,7 @@ mod tests {
             AccessCapability::BanInstallationUser,
             AccessCapability::DeactivateOwnAccount,
             AccessCapability::ReactivateInstallationUser,
+            AccessCapability::AnonymizeInstallationAccount,
             AccessCapability::DownloadFullBackup,
         ];
 
@@ -567,6 +572,10 @@ mod tests {
                 &principal,
                 AccessCapability::ConfigureInstallationSettings
             ));
+            assert_eq!(
+                is_allowed(&principal, AccessCapability::AnonymizeInstallationAccount),
+                role == OrganizationRole::Owner
+            );
         }
     }
 
@@ -633,6 +642,14 @@ mod tests {
         assert!(is_allowed(
             &installation_admin,
             AccessCapability::ReactivateInstallationUser
+        ));
+        assert!(is_allowed(
+            &installation_admin,
+            AccessCapability::AnonymizeInstallationAccount
+        ));
+        assert!(!is_allowed(
+            &member,
+            AccessCapability::AnonymizeInstallationAccount
         ));
     }
 

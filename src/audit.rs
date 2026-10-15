@@ -50,6 +50,7 @@ pub enum AuditEventKind {
     UserUnbanned,
     UserDisabled,
     UserReactivated,
+    UserAnonymized,
 }
 
 impl AuditEventKind {
@@ -87,6 +88,7 @@ impl AuditEventKind {
             Self::UserUnbanned => "auth.user.unbanned",
             Self::UserDisabled => "auth.user.disabled",
             Self::UserReactivated => "auth.user.reactivated",
+            Self::UserAnonymized => "auth.user.anonymized",
         }
     }
 }
