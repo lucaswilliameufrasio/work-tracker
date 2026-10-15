@@ -37,8 +37,13 @@ pub enum AuditEventKind {
     ProjectMemberAdded,
     ProjectMemberRoleChanged,
     ProjectMemberRemoved,
+    OrganizationMemberAdded,
     OrganizationMemberRoleChanged,
     OrganizationMemberRemoved,
+    OrganizationInviteCreated,
+    OrganizationInviteReissued,
+    OrganizationInviteCanceled,
+    OrganizationInviteAccepted,
 }
 
 impl AuditEventKind {
@@ -65,8 +70,13 @@ impl AuditEventKind {
             Self::ProjectMemberAdded => "project.member.added",
             Self::ProjectMemberRoleChanged => "project.member.role_changed",
             Self::ProjectMemberRemoved => "project.member.removed",
+            Self::OrganizationMemberAdded => "organization.member.added",
             Self::OrganizationMemberRoleChanged => "organization.member.role_changed",
             Self::OrganizationMemberRemoved => "organization.member.removed",
+            Self::OrganizationInviteCreated => "organization.invite.created",
+            Self::OrganizationInviteReissued => "organization.invite.reissued",
+            Self::OrganizationInviteCanceled => "organization.invite.canceled",
+            Self::OrganizationInviteAccepted => "organization.invite.accepted",
         }
     }
 }
@@ -195,6 +205,18 @@ impl AuditEventTarget {
     pub fn mfa_recovery_session(id: impl Into<String>) -> Self {
         Self {
             kind: "mfa_recovery_session",
+            id: id.into(),
+            subject_user_id: None,
+            project_role_before: None,
+            project_role_after: None,
+            organization_role_before: None,
+            organization_role_after: None,
+        }
+    }
+
+    pub fn organization_invite(id: impl Into<String>) -> Self {
+        Self {
+            kind: "invite",
             id: id.into(),
             subject_user_id: None,
             project_role_before: None,

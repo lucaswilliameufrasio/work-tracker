@@ -4,6 +4,7 @@ pub mod auth;
 pub mod config;
 pub mod db;
 pub mod http;
+pub mod invitations;
 pub mod issues;
 pub mod organizations;
 pub mod projects;
