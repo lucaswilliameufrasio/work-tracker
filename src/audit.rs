@@ -1,3 +1,5 @@
+use std::fmt;
+
 use chrono::{DateTime, Utc};
 use sqlx::{Sqlite, Transaction};
 use thiserror::Error;
@@ -44,6 +46,8 @@ pub enum AuditEventKind {
     OrganizationInviteReissued,
     OrganizationInviteCanceled,
     OrganizationInviteAccepted,
+    UserBanned,
+    UserUnbanned,
 }
 
 impl AuditEventKind {
@@ -77,6 +81,8 @@ impl AuditEventKind {
             Self::OrganizationInviteReissued => "organization.invite.reissued",
             Self::OrganizationInviteCanceled => "organization.invite.canceled",
             Self::OrganizationInviteAccepted => "organization.invite.accepted",
+            Self::UserBanned => "auth.user.banned",
+            Self::UserUnbanned => "auth.user.unbanned",
         }
     }
 }
@@ -96,7 +102,7 @@ impl AuditEventResult {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct AuditEventTarget {
     kind: &'static str,
     id: String,
@@ -105,6 +111,23 @@ pub struct AuditEventTarget {
     project_role_after: Option<String>,
     organization_role_before: Option<String>,
     organization_role_after: Option<String>,
+    reason: Option<String>,
+}
+
+impl fmt::Debug for AuditEventTarget {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AuditEventTarget")
+            .field("kind", &self.kind)
+            .field("id", &self.id)
+            .field("subject_user_id", &self.subject_user_id)
+            .field("project_role_before", &self.project_role_before)
+            .field("project_role_after", &self.project_role_after)
+            .field("organization_role_before", &self.organization_role_before)
+            .field("organization_role_after", &self.organization_role_after)
+            .field("reason_present", &self.reason.is_some())
+            .finish()
+    }
 }
 
 impl AuditEventTarget {
@@ -117,6 +140,20 @@ impl AuditEventTarget {
             project_role_after: None,
             organization_role_before: None,
             organization_role_after: None,
+            reason: None,
+        }
+    }
+
+    pub fn user_ban(id: impl Into<String>, reason: impl Into<String>) -> Self {
+        Self {
+            kind: "user",
+            id: id.into(),
+            subject_user_id: None,
+            project_role_before: None,
+            project_role_after: None,
+            organization_role_before: None,
+            organization_role_after: None,
+            reason: Some(reason.into()),
         }
     }
 
@@ -129,6 +166,7 @@ impl AuditEventTarget {
             project_role_after: None,
             organization_role_before: None,
             organization_role_after: None,
+            reason: None,
         }
     }
 
@@ -141,6 +179,7 @@ impl AuditEventTarget {
             project_role_after: None,
             organization_role_before: None,
             organization_role_after: None,
+            reason: None,
         }
     }
 
@@ -153,6 +192,7 @@ impl AuditEventTarget {
             project_role_after: None,
             organization_role_before: None,
             organization_role_after: None,
+            reason: None,
         }
     }
 
@@ -170,6 +210,7 @@ impl AuditEventTarget {
             project_role_after: role_after.map(project_role_as_str).map(str::to_owned),
             organization_role_before: None,
             organization_role_after: None,
+            reason: None,
         }
     }
 
@@ -187,6 +228,7 @@ impl AuditEventTarget {
             project_role_after: None,
             organization_role_before: role_before.map(organization_role_as_str).map(str::to_owned),
             organization_role_after: role_after.map(organization_role_as_str).map(str::to_owned),
+            reason: None,
         }
     }
 
@@ -199,6 +241,7 @@ impl AuditEventTarget {
             project_role_after: None,
             organization_role_before: None,
             organization_role_after: None,
+            reason: None,
         }
     }
 
@@ -211,6 +254,7 @@ impl AuditEventTarget {
             project_role_after: None,
             organization_role_before: None,
             organization_role_after: None,
+            reason: None,
         }
     }
 
@@ -223,14 +267,16 @@ impl AuditEventTarget {
             project_role_after: None,
             organization_role_before: None,
             organization_role_after: None,
+            reason: None,
         }
     }
 }
 
 /// Appends a typed event to a caller-owned transaction so the event and the
 /// protected mutation commit or roll back together. Membership events may
-/// include only the affected user and before/after membership roles; there is
-/// no arbitrary details field for passwords, tokens, addresses, or content.
+/// include only the affected user and before/after membership roles. Account
+/// bans additionally carry their required, bounded reason; there is no
+/// arbitrary details field for passwords, tokens, addresses, or content.
 pub async fn append_in_transaction(
     transaction: &mut Transaction<'_, Sqlite>,
     actor_user_id: Option<&str>,
@@ -242,10 +288,10 @@ pub async fn append_in_transaction(
     let event_id = Uuid::now_v7().to_string();
     sqlx::query(
         "INSERT INTO audit_events \
-          (id, event_kind, result, actor_user_id, target_kind, target_id, \
-           subject_user_id, project_role_before, project_role_after, \
-           organization_role_before, organization_role_after, occurred_at) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+           (id, event_kind, result, actor_user_id, target_kind, target_id, \
+            subject_user_id, project_role_before, project_role_after, \
+            organization_role_before, organization_role_after, reason, occurred_at) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&event_id)
     .bind(event_kind.as_str())
@@ -258,6 +304,7 @@ pub async fn append_in_transaction(
     .bind(&target.project_role_after)
     .bind(&target.organization_role_before)
     .bind(&target.organization_role_after)
+    .bind(&target.reason)
     .bind(format_timestamp(occurred_at))
     .execute(&mut **transaction)
     .await?;

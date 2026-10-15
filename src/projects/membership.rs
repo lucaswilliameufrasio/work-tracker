@@ -41,6 +41,8 @@ pub enum ProjectMembershipError {
     GuestCannotBeManager,
     #[error("the last project manager must be replaced before removal or demotion")]
     LastManager,
+    #[error("the project is read-only until an active manager is assigned")]
+    ActiveManagerRequired,
     #[error("persisted project membership role is invalid")]
     CorruptMembership,
     #[error("authorization context could not be loaded: {0}")]
@@ -180,6 +182,11 @@ impl ProjectMembershipStore {
             return Ok(ProjectMembershipChange::Unchanged);
         }
 
+        if !actor_context.project_has_active_manager() && role != ProjectRole::Manager {
+            transaction.rollback().await?;
+            return Err(ProjectMembershipError::ActiveManagerRequired);
+        }
+
         if (current_role == Some(ProjectRole::Manager) || role == ProjectRole::Manager)
             && !can_assign_project_manager(&actor_context)
         {
@@ -292,6 +299,11 @@ impl ProjectMembershipStore {
             transaction.rollback().await?;
             return Err(ProjectMembershipError::MembershipNotFound);
         };
+
+        if !actor_context.project_has_active_manager() {
+            transaction.rollback().await?;
+            return Err(ProjectMembershipError::ActiveManagerRequired);
+        }
 
         if current_role == ProjectRole::Manager && !can_assign_project_manager(&actor_context) {
             transaction.rollback().await?;

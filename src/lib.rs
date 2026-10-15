@@ -1,4 +1,5 @@
 pub mod access;
+pub mod accounts;
 pub mod audit;
 pub mod auth;
 pub mod config;

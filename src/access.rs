@@ -51,6 +51,7 @@ pub struct AccessContext {
     organization_role: Option<OrganizationRole>,
     project_role: Option<ProjectRole>,
     project_archived: bool,
+    project_has_active_manager: bool,
     recent_privileged_proof: bool,
 }
 
@@ -74,12 +75,35 @@ pub enum AccessStoreError {
 }
 
 impl AccessContext {
+    /// Constructs a context without project-state evidence. Project writes
+    /// therefore fail closed until an `AccessStore` load confirms an active
+    /// project manager.
     pub fn new(
         account_state: AccountState,
         installation_admin: bool,
         organization_role: Option<OrganizationRole>,
         project_role: Option<ProjectRole>,
         project_archived: bool,
+        recent_privileged_proof: bool,
+    ) -> Result<Self, AccessContextError> {
+        Self::with_project_manager_state(
+            account_state,
+            installation_admin,
+            organization_role,
+            project_role,
+            project_archived,
+            false,
+            recent_privileged_proof,
+        )
+    }
+
+    fn with_project_manager_state(
+        account_state: AccountState,
+        installation_admin: bool,
+        organization_role: Option<OrganizationRole>,
+        project_role: Option<ProjectRole>,
+        project_archived: bool,
+        project_has_active_manager: bool,
         recent_privileged_proof: bool,
     ) -> Result<Self, AccessContextError> {
         if project_role.is_some() && organization_role.is_none() {
@@ -103,6 +127,7 @@ impl AccessContext {
             organization_role,
             project_role,
             project_archived,
+            project_has_active_manager,
             recent_privileged_proof,
         })
     }
@@ -117,6 +142,10 @@ impl AccessContext {
 
     pub fn project_role(&self) -> Option<ProjectRole> {
         self.project_role
+    }
+
+    pub fn project_has_active_manager(&self) -> bool {
+        self.project_has_active_manager
     }
 }
 
@@ -225,11 +254,12 @@ async fn load_organization_context_on_connection(
         _ => return Err(AccessStoreError::CorruptState),
     };
 
-    let context = AccessContext::new(
+    let context = AccessContext::with_project_manager_state(
         account_state,
         installation_admin,
         organization_role,
         None,
+        false,
         false,
         recent_privileged_proof,
     )
@@ -250,9 +280,16 @@ async fn load_project_context_on_connection(
                 EXISTS (SELECT 1 FROM installation_admins \
                         WHERE installation_admins.user_id = users.id) \
                     AS installation_admin, \
-                project_members.role AS project_role, \
+                 project_members.role AS project_role, \
                 CASE WHEN projects.archived_at IS NULL THEN 0 ELSE 1 END \
-                    AS project_archived \
+                    AS project_archived, \
+                EXISTS ( \
+                    SELECT 1 FROM project_members AS managers \
+                    JOIN users AS manager_users ON manager_users.id = managers.user_id \
+                    WHERE managers.project_id = projects.id \
+                      AND managers.role = 'manager' \
+                      AND manager_users.state = 'active' \
+                ) AS project_has_active_manager \
          FROM projects \
          JOIN users ON users.id = ? \
          LEFT JOIN organization_members \
@@ -280,13 +317,15 @@ async fn load_project_context_on_connection(
     let raw_project_role = row.try_get::<Option<String>, _>("project_role")?;
     let project_role = parse_project_role(raw_project_role.as_deref())?;
     let project_archived = parse_boolean_column(&row, "project_archived")?;
+    let project_has_active_manager = parse_boolean_column(&row, "project_has_active_manager")?;
 
-    let context = AccessContext::new(
+    let context = AccessContext::with_project_manager_state(
         account_state,
         installation_admin,
         organization_role,
         project_role,
         project_archived,
+        project_has_active_manager,
         recent_privileged_proof,
     )
     .map_err(|_| AccessStoreError::CorruptState)?;
@@ -360,7 +399,7 @@ pub fn authorize(
         Some(OrganizationRole::Owner | OrganizationRole::Admin)
     );
     let is_project_manager = context.project_role == Some(ProjectRole::Manager);
-    let project_is_mutable = !context.project_archived;
+    let project_is_mutable = !context.project_archived && context.project_has_active_manager;
 
     let allowed = match capability {
         AccessCapability::ReadOperationalHealth => context.installation_admin,
@@ -389,7 +428,7 @@ pub fn authorize(
         }
         AccessCapability::ManageProjectSchema => project_is_mutable && is_project_manager,
         AccessCapability::ManageProjectMembership => {
-            project_is_mutable && (is_org_admin || is_project_manager)
+            !context.project_archived && (is_org_admin || is_project_manager)
         }
         AccessCapability::LeaveProject => project_is_mutable && context.project_role.is_some(),
         AccessCapability::ChangeProjectArchive => is_org_admin || is_project_manager,
@@ -421,12 +460,13 @@ mod tests {
         project_archived: bool,
         recent_privileged_proof: bool,
     ) -> AccessContext {
-        AccessContext::new(
+        AccessContext::with_project_manager_state(
             state,
             installation_admin,
             organization_role,
             project_role,
             project_archived,
+            true,
             recent_privileged_proof,
         )
         .unwrap()
@@ -628,6 +668,44 @@ mod tests {
             AccessCapability::ManageProjectMembership
         ));
         assert!(!is_allowed(&viewer, AccessCapability::ExportProject));
+    }
+
+    #[test]
+    fn managerless_projects_are_read_only_but_organization_admins_can_repair_membership() {
+        let member = AccessContext::with_project_manager_state(
+            AccountState::Active,
+            false,
+            Some(OrganizationRole::Member),
+            Some(ProjectRole::Member),
+            false,
+            false,
+            false,
+        )
+        .unwrap();
+        assert!(is_allowed(&member, AccessCapability::ReadProjectContent));
+        assert!(!is_allowed(&member, AccessCapability::MutateIssues));
+        assert!(!is_allowed(&member, AccessCapability::ManageProjectSchema));
+        assert!(!is_allowed(&member, AccessCapability::LeaveProject));
+
+        let administrator = AccessContext::with_project_manager_state(
+            AccountState::Active,
+            false,
+            Some(OrganizationRole::Admin),
+            None,
+            false,
+            false,
+            false,
+        )
+        .unwrap();
+        assert!(is_allowed(
+            &administrator,
+            AccessCapability::ManageProjectMembership
+        ));
+        assert!(is_allowed(
+            &administrator,
+            AccessCapability::ChangeProjectArchive
+        ));
+        assert!(!is_allowed(&administrator, AccessCapability::MutateIssues));
     }
 
     #[test]
