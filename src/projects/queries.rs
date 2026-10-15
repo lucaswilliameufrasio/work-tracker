@@ -56,7 +56,85 @@ pub struct ProjectListPage {
     pub next_after_project_key: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectOperationalSummary {
+    pub id: String,
+    pub project_key: String,
+    pub name: String,
+    pub archived_at: Option<DateTime<Utc>>,
+    pub membership_count: i64,
+    pub issue_count: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectOperationalPage {
+    pub items: Vec<ProjectOperationalSummary>,
+    pub next_after_project_key: Option<String>,
+}
+
 impl ProjectStore {
+    /// Operational metadata only: owner/admin authority never implies issue
+    /// content access. Counts include all retained memberships and issues.
+    pub async fn list_operational_catalog(
+        &self,
+        actor_user_id: &str,
+        options: ProjectListOptions<'_>,
+    ) -> Result<ProjectOperationalPage, ProjectReadError> {
+        validate_options(options)?;
+        let mut transaction = self.pool.begin().await?;
+        let actor = AccessStore::load_organization_context_in_transaction(
+            &mut transaction,
+            actor_user_id,
+            false,
+        )
+        .await?
+        .ok_or(ProjectReadError::Unavailable)?;
+        if authorize(&actor, AccessCapability::ReadProjectOperationalCatalog).is_err() {
+            return Err(ProjectReadError::Unavailable);
+        }
+        let rows = sqlx::query(
+            "SELECT projects.id, projects.project_key, projects.name, projects.archived_at, \
+                    (SELECT COUNT(*) FROM project_members \
+                     WHERE project_members.project_id = projects.id) AS membership_count, \
+                    (SELECT COUNT(*) FROM issues \
+                     WHERE issues.project_id = projects.id) AS issue_count \
+             FROM projects WHERE projects.organization_id = 1 \
+               AND (? OR projects.archived_at IS NULL) \
+               AND projects.project_key > COALESCE(?, '') \
+             ORDER BY projects.project_key ASC LIMIT ?",
+        )
+        .bind(options.include_archived)
+        .bind(options.after_project_key)
+        .bind(i64::from(options.page_size) + 1)
+        .fetch_all(&mut *transaction)
+        .await?;
+        let has_more = rows.len() > usize::from(options.page_size);
+        let mut items = Vec::with_capacity(rows.len().min(usize::from(options.page_size)));
+        for row in rows.into_iter().take(usize::from(options.page_size)) {
+            let project_key: String = row.try_get("project_key")?;
+            let name: String = row.try_get("name")?;
+            validate_project_fields(&project_key, &name)?;
+            items.push(ProjectOperationalSummary {
+                id: row.try_get("id")?,
+                project_key,
+                name,
+                archived_at: parse_archive_timestamp(row.try_get("archived_at")?)?,
+                membership_count: row.try_get("membership_count")?,
+                issue_count: row.try_get("issue_count")?,
+            });
+        }
+        let next_after_project_key = if has_more {
+            items.last().map(|project| project.project_key.clone())
+        } else {
+            None
+        };
+        transaction.commit().await?;
+        Ok(ProjectOperationalPage {
+            items,
+            next_after_project_key,
+        })
+    }
+
     /// Lists only projects with explicit current read access. The actor ID must
     /// originate from a validated session; organization/admin status alone never
     /// creates project-content access. Each call uses one authorization snapshot.
@@ -65,12 +143,7 @@ impl ProjectStore {
         actor_user_id: &str,
         options: ProjectListOptions<'_>,
     ) -> Result<ProjectListPage, ProjectReadError> {
-        if !(1..=100).contains(&options.page_size) {
-            return Err(ProjectReadError::InvalidPageSize);
-        }
-        if let Some(key) = options.after_project_key {
-            validate_project_key(key).map_err(|_| ProjectReadError::InvalidCursor)?;
-        }
+        validate_options(options)?;
 
         let mut transaction = self.pool.begin().await?;
         let actor = AccessStore::load_organization_context_in_transaction(
@@ -121,19 +194,9 @@ impl ProjectStore {
                 .project_role()
                 .ok_or(ProjectReadError::Unavailable)?;
             let project_key: String = row.try_get("project_key")?;
-            validate_project_key(&project_key).map_err(|_| ProjectReadError::CorruptData)?;
             let name: String = row.try_get("name")?;
-            if name.trim().is_empty() {
-                return Err(ProjectReadError::CorruptData);
-            }
-            let archived_at = match row.try_get::<Option<String>, _>("archived_at")? {
-                Some(timestamp) => Some(
-                    DateTime::parse_from_rfc3339(&timestamp)
-                        .map_err(|_| ProjectReadError::CorruptData)?
-                        .with_timezone(&Utc),
-                ),
-                None => None,
-            };
+            validate_project_fields(&project_key, &name)?;
+            let archived_at = parse_archive_timestamp(row.try_get("archived_at")?)?;
             items.push(ProjectSummary {
                 id,
                 project_key,
@@ -152,5 +215,36 @@ impl ProjectStore {
             items,
             next_after_project_key,
         })
+    }
+}
+
+fn validate_options(options: ProjectListOptions<'_>) -> Result<(), ProjectReadError> {
+    if !(1..=100).contains(&options.page_size) {
+        return Err(ProjectReadError::InvalidPageSize);
+    }
+    if let Some(key) = options.after_project_key {
+        validate_project_key(key).map_err(|_| ProjectReadError::InvalidCursor)?;
+    }
+    Ok(())
+}
+
+fn validate_project_fields(key: &str, name: &str) -> Result<(), ProjectReadError> {
+    validate_project_key(key).map_err(|_| ProjectReadError::CorruptData)?;
+    if name.trim().is_empty() {
+        return Err(ProjectReadError::CorruptData);
+    }
+    Ok(())
+}
+
+fn parse_archive_timestamp(
+    value: Option<String>,
+) -> Result<Option<DateTime<Utc>>, ProjectReadError> {
+    match value {
+        Some(timestamp) => Ok(Some(
+            DateTime::parse_from_rfc3339(&timestamp)
+                .map_err(|_| ProjectReadError::CorruptData)?
+                .with_timezone(&Utc),
+        )),
+        None => Ok(None),
     }
 }

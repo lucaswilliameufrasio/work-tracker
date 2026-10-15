@@ -6,7 +6,10 @@ use uuid::Uuid;
 pub mod membership;
 mod queries;
 
-pub use queries::{ProjectListOptions, ProjectListPage, ProjectReadError, ProjectSummary};
+pub use queries::{
+    ProjectListOptions, ProjectListPage, ProjectOperationalPage, ProjectOperationalSummary,
+    ProjectReadError, ProjectSummary,
+};
 
 use crate::{
     access::{AccessCapability, AccessStore, AccessStoreError, authorize},

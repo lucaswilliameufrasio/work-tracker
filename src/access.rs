@@ -28,6 +28,7 @@ pub enum AccessCapability {
     ConfigureInstallationSettings,
     ReadOperationalHealth,
     ReadOrganizationDirectory,
+    ReadProjectOperationalCatalog,
     ManageOrganizationMembership,
     LeaveOrganization,
     TransferOrganizationOwnership,
@@ -406,6 +407,7 @@ pub fn authorize(
 
     let allowed = match capability {
         AccessCapability::ReadOperationalHealth => context.installation_admin,
+        AccessCapability::ReadProjectOperationalCatalog => is_org_admin,
         AccessCapability::ConfigureInstallationSettings
         | AccessCapability::BanInstallationUser
         | AccessCapability::ReactivateInstallationUser => context.installation_admin,
@@ -489,6 +491,7 @@ mod tests {
             AccessCapability::ConfigureInstallationSettings,
             AccessCapability::ReadOperationalHealth,
             AccessCapability::ReadOrganizationDirectory,
+            AccessCapability::ReadProjectOperationalCatalog,
             AccessCapability::ManageOrganizationMembership,
             AccessCapability::LeaveOrganization,
             AccessCapability::TransferOrganizationOwnership,
@@ -536,6 +539,10 @@ mod tests {
                 &principal,
                 AccessCapability::ReadOrganizationDirectory
             ));
+            assert!(is_allowed(
+                &principal,
+                AccessCapability::ReadProjectOperationalCatalog
+            ));
             assert_eq!(
                 is_allowed(&principal, AccessCapability::TransferOrganizationOwnership),
                 role == OrganizationRole::Owner
@@ -576,6 +583,28 @@ mod tests {
                 is_allowed(&principal, AccessCapability::AnonymizeInstallationAccount),
                 role == OrganizationRole::Owner
             );
+        }
+    }
+
+    #[test]
+    fn operational_project_catalog_does_not_follow_installation_or_project_privileges() {
+        for role in [OrganizationRole::Member, OrganizationRole::Guest] {
+            let principal = context(
+                AccountState::Active,
+                role == OrganizationRole::Member,
+                Some(role),
+                Some(if role == OrganizationRole::Guest {
+                    ProjectRole::Member
+                } else {
+                    ProjectRole::Manager
+                }),
+                false,
+                false,
+            );
+            assert!(!is_allowed(
+                &principal,
+                AccessCapability::ReadProjectOperationalCatalog
+            ));
         }
     }
 
