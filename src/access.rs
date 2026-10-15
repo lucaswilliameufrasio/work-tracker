@@ -29,6 +29,7 @@ pub enum AccessCapability {
     ReadOperationalHealth,
     ReadOrganizationDirectory,
     ManageOrganizationMembership,
+    LeaveOrganization,
     TransferOrganizationOwnership,
     CreateProject,
     ReadProjectContent,
@@ -373,6 +374,7 @@ pub fn authorize(
         AccessCapability::ManageOrganizationMembership | AccessCapability::CreateProject => {
             is_org_admin
         }
+        AccessCapability::LeaveOrganization => context.organization_role.is_some(),
         AccessCapability::TransferOrganizationOwnership => {
             context.organization_role == Some(OrganizationRole::Owner)
         }
@@ -441,6 +443,7 @@ mod tests {
             AccessCapability::ReadOperationalHealth,
             AccessCapability::ReadOrganizationDirectory,
             AccessCapability::ManageOrganizationMembership,
+            AccessCapability::LeaveOrganization,
             AccessCapability::TransferOrganizationOwnership,
             AccessCapability::CreateProject,
             AccessCapability::ReadProjectContent,
@@ -478,6 +481,7 @@ mod tests {
                 &principal,
                 AccessCapability::ManageOrganizationMembership
             ));
+            assert!(is_allowed(&principal, AccessCapability::LeaveOrganization));
             assert!(is_allowed(
                 &principal,
                 AccessCapability::ReadOrganizationDirectory
@@ -519,6 +523,38 @@ mod tests {
                 AccessCapability::ConfigureInstallationSettings
             ));
         }
+    }
+
+    #[test]
+    fn active_organization_members_can_request_self_exit() {
+        for role in [
+            OrganizationRole::Owner,
+            OrganizationRole::Admin,
+            OrganizationRole::Member,
+            OrganizationRole::Guest,
+        ] {
+            let principal = context(AccountState::Active, false, Some(role), None, false, false);
+            assert!(is_allowed(&principal, AccessCapability::LeaveOrganization));
+        }
+
+        let installation_admin = context(
+            AccountState::Active,
+            true,
+            Some(OrganizationRole::Member),
+            None,
+            false,
+            false,
+        );
+        assert!(is_allowed(
+            &installation_admin,
+            AccessCapability::LeaveOrganization
+        ));
+
+        let unaffiliated = context(AccountState::Active, false, None, None, false, false);
+        assert!(!is_allowed(
+            &unaffiliated,
+            AccessCapability::LeaveOrganization
+        ));
     }
 
     #[test]

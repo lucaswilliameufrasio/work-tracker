@@ -15,6 +15,7 @@ pub enum OrganizationMembershipChange {
     RoleChanged,
     Unchanged,
     Removed,
+    Left,
 }
 
 #[derive(Debug, Error)]
@@ -273,89 +274,11 @@ impl OrganizationMembershipStore {
             transaction.rollback().await?;
             return Err(OrganizationMembershipError::MembershipNotFound);
         };
-        if current_role == OrganizationRole::Owner {
-            transaction.rollback().await?;
-            return Err(OrganizationMembershipError::OwnerMustTransferOwnership);
-        }
-        if has_installation_admin_grant(&mut transaction, target_user_id).await? {
-            transaction.rollback().await?;
-            return Err(OrganizationMembershipError::InstallationAdminMustBeChangedFirst);
-        }
-
-        let project_rows = sqlx::query(
-            "SELECT project_members.project_id, project_members.role, \
-                    (SELECT COUNT(*) FROM project_members AS managers \
-                     WHERE managers.project_id = project_members.project_id \
-                       AND managers.role = 'manager') AS manager_count \
-             FROM project_members \
-             WHERE project_members.organization_id = 1 \
-               AND project_members.user_id = ? \
-             ORDER BY project_members.project_id",
-        )
-        .bind(target_user_id)
-        .fetch_all(&mut *transaction)
-        .await?;
-
-        let mut memberships = Vec::with_capacity(project_rows.len());
-        for row in project_rows {
-            let project_id = row.try_get::<String, _>("project_id")?;
-            let role = parse_project_role(&row.try_get::<String, _>("role")?)?;
-            let manager_count = row.try_get::<i64, _>("manager_count")?;
-            if role == ProjectRole::Manager && manager_count <= 1 {
-                transaction.rollback().await?;
-                return Err(OrganizationMembershipError::LastProjectManager);
-            }
-            memberships.push((project_id, role));
-        }
-
-        for (project_id, project_role) in memberships {
-            let delete = sqlx::query(
-                "DELETE FROM project_members \
-                 WHERE project_id = ? AND user_id = ? AND organization_id = 1",
-            )
-            .bind(&project_id)
-            .bind(target_user_id)
-            .execute(&mut *transaction)
-            .await?;
-            if delete.rows_affected() != 1 {
-                transaction.rollback().await?;
-                return Err(OrganizationMembershipError::CorruptMembership);
-            }
-            audit::append_in_transaction(
-                &mut transaction,
-                Some(actor_user_id),
-                AuditEventKind::ProjectMemberRemoved,
-                AuditEventResult::Success,
-                &AuditEventTarget::project_membership(
-                    project_id,
-                    target_user_id,
-                    Some(project_role),
-                    None,
-                ),
-                now,
-            )
-            .await?;
-        }
-
-        let delete = sqlx::query(
-            "DELETE FROM organization_members \
-             WHERE organization_id = 1 AND user_id = ? AND role = ?",
-        )
-        .bind(target_user_id)
-        .bind(organization_role_as_str(current_role))
-        .execute(&mut *transaction)
-        .await?;
-        if delete.rows_affected() != 1 {
-            transaction.rollback().await?;
-            return Err(OrganizationMembershipError::CorruptMembership);
-        }
-        append_organization_membership_event(
+        remove_membership_in_transaction(
             &mut transaction,
             actor_user_id,
             target_user_id,
-            AuditEventKind::OrganizationMemberRemoved,
-            Some(current_role),
-            None,
+            current_role,
             now,
         )
         .await?;
@@ -363,6 +286,124 @@ impl OrganizationMembershipStore {
 
         Ok(OrganizationMembershipChange::Removed)
     }
+
+    /// Allows an active member to leave the organization. Their project
+    /// memberships are removed atomically; ownership, installation-admin and
+    /// last-project-manager safeguards still apply.
+    pub async fn leave(
+        &self,
+        user_id: &str,
+        now: DateTime<Utc>,
+    ) -> Result<OrganizationMembershipChange, OrganizationMembershipError> {
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let context = load_organization_actor(&mut transaction, user_id).await?;
+        let Some(current_role) = context.organization_role() else {
+            transaction.rollback().await?;
+            return Err(OrganizationMembershipError::MembershipNotFound);
+        };
+        if authorize(&context, AccessCapability::LeaveOrganization).is_err() {
+            transaction.rollback().await?;
+            return Err(OrganizationMembershipError::Forbidden);
+        }
+
+        remove_membership_in_transaction(&mut transaction, user_id, user_id, current_role, now)
+            .await?;
+        transaction.commit().await?;
+
+        Ok(OrganizationMembershipChange::Left)
+    }
+}
+
+async fn remove_membership_in_transaction(
+    transaction: &mut Transaction<'_, sqlx::Sqlite>,
+    actor_user_id: &str,
+    target_user_id: &str,
+    current_role: OrganizationRole,
+    now: DateTime<Utc>,
+) -> Result<(), OrganizationMembershipError> {
+    if current_role == OrganizationRole::Owner {
+        return Err(OrganizationMembershipError::OwnerMustTransferOwnership);
+    }
+    if has_installation_admin_grant(transaction, target_user_id).await? {
+        return Err(OrganizationMembershipError::InstallationAdminMustBeChangedFirst);
+    }
+
+    let project_rows = sqlx::query(
+        "SELECT project_members.project_id, project_members.role, \
+                (SELECT COUNT(*) FROM project_members AS managers \
+                 WHERE managers.project_id = project_members.project_id \
+                   AND managers.role = 'manager') AS manager_count \
+         FROM project_members \
+         WHERE project_members.organization_id = 1 \
+           AND project_members.user_id = ? \
+         ORDER BY project_members.project_id",
+    )
+    .bind(target_user_id)
+    .fetch_all(&mut **transaction)
+    .await?;
+
+    let mut memberships = Vec::with_capacity(project_rows.len());
+    for row in project_rows {
+        let project_id = row.try_get::<String, _>("project_id")?;
+        let role = parse_project_role(&row.try_get::<String, _>("role")?)?;
+        let manager_count = row.try_get::<i64, _>("manager_count")?;
+        if role == ProjectRole::Manager && manager_count <= 1 {
+            return Err(OrganizationMembershipError::LastProjectManager);
+        }
+        memberships.push((project_id, role));
+    }
+
+    for (project_id, project_role) in memberships {
+        let delete = sqlx::query(
+            "DELETE FROM project_members \
+             WHERE project_id = ? AND user_id = ? AND organization_id = 1",
+        )
+        .bind(&project_id)
+        .bind(target_user_id)
+        .execute(&mut **transaction)
+        .await?;
+        if delete.rows_affected() != 1 {
+            return Err(OrganizationMembershipError::CorruptMembership);
+        }
+        audit::append_in_transaction(
+            transaction,
+            Some(actor_user_id),
+            AuditEventKind::ProjectMemberRemoved,
+            AuditEventResult::Success,
+            &AuditEventTarget::project_membership(
+                project_id,
+                target_user_id,
+                Some(project_role),
+                None,
+            ),
+            now,
+        )
+        .await?;
+    }
+
+    let delete = sqlx::query(
+        "DELETE FROM organization_members \
+         WHERE organization_id = 1 AND user_id = ? AND role = ?",
+    )
+    .bind(target_user_id)
+    .bind(organization_role_as_str(current_role))
+    .execute(&mut **transaction)
+    .await?;
+    if delete.rows_affected() != 1 {
+        return Err(OrganizationMembershipError::CorruptMembership);
+    }
+    append_organization_membership_event(
+        transaction,
+        actor_user_id,
+        target_user_id,
+        AuditEventKind::OrganizationMemberRemoved,
+        Some(current_role),
+        None,
+        now,
+    )
+    .await?;
+
+    Ok(())
 }
 
 struct ProjectMembershipState {
