@@ -3,7 +3,7 @@ use std::{error::Error, io::IsTerminal, sync::Arc};
 use chrono::Utc;
 use clap::Parser;
 use puxiri::{
-    auth::{master_key::MasterKeyStore, setup::SetupTokenStore},
+    auth::{master_key::MasterKeyStore, session::SessionPolicy, setup::SetupTokenStore},
     config::{Cli, Command},
     db::Database,
     http,
@@ -23,13 +23,22 @@ async fn main() -> Result<(), Box<dyn Error>> {
             bind,
             data_dir,
             master_key_path,
+            browser_origin,
         } => {
             let database = Arc::new(Database::open(&data_dir).await?);
             let master_key_path = master_key_path.unwrap_or_else(|| data_dir.join("master.key"));
-            let _master_key = MasterKeyStore::load_or_create(&master_key_path)?;
+            let master_key = MasterKeyStore::load_or_create(&master_key_path)?;
+            let router = match browser_origin {
+                Some(origin) => http::router_with_browser_sessions(
+                    database.clone(),
+                    http::browser_session::BrowserSessionSecurity::from_origin(origin, master_key),
+                    SessionPolicy::initial(chrono::TimeDelta::minutes(5))?,
+                ),
+                None => http::router(database.clone()),
+            };
             let listener = tokio::net::TcpListener::bind(bind).await?;
-            tracing::info!(address = %listener.local_addr()?, "development spike listening; authentication and work features are not implemented");
-            axum::serve(listener, http::router(database.clone()))
+            tracing::info!(address = %listener.local_addr()?, "development server listening; login, signup and onboarding remain unavailable");
+            axum::serve(listener, router)
                 .with_graceful_shutdown(shutdown_signal())
                 .await?;
             database.close().await;

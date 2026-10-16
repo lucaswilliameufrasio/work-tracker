@@ -41,8 +41,16 @@ pub struct BrowserSessionSecurity {
     master_key: MasterKey,
 }
 
-impl BrowserSessionSecurity {
-    pub fn new(origin: &str, master_key: MasterKey) -> Result<Self, BrowserSessionError> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BrowserOrigin {
+    origin: String,
+    authority: String,
+}
+
+impl std::str::FromStr for BrowserOrigin {
+    type Err = BrowserSessionError;
+
+    fn from_str(origin: &str) -> Result<Self, Self::Err> {
         let uri: Uri = origin
             .parse()
             .map_err(|_| BrowserSessionError::InvalidOriginConfiguration)?;
@@ -89,8 +97,27 @@ impl BrowserSessionSecurity {
         Ok(Self {
             origin: canonical_origin,
             authority,
-            master_key,
         })
+    }
+}
+
+impl BrowserOrigin {
+    pub fn as_str(&self) -> &str {
+        &self.origin
+    }
+}
+
+impl BrowserSessionSecurity {
+    pub fn new(origin: &str, master_key: MasterKey) -> Result<Self, BrowserSessionError> {
+        Ok(Self::from_origin(origin.parse()?, master_key))
+    }
+
+    pub fn from_origin(origin: BrowserOrigin, master_key: MasterKey) -> Self {
+        Self {
+            origin: origin.origin,
+            authority: origin.authority,
+            master_key,
+        }
     }
 
     pub fn canonical_origin(&self) -> &str {

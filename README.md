@@ -2,7 +2,7 @@
 
 Gestor de trabalho self hosted em desenvolvimento. Uma instalação, uma organização, SQLite local e frontend embutido no executável Rust.
 
-**Esta versão é um spike da Fase 0, não um produto pronto.** Apenas servidor, migrations, lock do diretório, saúde mínima e SPA funcionam. Login HTTP, wizard de setup protegido, Kanban, integrações e backup ainda não estão implementados. Não exponha na internet nem use dados reais.
+**Esta versão é um spike da Fase 0, não um produto pronto.** Por padrão serve apenas saúde mínima e SPA, com migrations e lock do diretório. Serviços internos e uma API read-only opt-in de projetos/sessão têm testes locais, mas login HTTP, wizard de setup protegido, Kanban, integrações e backup ainda não estão implementados. Não exponha na internet nem use dados reais.
 
 ## Desenvolvimento local
 
@@ -26,6 +26,8 @@ mise exec -- make build
 O binário contém HTML, JS, CSS, fontes e migrations. Pode ser executado fora do repositório, sem Node nem `web/dist`. SQLite/WAL/SHM devem permanecer em disco local, nunca NFS/S3. O binário deste spike ainda depende de bibliotecas do sistema; distribuição portátil será validada posteriormente.
 
 Opções de bootstrap implementadas: `--bind`/`PUXIRI_BIND` e `--data-dir`/`PUXIRI_DATA_DIR`. `RUST_LOG` controla os logs estruturados. Não passar segredos em URLs/argumentos. Encerre com Ctrl+C ou SIGTERM para fechar conexões graciosamente.
+
+`--browser-origin`/`PUXIRI_BROWSER_ORIGIN` permite optar explicitamente pelas rotas read-only `/api/v1/auth/session`, `/api/v1/projects` e `/api/v1/admin/projects`. Exige origem HTTPS canônica, Host correspondente e sessão atual no cookie Secure/HttpOnly host-only; sem a opção, essas rotas retornam 404. O binário não termina TLS, não cria contas/sessões por HTTP e não deve ser exposto publicamente: os testes usam contas/sessões sintéticas em SQLite temporário. Login/signup, mutações, onboarding e frontend autenticado continuam fechados. Não usar esse flag para contornar setup. Contrato e limites: [API browser de projetos](docs/browser-project-api-design.md).
 
 ## Validação
 
@@ -100,7 +102,7 @@ O fake MCP testa TTL de metadata controlado por `Cache-Control` e capped em 300s
 
 A fixture separa também trust review administrativo do snapshot e do consentimento: sem review não há code; metadata/nome/domínio continuam dados não confiáveis, callback loopback recebe warning e projetos não são escolhidos implicitamente. É só um view-model de teste, sem UI/admin real ou encoder HTML.
 
-Endpoints públicos deste spike: `/health/live` e `/health/ready`. Readiness retorna apenas `ready`/`not_ready`; não expõe caminhos, versão, usuários ou conteúdo.
+Endpoints públicos de saúde deste spike: `/health/live` e `/health/ready`. Readiness retorna apenas `ready`/`not_ready`; não expõe caminhos, versão, usuários ou conteúdo. As três rotas browser opt-in acima exigem cookie válido e continuam sem login/issuance HTTP.
 
 ## Plano e distribuição
 

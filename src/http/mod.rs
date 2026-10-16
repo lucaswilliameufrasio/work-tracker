@@ -11,23 +11,41 @@ use axum::{
 use rust_embed::RustEmbed;
 use serde::Serialize;
 use tower_http::set_header::SetResponseHeaderLayer;
-use uuid::Uuid;
 
 use crate::db::Database;
 
+mod browser_api;
 pub mod browser_session;
+mod error;
 
 #[derive(RustEmbed)]
 #[folder = "web/dist/"]
 struct Assets;
 
 pub fn router(database: Arc<Database>) -> Router {
+    security_headers(base_router(database))
+}
+
+pub fn router_with_browser_sessions(
+    database: Arc<Database>,
+    security: browser_session::BrowserSessionSecurity,
+    policy: crate::auth::session::SessionPolicy,
+) -> Router {
+    security_headers(
+        base_router(database.clone()).merge(browser_api::routes(database, security, policy)),
+    )
+}
+
+fn base_router(database: Arc<Database>) -> Router {
     Router::new()
         .route("/health/live", get(live))
         .route("/health/ready", get(ready))
         .fallback(frontend)
         .with_state(database)
-        .layer(SetResponseHeaderLayer::if_not_present(
+}
+
+fn security_headers(router: Router) -> Router {
+    router.layer(SetResponseHeaderLayer::if_not_present(
             header::X_CONTENT_TYPE_OPTIONS,
             HeaderValue::from_static("nosniff"),
         ))
@@ -75,17 +93,13 @@ async fn frontend(request: Request) -> Response {
             "api" | "auth" | "admin" | "setup" | "mcp" | "health"
         )
     }) {
-        return (
+        return error::ApiError::new(
             StatusCode::NOT_FOUND,
-            Json(serde_json::json!({
-                "code": "not_found",
-                "message": "Resource not found",
-                "request_id": Uuid::now_v7().to_string(),
-                "field_errors": {},
-                "retryable": false
-            })),
+            "not_found",
+            "Resource not found",
+            false,
         )
-            .into_response();
+        .into_response();
     }
     if request.method() != Method::GET && request.method() != Method::HEAD {
         return (
