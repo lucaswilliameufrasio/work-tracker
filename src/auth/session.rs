@@ -613,6 +613,50 @@ impl SessionStore {
         now: DateTime<Utc>,
     ) -> Result<bool, SessionError> {
         let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        if !Self::revoke_in_transaction(&mut transaction, user_id, session_id, now).await? {
+            transaction.rollback().await?;
+            return Ok(false);
+        }
+        transaction.commit().await?;
+        Ok(true)
+    }
+
+    /// Revokes only the exact live bearer supplied by the authenticated caller.
+    /// Identity, revocation and audit share one write transaction.
+    pub async fn revoke_current(
+        &self,
+        token: &SessionToken,
+        now: DateTime<Utc>,
+    ) -> Result<bool, SessionError> {
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let Some(principal) = self
+            .authenticate_in_transaction(&mut transaction, token, now)
+            .await?
+        else {
+            transaction.rollback().await?;
+            return Ok(false);
+        };
+        if !Self::revoke_in_transaction(
+            &mut transaction,
+            principal.user_id(),
+            principal.session_id(),
+            now,
+        )
+        .await?
+        {
+            transaction.rollback().await?;
+            return Ok(false);
+        }
+        transaction.commit().await?;
+        Ok(true)
+    }
+
+    async fn revoke_in_transaction(
+        transaction: &mut Transaction<'_, Sqlite>,
+        user_id: &str,
+        session_id: &str,
+        now: DateTime<Utc>,
+    ) -> Result<bool, SessionError> {
         let result = sqlx::query(
             "UPDATE sessions SET revoked_at = ? \
              WHERE id = ? AND user_id = ? AND revoked_at IS NULL",
@@ -620,14 +664,13 @@ impl SessionStore {
         .bind(format_timestamp(now))
         .bind(session_id)
         .bind(user_id)
-        .execute(&mut *transaction)
+        .execute(&mut **transaction)
         .await?;
         if result.rows_affected() != 1 {
-            transaction.rollback().await?;
             return Ok(false);
         }
         audit::append_in_transaction(
-            &mut transaction,
+            transaction,
             Some(user_id),
             AuditEventKind::SessionRevoked,
             AuditEventResult::Success,
@@ -635,7 +678,6 @@ impl SessionStore {
             now,
         )
         .await?;
-        transaction.commit().await?;
         Ok(true)
     }
 

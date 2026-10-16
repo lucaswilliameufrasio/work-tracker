@@ -22,7 +22,7 @@ pub enum Command {
         data_dir: PathBuf,
         #[arg(long = "master-key", env = "PUXIRI_MASTER_KEY")]
         master_key_path: Option<PathBuf>,
-        /// Enable read-only browser session APIs for this explicit HTTPS origin.
+        /// Enable browser session and read-only project APIs for this explicit HTTPS origin.
         #[arg(long, env = "PUXIRI_BROWSER_ORIGIN")]
         browser_origin: Option<crate::http::browser_session::BrowserOrigin>,
     },

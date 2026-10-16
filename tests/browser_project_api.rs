@@ -511,3 +511,259 @@ async fn ban_expiry_storage_failure_and_corrupt_rows_do_not_become_successful_or
     assert_eq!(error["code"], "storage_unavailable");
     assert!(!error.to_string().contains("SELECT"));
 }
+
+fn logout_request(token: &SessionToken, csrf: &str) -> Request<Body> {
+    let mut request = request("/api/v1/auth/session", Some(token));
+    *request.method_mut() = Method::DELETE;
+    request.headers_mut().insert(
+        header::ORIGIN,
+        HeaderValue::from_static("https://tracker.example.test"),
+    );
+    request
+        .headers_mut()
+        .insert("x-csrf-token", HeaderValue::from_str(csrf).unwrap());
+    request
+}
+
+async fn csrf(app: &Router, token: &SessionToken) -> String {
+    json(
+        app.clone()
+            .oneshot(request("/api/v1/auth/session", Some(token)))
+            .await
+            .unwrap(),
+        StatusCode::OK,
+    )
+    .await["csrf_token"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+#[tokio::test]
+async fn logout_requires_same_origin_and_the_exact_bearers_csrf_without_side_effects() {
+    let directory = TempDir::new().unwrap();
+    let database = database(&directory).await;
+    let actor = user(&database, "member").await;
+    let sessions = SessionStore::new(database.pool().clone(), policy());
+    let issued = sessions.issue(&actor, Utc::now()).await.unwrap();
+    let other = sessions.issue(&actor, Utc::now()).await.unwrap();
+    let app = app(&directory, database.clone());
+    let own_csrf = csrf(&app, &issued.token).await;
+    let other_csrf = csrf(&app, &other.token).await;
+    let before: String = sqlx::query_scalar("SELECT last_activity_at FROM sessions WHERE id = ?")
+        .bind(&issued.id)
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
+    for scenario in [
+        "missing_origin",
+        "foreign_origin",
+        "missing_csrf",
+        "other_session_csrf",
+        "duplicate_csrf",
+    ] {
+        let mut req = logout_request(&issued.token, &own_csrf);
+        match scenario {
+            "missing_origin" => {
+                req.headers_mut().remove(header::ORIGIN);
+            }
+            "foreign_origin" => {
+                req.headers_mut().insert(
+                    header::ORIGIN,
+                    HeaderValue::from_static("https://attacker.example.test"),
+                );
+            }
+            "missing_csrf" => {
+                req.headers_mut().remove("x-csrf-token");
+            }
+            "other_session_csrf" => {
+                req.headers_mut()
+                    .insert("x-csrf-token", HeaderValue::from_str(&other_csrf).unwrap());
+            }
+            _ => {
+                req.headers_mut()
+                    .append("x-csrf-token", HeaderValue::from_str(&own_csrf).unwrap());
+            }
+        }
+        let response = app.clone().oneshot(req).await.unwrap();
+        assert!(!response.headers().contains_key(header::SET_COOKIE));
+        json(response, StatusCode::FORBIDDEN).await;
+    }
+    let after: (String, Option<String>) =
+        sqlx::query_as("SELECT last_activity_at, revoked_at FROM sessions WHERE id = ?")
+            .bind(&issued.id)
+            .fetch_one(database.pool())
+            .await
+            .unwrap();
+    assert_eq!(after, (before, None));
+    let audits: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM audit_events")
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
+    assert_eq!(audits, 0);
+}
+
+#[tokio::test]
+async fn logout_clears_cookie_after_commit_and_revokes_only_its_own_exact_session() {
+    let directory = TempDir::new().unwrap();
+    let database = database(&directory).await;
+    let actor = user(&database, "member").await;
+    let stranger = user(&database, "member").await;
+    let sessions = SessionStore::new(database.pool().clone(), policy());
+    let issued = sessions.issue(&actor, Utc::now()).await.unwrap();
+    let same_user_other_session = sessions.issue(&actor, Utc::now()).await.unwrap();
+    let stranger_session = sessions.issue(&stranger, Utc::now()).await.unwrap();
+    let app = app(&directory, database.clone());
+    let csrf = csrf(&app, &issued.token).await;
+    let mut overridden = logout_request(&issued.token, &csrf);
+    *overridden.uri_mut() = format!("/api/v1/auth/session?session_id={}", stranger_session.id)
+        .parse()
+        .unwrap();
+    json(
+        app.clone().oneshot(overridden).await.unwrap(),
+        StatusCode::BAD_REQUEST,
+    )
+    .await;
+    let response = app
+        .clone()
+        .oneshot(logout_request(&issued.token, &csrf))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+    assert_eq!(
+        response.headers()[header::SET_COOKIE],
+        "__Host-puxiri_session=; Path=/; Max-Age=0; Secure; HttpOnly; SameSite=Lax"
+    );
+    assert!(
+        response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .is_empty()
+    );
+    assert!(
+        sessions
+            .validate(&issued.token, Utc::now())
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        sessions
+            .validate(&same_user_other_session.token, Utc::now())
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        sessions
+            .validate(&stranger_session.token, Utc::now())
+            .await
+            .unwrap()
+            .is_some()
+    );
+    let audit: (String, String) = sqlx::query_as("SELECT actor_user_id, target_id FROM audit_events WHERE event_kind = 'auth.session.revoked'")
+        .fetch_one(database.pool()).await.unwrap();
+    assert_eq!(audit, (actor, issued.id));
+    json(
+        app.oneshot(logout_request(&issued.token, &csrf))
+            .await
+            .unwrap(),
+        StatusCode::UNAUTHORIZED,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn logout_audit_failure_preserves_session_and_cookie_then_concurrent_retry_revokes_once() {
+    let directory = TempDir::new().unwrap();
+    let database = database(&directory).await;
+    let actor = user(&database, "member").await;
+    let sessions = SessionStore::new(database.pool().clone(), policy());
+    let issued = sessions.issue(&actor, Utc::now()).await.unwrap();
+    let app = app(&directory, database.clone());
+    let csrf = csrf(&app, &issued.token).await;
+    sqlx::query("CREATE TRIGGER reject_logout_audit BEFORE INSERT ON audit_events WHEN NEW.event_kind = 'auth.session.revoked' BEGIN SELECT RAISE(ABORT, 'forced audit failure'); END")
+        .execute(database.pool()).await.unwrap();
+    let response = app
+        .clone()
+        .oneshot(logout_request(&issued.token, &csrf))
+        .await
+        .unwrap();
+    assert!(!response.headers().contains_key(header::SET_COOKIE));
+    let error = json(response, StatusCode::SERVICE_UNAVAILABLE).await;
+    assert_eq!(error["retryable"], true);
+    assert!(
+        sessions
+            .validate(&issued.token, Utc::now())
+            .await
+            .unwrap()
+            .is_some()
+    );
+    let audits: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM audit_events")
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
+    assert_eq!(audits, 0);
+    sqlx::query("DROP TRIGGER reject_logout_audit")
+        .execute(database.pool())
+        .await
+        .unwrap();
+    let (first, second) = tokio::join!(
+        app.clone().oneshot(logout_request(&issued.token, &csrf)),
+        app.clone().oneshot(logout_request(&issued.token, &csrf)),
+    );
+    let statuses = [first.unwrap().status(), second.unwrap().status()];
+    assert!(statuses.contains(&StatusCode::NO_CONTENT));
+    assert!(statuses.contains(&StatusCode::UNAUTHORIZED));
+    let audits: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM audit_events WHERE event_kind = 'auth.session.revoked'",
+    )
+    .fetch_one(database.pool())
+    .await
+    .unwrap();
+    assert_eq!(audits, 1);
+}
+
+#[tokio::test]
+async fn token_based_revocation_revalidates_account_and_deadline_before_writing() {
+    let directory = TempDir::new().unwrap();
+    let database = database(&directory).await;
+    let actor = user(&database, "member").await;
+    let sessions = SessionStore::new(database.pool().clone(), policy());
+    let now = Utc::now();
+    let issued = sessions.issue(&actor, now).await.unwrap();
+    assert!(
+        !sessions
+            .revoke_current(&issued.token, now - TimeDelta::nanoseconds(1))
+            .await
+            .unwrap()
+    );
+    assert!(
+        !sessions
+            .revoke_current(&issued.token, now + TimeDelta::hours(24))
+            .await
+            .unwrap()
+    );
+    sqlx::query("UPDATE users SET state = 'banned' WHERE id = ?")
+        .bind(&actor)
+        .execute(database.pool())
+        .await
+        .unwrap();
+    assert!(!sessions.revoke_current(&issued.token, now).await.unwrap());
+    let revoked: Option<String> =
+        sqlx::query_scalar("SELECT revoked_at FROM sessions WHERE id = ?")
+            .bind(&issued.id)
+            .fetch_one(database.pool())
+            .await
+            .unwrap();
+    assert!(revoked.is_none());
+    let audits: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM audit_events")
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
+    assert_eq!(audits, 0);
+}

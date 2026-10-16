@@ -27,7 +27,7 @@ O binário contém HTML, JS, CSS, fontes e migrations. Pode ser executado fora d
 
 Opções de bootstrap implementadas: `--bind`/`PUXIRI_BIND` e `--data-dir`/`PUXIRI_DATA_DIR`. `RUST_LOG` controla os logs estruturados. Não passar segredos em URLs/argumentos. Encerre com Ctrl+C ou SIGTERM para fechar conexões graciosamente.
 
-`--browser-origin`/`PUXIRI_BROWSER_ORIGIN` permite optar explicitamente pelas rotas read-only `/api/v1/auth/session`, `/api/v1/projects` e `/api/v1/admin/projects`. Exige origem HTTPS canônica, Host correspondente e sessão atual no cookie Secure/HttpOnly host-only; sem a opção, essas rotas retornam 404. O binário não termina TLS, não cria contas/sessões por HTTP e não deve ser exposto publicamente: os testes usam contas/sessões sintéticas em SQLite temporário. Login/signup, mutações, onboarding e frontend autenticado continuam fechados. Não usar esse flag para contornar setup. Contrato e limites: [API browser de projetos](docs/browser-project-api-design.md).
+`--browser-origin`/`PUXIRI_BROWSER_ORIGIN` permite optar explicitamente pelas consultas `/api/v1/auth/session`, `/api/v1/projects` e `/api/v1/admin/projects`, além de logout por DELETE na sessão atual com Origin/CSRF. Exige origem HTTPS canônica, Host correspondente e sessão atual no cookie Secure/HttpOnly host-only; sem a opção, essas rotas retornam 404. O binário não termina TLS, não cria contas/sessões por HTTP e não deve ser exposto publicamente: os testes usam contas/sessões sintéticas em SQLite temporário. Login/signup, mutações de projeto/conta, onboarding e frontend autenticado continuam fechados. Não usar esse flag para contornar setup. Contrato e limites: [API browser de projetos](docs/browser-project-api-design.md).
 
 ## Validação
 

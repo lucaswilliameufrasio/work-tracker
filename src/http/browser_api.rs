@@ -48,7 +48,7 @@ pub(super) fn routes(
         database,
     });
     Router::new()
-        .route("/api/v1/auth/session", get(current_session))
+        .route("/api/v1/auth/session", get(current_session).delete(logout))
         .route("/api/v1/projects", get(accessible_projects))
         .route("/api/v1/admin/projects", get(operational_projects))
         .method_not_allowed_fallback(method_not_allowed)
@@ -159,6 +159,36 @@ async fn current_session(
     }))
 }
 
+async fn logout(
+    State(state): State<Arc<BrowserState>>,
+    request: Request,
+) -> Result<Response, ApiError> {
+    let (request, _) = request.into_parts();
+    let token = authenticated_token(&state, &request).await?;
+    if request.uri.query().is_some() {
+        return Err(malformed_query());
+    }
+    if !state
+        .sessions
+        .revoke_current(&token, Utc::now())
+        .await
+        .map_err(session_error)?
+    {
+        return Err(unauthenticated());
+    }
+    Ok((
+        StatusCode::NO_CONTENT,
+        [
+            (header::CACHE_CONTROL, HeaderValue::from_static("no-store")),
+            (
+                header::SET_COOKIE,
+                super::browser_session::clear_session_cookie(),
+            ),
+        ],
+    )
+        .into_response())
+}
+
 async fn accessible_projects(
     State(state): State<Arc<BrowserState>>,
     request: Request,
@@ -226,17 +256,22 @@ async fn operational_projects(
     }))
 }
 
-async fn method_not_allowed() -> Response {
+async fn method_not_allowed(request: Request) -> Response {
     let mut response = ApiError::new(
         StatusCode::METHOD_NOT_ALLOWED,
         "method_not_allowed",
-        "Only GET and HEAD are supported",
+        "Method not supported for this resource",
         false,
     )
     .into_response();
-    response
-        .headers_mut()
-        .insert(header::ALLOW, HeaderValue::from_static("GET, HEAD"));
+    response.headers_mut().insert(
+        header::ALLOW,
+        HeaderValue::from_static(if request.uri().path() == "/api/v1/auth/session" {
+            "GET, HEAD, DELETE"
+        } else {
+            "GET, HEAD"
+        }),
+    );
     response
 }
 
@@ -299,7 +334,7 @@ fn transport_error(error: BrowserSessionError) -> ApiError {
 
 fn session_error(error: SessionError) -> ApiError {
     match error {
-        SessionError::Database(_) => storage_unavailable(),
+        SessionError::Database(_) | SessionError::Audit(_) => storage_unavailable(),
         _ => ApiError::new(
             StatusCode::INTERNAL_SERVER_ERROR,
             "unexpected_error",
