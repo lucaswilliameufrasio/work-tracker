@@ -5,6 +5,7 @@ use uuid::Uuid;
 
 pub mod membership;
 mod queries;
+pub mod session;
 
 pub use queries::{
     ProjectListOptions, ProjectListPage, ProjectOperationalPage, ProjectOperationalSummary,

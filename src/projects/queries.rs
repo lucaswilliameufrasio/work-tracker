@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use sqlx::Row;
+use sqlx::{Row, Sqlite, Transaction};
 use thiserror::Error;
 
 use crate::access::{
@@ -82,8 +82,21 @@ impl ProjectStore {
     ) -> Result<ProjectOperationalPage, ProjectReadError> {
         validate_options(options)?;
         let mut transaction = self.pool.begin().await?;
+        let page =
+            Self::operational_catalog_in_transaction(&mut transaction, actor_user_id, options)
+                .await?;
+        transaction.commit().await?;
+        Ok(page)
+    }
+
+    pub(crate) async fn operational_catalog_in_transaction(
+        transaction: &mut Transaction<'_, Sqlite>,
+        actor_user_id: &str,
+        options: ProjectListOptions<'_>,
+    ) -> Result<ProjectOperationalPage, ProjectReadError> {
+        validate_options(options)?;
         let actor = AccessStore::load_organization_context_in_transaction(
-            &mut transaction,
+            transaction,
             actor_user_id,
             false,
         )
@@ -106,7 +119,7 @@ impl ProjectStore {
         .bind(options.include_archived)
         .bind(options.after_project_key)
         .bind(i64::from(options.page_size) + 1)
-        .fetch_all(&mut *transaction)
+        .fetch_all(&mut **transaction)
         .await?;
         let has_more = rows.len() > usize::from(options.page_size);
         let mut items = Vec::with_capacity(rows.len().min(usize::from(options.page_size)));
@@ -128,7 +141,6 @@ impl ProjectStore {
         } else {
             None
         };
-        transaction.commit().await?;
         Ok(ProjectOperationalPage {
             items,
             next_after_project_key,
@@ -146,8 +158,20 @@ impl ProjectStore {
         validate_options(options)?;
 
         let mut transaction = self.pool.begin().await?;
+        let page =
+            Self::accessible_in_transaction(&mut transaction, actor_user_id, options).await?;
+        transaction.commit().await?;
+        Ok(page)
+    }
+
+    pub(crate) async fn accessible_in_transaction(
+        transaction: &mut Transaction<'_, Sqlite>,
+        actor_user_id: &str,
+        options: ProjectListOptions<'_>,
+    ) -> Result<ProjectListPage, ProjectReadError> {
+        validate_options(options)?;
         let actor = AccessStore::load_organization_context_in_transaction(
-            &mut transaction,
+            transaction,
             actor_user_id,
             false,
         )
@@ -172,7 +196,7 @@ impl ProjectStore {
         .bind(options.include_archived)
         .bind(options.after_project_key)
         .bind(i64::from(options.page_size) + 1)
-        .fetch_all(&mut *transaction)
+        .fetch_all(&mut **transaction)
         .await?;
 
         let has_more = rows.len() > usize::from(options.page_size);
@@ -180,7 +204,7 @@ impl ProjectStore {
         for row in rows.into_iter().take(usize::from(options.page_size)) {
             let id: String = row.try_get("id")?;
             let context = AccessStore::load_project_context_in_transaction(
-                &mut transaction,
+                transaction,
                 actor_user_id,
                 &id,
                 false,
@@ -210,7 +234,6 @@ impl ProjectStore {
         } else {
             None
         };
-        transaction.commit().await?;
         Ok(ProjectListPage {
             items,
             next_after_project_key,

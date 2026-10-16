@@ -84,6 +84,23 @@ pub struct AuthenticatedSession {
     pub user_id: String,
 }
 
+/// Identity derived only from a current persisted session. This is a snapshot,
+/// not cached authority; protected work must share the validation transaction.
+pub struct SessionPrincipal {
+    session_id: String,
+    user_id: String,
+}
+
+impl SessionPrincipal {
+    pub fn session_id(&self) -> &str {
+        &self.session_id
+    }
+
+    pub fn user_id(&self) -> &str {
+        &self.user_id
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionSummary {
     pub id: String,
@@ -352,6 +369,24 @@ impl SessionStore {
         token: &SessionToken,
         now: DateTime<Utc>,
     ) -> Result<Option<AuthenticatedSession>, SessionError> {
+        Ok(self
+            .authenticate_in_transaction(transaction, token, now)
+            .await?
+            .map(|principal| AuthenticatedSession {
+                id: principal.session_id,
+                user_id: principal.user_id,
+            }))
+    }
+
+    /// Validates current identity in the caller's transaction without touching
+    /// activity or creating privileged assurance. Do not reuse the principal
+    /// outside that snapshot as authorization for another operation.
+    pub async fn authenticate_in_transaction(
+        &self,
+        transaction: &mut Transaction<'_, Sqlite>,
+        token: &SessionToken,
+        now: DateTime<Utc>,
+    ) -> Result<Option<SessionPrincipal>, SessionError> {
         let token_hash = token.digest().to_vec();
         let row = sqlx::query(
             "SELECT sessions.id, sessions.user_id, sessions.created_at, \
@@ -376,7 +411,10 @@ impl SessionStore {
         };
         Ok(self
             .validated_row(session_row, now)
-            .map(|(session, _)| session))
+            .map(|(session, _)| SessionPrincipal {
+                session_id: session.id,
+                user_id: session.user_id,
+            }))
     }
 
     /// Rotates the exact live bearer after its MFA factor has been verified in
