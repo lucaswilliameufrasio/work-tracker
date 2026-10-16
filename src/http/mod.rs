@@ -15,6 +15,8 @@ use uuid::Uuid;
 
 use crate::db::Database;
 
+pub mod browser_session;
+
 #[derive(RustEmbed)]
 #[folder = "web/dist/"]
 struct Assets;
