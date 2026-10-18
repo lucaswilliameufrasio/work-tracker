@@ -2,6 +2,7 @@
 
 - **Status:** Deferred — security and product compatibility evidence required
 - **Date:** 2026-10-06
+- **Compatibility clarification:** 2026-10-18 — the operator confirmed that the Puxiri offline restorer and recovery kit are sufficient; no external recovery tool is mandatory.
 - **Context:** `docs/development-plan.md`, backup sections 12.2–12.3 and Phase 0 evidence 6–8, 45–46, 49, 51–53, 56–57, 60–62, 69–70, 79–113
 
 ## Context
@@ -16,13 +17,14 @@ The user requires a stable, mature format and dependency API; pre-1.0/beta encry
 
 The Rust `age` crate is excluded under the user's stability criterion. Sequoia OpenPGP 2.4.1/RFC 9580 is a possible *encryption-layer* research lead, not an approved backup candidate: its versioned 2.x crate has documented streaming serializer and decryptor APIs for the IETF OpenPGP message format, but does not define Puxiri's archive manifest, SQLite/S3-pin transaction, staging or publication. Its current published status page (dated 2024-10-02) says it had not been audited at that time; this is stale evidence, not proof of current audit state, and no later independent audit was established here. CVE-2026-42784 describes key-flag confusion/signature forgery; Debian tracks upstream fix commit `58214b47…` in 2.3.0, before current 2.4.1, but an advisory does not establish an independent audit. Default crypto-nettle uses native Nettle; alternative native backends have distinct deployment burdens, while Sequoia says RustCrypto does not yet provide the same security guarantees as mature crypto backends. The crate is LGPL-2.0-or-later; distribution obligations need review. No format or encryption dependency is selected. Any candidate must prove build/distribution compatibility, a narrowly allowlisted modern authenticated-encryption profile, recovery-key import/export, secure allowlisted restoration, full SQLite snapshot plus pinned-object round-trip, crash/disk-full behavior, atomic publication and cgroup resource bounds before selection.
 
-The user explicitly confirms that Puxiri will **not lower its security level to obtain GnuPG compatibility**. Compatibility findings are useful evidence and GnuPG may be an optional independent recovery tool, but whether it is a product requirement remains unconfirmed. Do not adopt legacy/less-protective key or message profiles as a workaround; any profile change needs explicit security review and user approval.
+The user explicitly confirms that Puxiri will **not lower its security level to obtain GnuPG compatibility**. On 2026-10-18, the operator selected **“Puxiri offline basta”**: the Puxiri offline restorer and recovery kit are sufficient; GnuPG or any other external recovery tool is **not a mandatory product requirement**. External interoperability findings remain useful optional evidence, but failure to interoperate with GnuPG alone does not disqualify an otherwise acceptable candidate. Do not adopt legacy/less-protective key or message profiles as a workaround; any profile change needs explicit security review and user approval. This clarification does not approve a format, library, cryptographic profile, dependency addition, or custom container protocol, and does not relax the stable/mature API or security gates above.
 
 rPGP/`pgp` 0.21.0 is also research-only under the current stability criterion: it is pre-1.0, and its own implementation status says the high-level API is not started. Slices 86–90 do not override the user's maturity requirement. Reconsider only if the user revises that criterion or a later release provides an acceptable stable API and the remaining compatibility/security gates pass.
 
 ## Consequences
 
 - No production backup format, endpoint, migration or restore flow is approved by this ADR.
+- The required recovery acceptance path is Puxiri offline restore using the bundle and recovery kit. Its distribution/version compatibility, documented offline procedure, key import/export, full restore and failure/security evidence remain required. GnuPG compatibility is optional, not a release gate. Format selection remains Deferred until the other acceptance criteria are met.
 - The Rust age/TAR result is feasibility evidence, not production security approval or a capacity claim.
 - Age v1 stream interoperability with the Go reference implementation is verified only for the synthetic fixtures recorded in evidence 49; this does not approve the beta Rust crate or complete bundle format.
 - Evidence 51 measures one synthetic Rust archive/snapshot/object composition and isolated restore on tmpfs and local Btrfs; it does not exercise the Puxiri pin/S3 protocol, production manifest or failure contracts, and is not a format selection or capacity claim.

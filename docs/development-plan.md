@@ -465,6 +465,8 @@ Modalidades: banco (inclui conteúdo/configurações do SQLite, mas não bytes S
 
 Não incluir master key plaintext dentro do backup. Kit de recuperação offline contém chave de configuração e chave privada de recuperação dos bundles, com identificação/versionamento. Chaves de backup separadas dos tokens de acesso S3. Restaurar exige bundle e kit; permitir digitar/importar chaves no wizard por TLS e mantê-las fora de logs.
 
+Decisão confirmada em 18/10/2026: o kit e o restaurador offline do próprio Puxiri são suficientes; recuperação por GnuPG ou outra ferramenta externa não é requisito obrigatório. Interoperabilidade externa pode ser evidência adicional, mas não justifica reduzir segurança. Isso não seleciona formato/biblioteca nem dispensa os gates de maturidade, distribuição offline, versionamento, importação de chaves e restauração completa; [ADR 0002](adr/0002-backup-archive-format-deferred.md) permanece Deferred por esses critérios.
+
 Retenção inicial sugerida: 7 diários, 4 semanais e 3 mensais, configurável. Agendamento diário; RPO nominal até 24 horas condicionado a execução bem-sucedida. RTO só pode ser estimado após ensaio com tamanho real. Mostrar atraso do último backup válido como alerta.
 
 Backup captura ponto consistente do banco, não inclui binário. UI distingue exportação de projeto de backup criptografado do banco ou completo. Download de backup exige MFA recente e URL assinada de 1 hora, com disposition de anexo; URL não entra em logs. Admin pode emitir outra quando expirar.
