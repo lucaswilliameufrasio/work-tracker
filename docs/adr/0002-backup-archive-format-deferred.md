@@ -3,6 +3,7 @@
 - **Status:** Deferred — security and product compatibility evidence required
 - **Date:** 2026-10-06
 - **Compatibility clarification:** 2026-10-18 — the operator confirmed that the Puxiri offline restorer and recovery kit are sufficient; no external recovery tool is mandatory.
+- **Evaluation priority:** 2026-10-18 — the operator selected Sequoia/OpenPGP for the next candidate evaluation, not production adoption. See [evaluation gates](../backup-sequoia-evaluation.md).
 - **Context:** `docs/development-plan.md`, backup sections 12.2–12.3 and Phase 0 evidence 6–8, 45–46, 49, 51–53, 56–57, 60–62, 69–70, 79–113
 
 ## Context
@@ -20,6 +21,8 @@ The Rust `age` crate is excluded under the user's stability criterion. Sequoia O
 The user explicitly confirms that Puxiri will **not lower its security level to obtain GnuPG compatibility**. On 2026-10-18, the operator selected **“Puxiri offline basta”**: the Puxiri offline restorer and recovery kit are sufficient; GnuPG or any other external recovery tool is **not a mandatory product requirement**. External interoperability findings remain useful optional evidence, but failure to interoperate with GnuPG alone does not disqualify an otherwise acceptable candidate. Do not adopt legacy/less-protective key or message profiles as a workaround; any profile change needs explicit security review and user approval. This clarification does not approve a format, library, cryptographic profile, dependency addition, or custom container protocol, and does not relax the stable/mature API or security gates above.
 
 rPGP/`pgp` 0.21.0 is also research-only under the current stability criterion: it is pre-1.0, and its own implementation status says the high-level API is not started. Slices 86–90 do not override the user's maturity requirement. Reconsider only if the user revises that criterion or a later release provides an acceptable stable API and the remaining compatibility/security gates pass.
+
+On 2026-10-18, the user authorized **prioritizing Sequoia/OpenPGP evaluation**. This narrows the research order; it does not select a production dependency, backend, key profile or archive format. Registry/docs now list Sequoia 2.4.2 (published 2026-10-14), whereas the existing runtime evidence above is for 2.4.1. Do not transfer the old test results to 2.4.2 without rerunning them. The current documentation, security and distribution gaps are tracked in [the evaluation note](../backup-sequoia-evaluation.md); this ADR remains Deferred.
 
 ## Consequences
 
