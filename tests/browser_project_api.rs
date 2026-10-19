@@ -546,6 +546,183 @@ fn revoke_request(uri: &str, token: &SessionToken, csrf: &str) -> Request<Body> 
 }
 
 #[tokio::test]
+async fn browser_session_listing_is_bounded_private_no_store_and_marks_the_current_session() {
+    let directory = TempDir::new().unwrap();
+    let database = database(&directory).await;
+    let actor = user(&database, "member").await;
+    let stranger = user(&database, "owner").await;
+    let store = SessionStore::new(database.pool().clone(), policy());
+    let own = store.issue(&actor, Utc::now()).await.unwrap();
+    let other = store.issue(&actor, Utc::now()).await.unwrap();
+    let foreign = store.issue(&stranger, Utc::now()).await.unwrap();
+    let app = app(&directory, database.clone());
+    let mut cursor = None;
+    let mut ids = Vec::new();
+    for _ in 0..2 {
+        let uri = match &cursor {
+            Some(cursor) => format!("/api/v1/auth/sessions?page_size=1&cursor={cursor}"),
+            None => String::from("/api/v1/auth/sessions?page_size=1"),
+        };
+        let response = app
+            .clone()
+            .oneshot(request(&uri, Some(&own.token)))
+            .await
+            .unwrap();
+        assert!(!response.headers().contains_key(header::SET_COOKIE));
+        let page = json(response, StatusCode::OK).await;
+        assert_eq!(page["data"].as_array().unwrap().len(), 1);
+        let item = &page["data"][0];
+        assert_eq!(item.as_object().unwrap().len(), 5);
+        let id = item["id"].as_str().unwrap().to_owned();
+        assert_eq!(item["is_current"], id == own.id);
+        for field in ["created_at", "last_activity_at", "expires_at"] {
+            chrono::DateTime::parse_from_rfc3339(item[field].as_str().unwrap()).unwrap();
+        }
+        assert!(!page.to_string().contains(own.token.expose()));
+        assert!(!page.to_string().contains(&foreign.id));
+        ids.push(id);
+        cursor = page
+            .get("next_cursor")
+            .map(|value| value.as_str().unwrap().to_owned());
+        assert_eq!(page["has_more"], cursor.is_some());
+    }
+    assert!(cursor.is_none());
+    let mut expected = vec![own.id.clone(), other.id.clone()];
+    expected.sort_by(|a, b| b.cmp(a));
+    assert_eq!(ids, expected);
+    let mut head = request("/api/v1/auth/sessions", Some(&own.token));
+    *head.method_mut() = Method::HEAD;
+    let head = app.clone().oneshot(head).await.unwrap();
+    assert_eq!(head.status(), StatusCode::OK);
+    assert_eq!(head.headers()[header::CACHE_CONTROL], "no-store");
+    assert!(
+        head.into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .is_empty()
+    );
+    store.revoke(&actor, &other.id, Utc::now()).await.unwrap();
+    let page = json(
+        app.clone()
+            .oneshot(request("/api/v1/auth/sessions", Some(&own.token)))
+            .await
+            .unwrap(),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(page["data"].as_array().unwrap().len(), 1);
+    store.revoke(&actor, &own.id, Utc::now()).await.unwrap();
+    json(
+        app.oneshot(request("/api/v1/auth/sessions", Some(&own.token)))
+            .await
+            .unwrap(),
+        StatusCode::UNAUTHORIZED,
+    )
+    .await;
+    json(
+        http::router(database)
+            .oneshot(request("/api/v1/auth/sessions", None))
+            .await
+            .unwrap(),
+        StatusCode::NOT_FOUND,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn session_list_rejects_identity_overrides_invalid_pages_and_hostile_transport() {
+    let directory = TempDir::new().unwrap();
+    let database = database(&directory).await;
+    let actor = user(&database, "member").await;
+    let store = SessionStore::new(database.pool().clone(), policy());
+    let own = store.issue(&actor, Utc::now()).await.unwrap();
+    let app = app(&directory, database.clone());
+    json(
+        app.clone()
+            .oneshot(request("/api/v1/auth/sessions", None))
+            .await
+            .unwrap(),
+        StatusCode::UNAUTHORIZED,
+    )
+    .await;
+    for suffix in [
+        "user_id=other",
+        "include_archived=true",
+        "page_size=1&page_size=2",
+        "page_size=bad",
+        "cursor=a&cursor=b",
+    ] {
+        json(
+            app.clone()
+                .oneshot(request(
+                    &format!("/api/v1/auth/sessions?{suffix}"),
+                    Some(&own.token),
+                ))
+                .await
+                .unwrap(),
+            StatusCode::BAD_REQUEST,
+        )
+        .await;
+    }
+    for (suffix, field) in [
+        ("page_size=0", "page_size"),
+        ("page_size=101", "page_size"),
+        ("cursor=bad", "cursor"),
+        ("cursor=", "cursor"),
+    ] {
+        let error = json(
+            app.clone()
+                .oneshot(request(
+                    &format!("/api/v1/auth/sessions?{suffix}"),
+                    Some(&own.token),
+                ))
+                .await
+                .unwrap(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+        )
+        .await;
+        assert!(error["field_errors"][field].is_string());
+    }
+    let mut req = request("/api/v1/auth/sessions", Some(&own.token));
+    req.headers_mut().insert(
+        header::ORIGIN,
+        HeaderValue::from_static("https://attacker.example.test"),
+    );
+    json(
+        app.clone().oneshot(req).await.unwrap(),
+        StatusCode::FORBIDDEN,
+    )
+    .await;
+    let corrupt = store.issue(&actor, Utc::now()).await.unwrap();
+    sqlx::query("UPDATE sessions SET id = 'gggggggg-gggg-gggg-gggg-gggggggggggg' WHERE id = ?")
+        .bind(&corrupt.id)
+        .execute(database.pool())
+        .await
+        .unwrap();
+    let error = json(
+        app.clone()
+            .oneshot(request("/api/v1/auth/sessions", Some(&own.token)))
+            .await
+            .unwrap(),
+        StatusCode::INTERNAL_SERVER_ERROR,
+    )
+    .await;
+    assert_eq!(error["code"], "unexpected_error");
+    assert!(!error.to_string().contains("gggggggg"));
+    database.pool().close().await;
+    let error = json(
+        app.oneshot(request("/api/v1/auth/sessions", Some(&own.token)))
+            .await
+            .unwrap(),
+        StatusCode::SERVICE_UNAVAILABLE,
+    )
+    .await;
+    assert_eq!(error["code"], "storage_unavailable");
+}
+
+#[tokio::test]
 async fn selected_session_revocation_scopes_ownership_and_clears_only_the_current_cookie() {
     let directory = TempDir::new().unwrap();
     let database = database(&directory).await;
@@ -673,12 +850,24 @@ async fn session_revocation_routes_reject_hostile_queries_csrf_ids_and_methods()
             StatusCode::BAD_REQUEST,
         )
         .await;
-        for method in [Method::GET, Method::HEAD, Method::POST] {
+        let methods = if path == "/api/v1/auth/sessions" {
+            vec![Method::POST, Method::PATCH, Method::OPTIONS]
+        } else {
+            vec![Method::GET, Method::HEAD, Method::POST]
+        };
+        for method in methods {
             let mut req = request(path, Some(&own.token));
             *req.method_mut() = method.clone();
             let response = app.clone().oneshot(req).await.unwrap();
             assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
-            assert_eq!(response.headers()[header::ALLOW], "DELETE");
+            assert_eq!(
+                response.headers()[header::ALLOW],
+                if path == "/api/v1/auth/sessions" {
+                    "GET, HEAD, DELETE"
+                } else {
+                    "DELETE"
+                }
+            );
         }
     }
     for id in ["bad", "%FF", "00000000000000000000000000000000"] {

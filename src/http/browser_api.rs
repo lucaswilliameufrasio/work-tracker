@@ -14,7 +14,9 @@ use crate::{
     access::{AccessStoreError, ProjectRole},
     auth::{
         SessionToken,
-        session::{SessionError, SessionPolicy, SessionRevocationOutcome, SessionStore},
+        session::{
+            SessionError, SessionListOptions, SessionPolicy, SessionRevocationOutcome, SessionStore,
+        },
         time::format_timestamp,
     },
     db::Database,
@@ -49,7 +51,10 @@ pub(super) fn routes(
     });
     Router::new()
         .route("/api/v1/auth/session", get(current_session).delete(logout))
-        .route("/api/v1/auth/sessions", delete(revoke_all_sessions))
+        .route(
+            "/api/v1/auth/sessions",
+            get(list_sessions).delete(revoke_all_sessions),
+        )
         .route("/api/v1/auth/sessions/{session_id}", delete(revoke_session))
         .route("/api/v1/projects", get(accessible_projects))
         .route("/api/v1/admin/projects", get(operational_projects))
@@ -109,6 +114,61 @@ struct CurrentSession<'a> {
     user_id: &'a str,
     session_id: &'a str,
     csrf_token: &'a str,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SessionListQuery {
+    cursor: Option<String>,
+    page_size: Option<u16>,
+}
+
+#[derive(Serialize)]
+struct ListedSession {
+    id: String,
+    created_at: String,
+    last_activity_at: String,
+    expires_at: String,
+    is_current: bool,
+}
+
+async fn list_sessions(
+    State(state): State<Arc<BrowserState>>,
+    request: Request,
+) -> Result<Response, ApiError> {
+    let (request, _) = request.into_parts();
+    let token = authenticated_token(&state, &request).await?;
+    let query = Query::<SessionListQuery>::try_from_uri(&request.uri)
+        .map_err(|_| malformed_query())?
+        .0;
+    let page = state
+        .sessions
+        .list_owned(
+            &token,
+            SessionListOptions {
+                after_session_id: query.cursor.as_deref(),
+                page_size: query.page_size.unwrap_or(50),
+            },
+            Utc::now(),
+        )
+        .await
+        .map_err(session_error)?
+        .ok_or_else(unauthenticated)?;
+    let mut data = Vec::with_capacity(page.items.len());
+    for session in page.items {
+        data.push(ListedSession {
+            id: session.id,
+            created_at: format_timestamp(session.created_at),
+            last_activity_at: format_timestamp(session.last_activity_at),
+            expires_at: format_timestamp(session.expires_at),
+            is_current: session.is_current,
+        });
+    }
+    Ok(no_store(Page {
+        data,
+        has_more: page.next_after_session_id.is_some(),
+        next_cursor: page.next_after_session_id,
+    }))
 }
 
 async fn authenticated_token(
@@ -332,9 +392,12 @@ async fn method_not_allowed(request: Request) -> Response {
     response.headers_mut().insert(
         header::ALLOW,
         HeaderValue::from_static(
-            if request.uri().path().starts_with("/api/v1/auth/sessions") {
+            if request.uri().path().starts_with("/api/v1/auth/sessions/") {
                 "DELETE"
-            } else if request.uri().path() == "/api/v1/auth/session" {
+            } else if matches!(
+                request.uri().path(),
+                "/api/v1/auth/session" | "/api/v1/auth/sessions"
+            ) {
                 "GET, HEAD, DELETE"
             } else {
                 "GET, HEAD"
@@ -403,6 +466,10 @@ fn transport_error(error: BrowserSessionError) -> ApiError {
 
 fn session_error(error: SessionError) -> ApiError {
     match error {
+        SessionError::InvalidCursor => ApiError::invalid_field("cursor", "Use a canonical UUID"),
+        SessionError::InvalidPageSize => {
+            ApiError::invalid_field("page_size", "Use a value between 1 and 100")
+        }
         SessionError::Database(_) | SessionError::Audit(_) => storage_unavailable(),
         _ => ApiError::new(
             StatusCode::INTERNAL_SERVER_ERROR,

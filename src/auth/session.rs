@@ -10,6 +10,12 @@ use super::{SessionToken, SessionTokenError};
 
 #[derive(Debug, Error)]
 pub enum SessionError {
+    #[error("session page size is invalid")]
+    InvalidPageSize,
+    #[error("session cursor is invalid")]
+    InvalidCursor,
+    #[error("persisted session identity is invalid")]
+    InvalidSessionData,
     #[error("session policy is invalid")]
     InvalidPolicy,
     #[error("session deadline is outside the supported timestamp range")]
@@ -114,6 +120,16 @@ pub enum SessionRevocationOutcome {
     Unauthenticated,
     NotFound,
     Revoked { is_current: bool },
+}
+
+pub struct SessionListOptions<'a> {
+    pub after_session_id: Option<&'a str>,
+    pub page_size: u16,
+}
+
+pub struct SessionListPage {
+    pub items: Vec<SessionSummary>,
+    pub next_after_session_id: Option<String>,
 }
 
 pub(crate) struct MfaSessionAssurance {
@@ -869,6 +885,75 @@ impl SessionStore {
         Ok(Some(session_valid_until))
     }
 
+    /// Bounded request-facing listing. Authentication and data share a read
+    /// snapshot; the cursor is a boundary, never authority. Invalid candidates
+    /// can yield an empty page with continuation instead of an unbounded scan.
+    pub async fn list_owned(
+        &self,
+        token: &SessionToken,
+        options: SessionListOptions<'_>,
+        now: DateTime<Utc>,
+    ) -> Result<Option<SessionListPage>, SessionError> {
+        let mut transaction = self.pool.begin().await?;
+        let Some(principal) = self
+            .authenticate_in_transaction(&mut transaction, token, now)
+            .await?
+        else {
+            transaction.rollback().await?;
+            return Ok(None);
+        };
+        if !(1..=100).contains(&options.page_size) {
+            return Err(SessionError::InvalidPageSize);
+        }
+        if let Some(cursor) = options.after_session_id
+            && !canonical_session_id(cursor)
+        {
+            return Err(SessionError::InvalidCursor);
+        }
+        // All canonical UUIDs sort below '~'. A single seek predicate keeps
+        // first and subsequent pages on the same partial composite index.
+        let mut rows = sqlx::query(
+            "SELECT sessions.id, sessions.user_id, sessions.created_at, \
+                    sessions.last_activity_at, sessions.expires_at, \
+                    users.state AS account_state \
+             FROM sessions JOIN users ON users.id = sessions.user_id \
+             WHERE sessions.user_id = ? AND sessions.revoked_at IS NULL \
+               AND sessions.id < ? ORDER BY sessions.id DESC LIMIT ?",
+        )
+        .bind(principal.user_id())
+        .bind(options.after_session_id.unwrap_or("~"))
+        .bind(i64::from(options.page_size) + 1)
+        .fetch_all(&mut *transaction)
+        .await?;
+        let has_more = rows.len() > usize::from(options.page_size);
+        rows.truncate(usize::from(options.page_size));
+        let mut items = Vec::with_capacity(rows.len());
+        let mut last_examined = None;
+        for row in rows {
+            let id: String = row.try_get("id")?;
+            if !canonical_session_id(&id) {
+                return Err(SessionError::InvalidSessionData);
+            }
+            last_examined = Some(id.clone());
+            let session_row = SessionRow {
+                id,
+                user_id: row.try_get("user_id")?,
+                created_at: row.try_get("created_at")?,
+                last_activity_at: row.try_get("last_activity_at")?,
+                expires_at: row.try_get("expires_at")?,
+                account_state: row.try_get("account_state")?,
+            };
+            if let Some(summary) = self.summary(session_row, principal.session_id(), now) {
+                items.push(summary);
+            }
+        }
+        transaction.commit().await?;
+        Ok(Some(SessionListPage {
+            items,
+            next_after_session_id: if has_more { last_examined } else { None },
+        }))
+    }
+
     /// Lists only currently valid sessions owned by the authenticated user.
     /// No bearer, IP address, or user-agent value is persisted or returned.
     pub async fn list_active(
@@ -899,27 +984,30 @@ impl SessionStore {
                 expires_at: row.try_get("expires_at")?,
                 account_state: row.try_get("account_state")?,
             };
-            let Some(created_at) = parse_timestamp(&session_row.created_at) else {
-                continue;
-            };
-            let Some(last_activity_at) = parse_timestamp(&session_row.last_activity_at) else {
-                continue;
-            };
-            let Some(expires_at) = parse_timestamp(&session_row.expires_at) else {
-                continue;
-            };
-            if self.validated_row(session_row, now).is_none() {
-                continue;
+            if let Some(summary) = self.summary(session_row, current_session_id, now) {
+                summaries.push(summary);
             }
-            summaries.push(SessionSummary {
-                id: row.try_get("id")?,
-                created_at,
-                last_activity_at,
-                expires_at,
-                is_current: row.try_get::<String, _>("id")? == current_session_id,
-            });
         }
         Ok(summaries)
+    }
+
+    fn summary(
+        &self,
+        row: SessionRow,
+        current_session_id: &str,
+        now: DateTime<Utc>,
+    ) -> Option<SessionSummary> {
+        let created_at = parse_timestamp(&row.created_at)?;
+        let last_activity_at = parse_timestamp(&row.last_activity_at)?;
+        let expires_at = parse_timestamp(&row.expires_at)?;
+        let (session, _) = self.validated_row(row, now)?;
+        Some(SessionSummary {
+            is_current: session.id == current_session_id,
+            id: session.id,
+            created_at,
+            last_activity_at,
+            expires_at,
+        })
     }
 
     async fn load_by_digest(&self, token_hash: &[u8]) -> Result<Option<SessionRow>, SessionError> {
@@ -987,6 +1075,13 @@ fn parse_timestamp(value: &str) -> Option<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(value)
         .ok()
         .map(|timestamp| timestamp.with_timezone(&Utc))
+}
+
+fn canonical_session_id(value: &str) -> bool {
+    value.len() == 36
+        && Uuid::parse_str(value)
+            .map(|id| id.to_string() == value)
+            .unwrap_or(false)
 }
 
 #[cfg(test)]
