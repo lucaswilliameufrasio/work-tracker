@@ -24,6 +24,8 @@ rPGP/`pgp` 0.21.0 is also research-only under the current stability criterion: i
 
 On 2026-10-18, the user authorized **prioritizing Sequoia/OpenPGP evaluation**. This narrows the research order; it does not select a production dependency, backend, key profile or archive format. Registry/docs now list Sequoia 2.4.2 (published 2026-10-14), whereas the existing runtime evidence above is for 2.4.1. Do not transfer the old test results to 2.4.2 without rerunning them. The current documentation, security and distribution gaps are tracked in [the evaluation note](../backup-sequoia-evaluation.md); this ADR remains Deferred.
 
+On 2026-10-19, evidence 217 reconciled the published 2.4.1/2.4.2 package diff and ran the unmodified upstream key/encrypt/decrypt example with **Sequoia 2.4.2 plus statically linked OpenSSL 3.5.9 LTS**, built from checksum/signature-verified official source in an isolated scratch. The small smoke also passed in a rootless no-network/read-only container with only the binary mounted, and a scratch-lockfile RustSec scan reported zero known vulnerabilities. This is a one-host feasibility result, not a full-stream/profile/backup/security/portability or licensing approval; OpenSSL's own tests were not run, and native code is outside that Cargo audit scan. Details, hashes and limits are in the evaluation note. The old 2.4.1 robustness tests have not been rerun against 2.4.2. ADR status stays Deferred.
+
 ## Consequences
 
 - No production backup format, endpoint, migration or restore flow is approved by this ADR.
