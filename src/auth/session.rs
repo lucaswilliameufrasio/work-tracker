@@ -110,6 +110,12 @@ pub struct SessionSummary {
     pub is_current: bool,
 }
 
+pub enum SessionRevocationOutcome {
+    Unauthenticated,
+    NotFound,
+    Revoked { is_current: bool },
+}
+
 pub(crate) struct MfaSessionAssurance {
     pub(crate) session_id: String,
     pub(crate) user_id: String,
@@ -651,6 +657,54 @@ impl SessionStore {
         Ok(true)
     }
 
+    /// Revalidates the bearer and scopes the selected target to its owner in
+    /// the same transaction as revocation/audit. A target ID grants no access.
+    pub async fn revoke_owned(
+        &self,
+        token: &SessionToken,
+        session_id: &str,
+        now: DateTime<Utc>,
+    ) -> Result<SessionRevocationOutcome, SessionError> {
+        let mut transaction = self.begin_immediate().await?;
+        let Some(principal) = self
+            .authenticate_in_transaction(&mut transaction, token, now)
+            .await?
+        else {
+            transaction.rollback().await?;
+            return Ok(SessionRevocationOutcome::Unauthenticated);
+        };
+        if !Self::revoke_in_transaction(&mut transaction, principal.user_id(), session_id, now)
+            .await?
+        {
+            transaction.rollback().await?;
+            return Ok(SessionRevocationOutcome::NotFound);
+        }
+        transaction.commit().await?;
+        Ok(SessionRevocationOutcome::Revoked {
+            is_current: session_id == principal.session_id(),
+        })
+    }
+
+    /// Ends every session of the bearer-derived user, including the bearer.
+    /// Authentication, global invalidation and audit share one write lock.
+    pub async fn revoke_all_owned(
+        &self,
+        token: &SessionToken,
+        now: DateTime<Utc>,
+    ) -> Result<bool, SessionError> {
+        let mut transaction = self.begin_immediate().await?;
+        let Some(principal) = self
+            .authenticate_in_transaction(&mut transaction, token, now)
+            .await?
+        else {
+            transaction.rollback().await?;
+            return Ok(false);
+        };
+        Self::revoke_all_in_transaction(&mut transaction, principal.user_id(), now).await?;
+        transaction.commit().await?;
+        Ok(true)
+    }
+
     async fn revoke_in_transaction(
         transaction: &mut Transaction<'_, Sqlite>,
         user_id: &str,
@@ -683,20 +737,29 @@ impl SessionStore {
 
     pub async fn revoke_all(&self, user_id: &str, now: DateTime<Utc>) -> Result<u64, SessionError> {
         let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let count = Self::revoke_all_in_transaction(&mut transaction, user_id, now).await?;
+        transaction.commit().await?;
+        Ok(count)
+    }
+
+    async fn revoke_all_in_transaction(
+        transaction: &mut Transaction<'_, Sqlite>,
+        user_id: &str,
+        now: DateTime<Utc>,
+    ) -> Result<u64, SessionError> {
         let result = sqlx::query(
             "UPDATE sessions SET revoked_at = ? \
              WHERE user_id = ? AND revoked_at IS NULL",
         )
         .bind(format_timestamp(now))
         .bind(user_id)
-        .execute(&mut *transaction)
+        .execute(&mut **transaction)
         .await?;
         if result.rows_affected() == 0 {
-            transaction.rollback().await?;
             return Ok(0);
         }
         audit::append_in_transaction(
-            &mut transaction,
+            transaction,
             Some(user_id),
             AuditEventKind::SessionsRevoked,
             AuditEventResult::Success,
@@ -704,7 +767,6 @@ impl SessionStore {
             now,
         )
         .await?;
-        transaction.commit().await?;
         Ok(result.rows_affected())
     }
 

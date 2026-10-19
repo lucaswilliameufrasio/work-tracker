@@ -2,10 +2,10 @@ use std::sync::Arc;
 
 use axum::{
     Json, Router,
-    extract::{Query, Request, State},
+    extract::{Path, Query, Request, State},
     http::{HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
-    routing::get,
+    routing::{delete, get},
 };
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -14,7 +14,7 @@ use crate::{
     access::{AccessStoreError, ProjectRole},
     auth::{
         SessionToken,
-        session::{SessionError, SessionPolicy, SessionStore},
+        session::{SessionError, SessionPolicy, SessionRevocationOutcome, SessionStore},
         time::format_timestamp,
     },
     db::Database,
@@ -49,6 +49,8 @@ pub(super) fn routes(
     });
     Router::new()
         .route("/api/v1/auth/session", get(current_session).delete(logout))
+        .route("/api/v1/auth/sessions", delete(revoke_all_sessions))
+        .route("/api/v1/auth/sessions/{session_id}", delete(revoke_session))
         .route("/api/v1/projects", get(accessible_projects))
         .route("/api/v1/admin/projects", get(operational_projects))
         .method_not_allowed_fallback(method_not_allowed)
@@ -176,17 +178,80 @@ async fn logout(
     {
         return Err(unauthenticated());
     }
-    Ok((
+    Ok(revocation_response(true))
+}
+
+async fn revoke_session(
+    State(state): State<Arc<BrowserState>>,
+    path: Result<Path<String>, axum::extract::rejection::PathRejection>,
+    request: Request,
+) -> Result<Response, ApiError> {
+    let (request, _) = request.into_parts();
+    let token = authenticated_token(&state, &request).await?;
+    if request.uri.query().is_some() {
+        return Err(malformed_query());
+    }
+    let Path(session_id) =
+        path.map_err(|_| ApiError::invalid_field("session_id", "Use a canonical UUID"))?;
+    if uuid::Uuid::parse_str(&session_id)
+        .map(|id| id.to_string() != session_id)
+        .unwrap_or(true)
+    {
+        return Err(ApiError::invalid_field(
+            "session_id",
+            "Use a canonical UUID",
+        ));
+    }
+    match state
+        .sessions
+        .revoke_owned(&token, &session_id, Utc::now())
+        .await
+        .map_err(session_error)?
+    {
+        SessionRevocationOutcome::Unauthenticated => Err(unauthenticated()),
+        SessionRevocationOutcome::NotFound => Err(ApiError::new(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "Resource not found",
+            false,
+        )),
+        SessionRevocationOutcome::Revoked { is_current } => Ok(revocation_response(is_current)),
+    }
+}
+
+async fn revoke_all_sessions(
+    State(state): State<Arc<BrowserState>>,
+    request: Request,
+) -> Result<Response, ApiError> {
+    let (request, _) = request.into_parts();
+    let token = authenticated_token(&state, &request).await?;
+    if request.uri.query().is_some() {
+        return Err(malformed_query());
+    }
+    if !state
+        .sessions
+        .revoke_all_owned(&token, Utc::now())
+        .await
+        .map_err(session_error)?
+    {
+        return Err(unauthenticated());
+    }
+    Ok(revocation_response(true))
+}
+
+fn revocation_response(clear_cookie: bool) -> Response {
+    let mut response = (
         StatusCode::NO_CONTENT,
-        [
-            (header::CACHE_CONTROL, HeaderValue::from_static("no-store")),
-            (
-                header::SET_COOKIE,
-                super::browser_session::clear_session_cookie(),
-            ),
-        ],
+        [(header::CACHE_CONTROL, HeaderValue::from_static("no-store"))],
     )
-        .into_response())
+        .into_response();
+    if clear_cookie {
+        response.headers_mut().insert(
+            header::SET_COOKIE,
+            super::browser_session::clear_session_cookie(),
+        );
+    }
+    response
 }
 
 async fn accessible_projects(
@@ -266,11 +331,15 @@ async fn method_not_allowed(request: Request) -> Response {
     .into_response();
     response.headers_mut().insert(
         header::ALLOW,
-        HeaderValue::from_static(if request.uri().path() == "/api/v1/auth/session" {
-            "GET, HEAD, DELETE"
-        } else {
-            "GET, HEAD"
-        }),
+        HeaderValue::from_static(
+            if request.uri().path().starts_with("/api/v1/auth/sessions") {
+                "DELETE"
+            } else if request.uri().path() == "/api/v1/auth/session" {
+                "GET, HEAD, DELETE"
+            } else {
+                "GET, HEAD"
+            },
+        ),
     );
     response
 }
