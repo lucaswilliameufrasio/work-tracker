@@ -90,7 +90,7 @@ pub fn browser_document() -> Value {
         "info": {
             "title": "Puxiri opt-in browser API — partial development contract",
             "version": env!("CARGO_PKG_VERSION"),
-            "description": "Disabled (404) unless --browser-origin/PUXIRI_BROWSER_ORIGIN is configured. Listener does not terminate TLS; use an explicitly configured HTTPS origin. Cookie-only authentication; no Authorization fallback. Host must match; Origin and Fetch Metadata are checked when supplied, and mutations require exact Origin plus CSRF. Unknown/duplicate query fields are rejected. Every operation has no-store responses; HEAD has no body, including errors. No login/signup/setup/session issuance, API tokens, OAuth or request-rate budgets are provided by this contract. Do not store bearer tokens in localStorage. This document is generated locally, not served as an endpoint or a production readiness claim."
+            "description": "Disabled (404) unless --browser-origin/PUXIRI_BROWSER_ORIGIN is configured. Listener does not terminate TLS; use an explicitly configured HTTPS origin. Cookie-only authentication; no Authorization fallback. Host must match; Origin and Fetch Metadata are checked when supplied, and mutations require exact Origin plus CSRF. Unknown/duplicate query fields are rejected. Every operation has no-store responses; HEAD has no body, including errors. Browser admission: eight in-flight requests per router instance, no admission queue; path+query <=2048 bytes, headers <=64 entries/16384 aggregate name+value bytes, no payload bytes. Empty unknown-length bodies must finish within one second before any handler/transaction starts. There is no whole-handler timeout or per-client requests-per-second limit. No login/signup/setup/session issuance, API tokens or OAuth are provided by this contract. Do not store bearer tokens in localStorage. This document is generated locally, not served as an endpoint or a production readiness claim."
         },
         "security": [{"browserSession": []}],
         "paths": paths,
@@ -143,6 +143,22 @@ fn operation(id: &str, schema: Option<&str>, parameters: Vec<Value>, description
             "request_origin_denied/csrf_required/permission_denied: transport, CSRF or operational catalog authority denied",
         ),
         (
+            "408",
+            "request_timeout: body verification did not finish before any handler started; retryable=true",
+        ),
+        (
+            "413",
+            "payload_too_large: these routes accept no body bytes",
+        ),
+        (
+            "414",
+            "uri_too_long: path and query exceed the browser URI budget",
+        ),
+        (
+            "431",
+            "headers_too_large: browser header count or byte budget exceeded",
+        ),
+        (
             "404",
             "not_found: browser API opt-in disabled, or individual target absent/foreign/already revoked",
         ),
@@ -152,11 +168,12 @@ fn operation(id: &str, schema: Option<&str>, parameters: Vec<Value>, description
         ),
         (
             "503",
-            "storage_unavailable: persistence or audit unavailable; retryable=true",
+            "storage_unavailable/service_busy: persistence/audit unavailable or browser admission saturated; retryable=true. service_busy includes Retry-After: 1 as minimum backoff, not a readiness promise",
         ),
     ] {
         responses.insert(status.into(), error_response(message, schema.is_some()));
     }
+    responses.get_mut("503").unwrap()["headers"]["Retry-After"] = json!({"schema": {"type": "string", "const": "1"}, "description": "Present only for service_busy admission rejection."});
     if parameters
         .iter()
         .any(|parameter| parameter["name"] == "page_size" || parameter["name"] == "session_id")

@@ -4,6 +4,7 @@ use axum::{
     Json, Router,
     extract::{Path, Query, Request, State},
     http::{HeaderValue, StatusCode, header},
+    middleware,
     response::{IntoResponse, Response},
     routing::{delete, get},
 };
@@ -60,6 +61,10 @@ pub(super) fn routes(
         .route("/api/v1/admin/projects", get(operational_projects))
         .method_not_allowed_fallback(method_not_allowed)
         .with_state(state)
+        .layer(middleware::from_fn_with_state(
+            Arc::new(super::browser_budget::BrowserBudget::default()),
+            super::browser_budget::admit,
+        ))
 }
 
 #[derive(Default, Deserialize)]

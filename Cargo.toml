@@ -14,6 +14,7 @@ base64 = "0.22.1"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 clap = { version = "4.6.7", features = ["derive", "env"] }
 hmac = "=0.13.0"
+http-body-util = "0.1"
 libc = "=0.2.190"
 mime_guess = "2.0.5"
 rustix = { version = "=1.1.5", default-features = false, features = ["process"] }
@@ -26,7 +27,7 @@ serde_json = "1.0"
 subtle = "=2.6.1"
 sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "sqlite", "migrate", "macros"] }
 thiserror = "2.0"
-tokio = { version = "1.53.2", features = ["macros", "rt-multi-thread", "net", "signal", "time"] }
+tokio = { version = "1.53.2", features = ["macros", "rt-multi-thread", "net", "signal", "sync", "time"] }
 tower-http = { version = "0.7.1", features = ["set-header"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
@@ -38,7 +39,6 @@ rmcp = { version = "=3.5.1", default-features = false, features = ["server", "tr
 oauth2 = { version = "=5.0.0", default-features = false }
 openidconnect = { version = "=4.0.1", default-features = false, features = ["accept-string-booleans"] }
 aws-sdk-sesv2 = { version = "=1.123.0", default-features = false, features = ["rt-tokio", "default-https-client"] }
-http-body-util = "0.1"
 base64 = "=0.22.1"
 openssl = "=0.10.81"
 time = { version = "=0.3.55", features = ["parsing"] }

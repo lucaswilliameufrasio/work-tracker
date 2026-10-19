@@ -699,6 +699,211 @@ fn revoke_request(uri: &str, token: &SessionToken, csrf: &str) -> Request<Body> 
 }
 
 #[tokio::test]
+async fn browser_envelope_rejections_precede_activity_touch_revocation_and_audit() {
+    let directory = TempDir::new().unwrap();
+    let database = database(&directory).await;
+    let actor = user(&database, "member").await;
+    let sessions = SessionStore::new(database.pool().clone(), policy());
+    let issued = sessions
+        .issue(&actor, Utc::now() - TimeDelta::minutes(10))
+        .await
+        .unwrap();
+    let app = app(&directory, database.clone());
+    let csrf = csrf(&app, &issued.token).await;
+    let before =
+        (Utc::now() - TimeDelta::minutes(10)).to_rfc3339_opts(chrono::SecondsFormat::Nanos, true);
+    sqlx::query("UPDATE sessions SET last_activity_at = ? WHERE id = ?")
+        .bind(&before)
+        .bind(&issued.id)
+        .execute(database.pool())
+        .await
+        .unwrap();
+    for (scenario, status, code) in [
+        ("body", StatusCode::PAYLOAD_TOO_LARGE, "payload_too_large"),
+        ("length", StatusCode::PAYLOAD_TOO_LARGE, "payload_too_large"),
+        (
+            "invalid_length",
+            StatusCode::BAD_REQUEST,
+            "malformed_request",
+        ),
+        (
+            "duplicate_length",
+            StatusCode::BAD_REQUEST,
+            "malformed_request",
+        ),
+        (
+            "length_and_transfer",
+            StatusCode::BAD_REQUEST,
+            "malformed_request",
+        ),
+        (
+            "headers",
+            StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE,
+            "headers_too_large",
+        ),
+        ("uri", StatusCode::URI_TOO_LONG, "uri_too_long"),
+    ] {
+        let mut req = logout_request(&issued.token, &csrf);
+        match scenario {
+            "body" => {
+                *req.body_mut() = Body::from("test-only payload must not be reflected");
+            }
+            "length" => {
+                req.headers_mut()
+                    .insert(header::CONTENT_LENGTH, HeaderValue::from_static("1"));
+            }
+            "invalid_length" => {
+                req.headers_mut()
+                    .insert(header::CONTENT_LENGTH, HeaderValue::from_static("bad"));
+            }
+            "duplicate_length" => {
+                req.headers_mut()
+                    .append(header::CONTENT_LENGTH, HeaderValue::from_static("0"));
+                req.headers_mut()
+                    .append(header::CONTENT_LENGTH, HeaderValue::from_static("0"));
+            }
+            "length_and_transfer" => {
+                req.headers_mut()
+                    .insert(header::CONTENT_LENGTH, HeaderValue::from_static("0"));
+                req.headers_mut().insert(
+                    header::TRANSFER_ENCODING,
+                    HeaderValue::from_static("chunked"),
+                );
+            }
+            "headers" => {
+                req.headers_mut().insert(
+                    "x-probe",
+                    HeaderValue::from_str(&"h".repeat(16 * 1024)).unwrap(),
+                );
+            }
+            _ => {
+                *req.uri_mut() = format!("/api/v1/auth/session?x={}", "q".repeat(2048))
+                    .parse()
+                    .unwrap();
+            }
+        }
+        let response = app.clone().oneshot(req).await.unwrap();
+        assert!(!response.headers().contains_key(header::SET_COOKIE));
+        let body = json(response, status).await;
+        assert_eq!(body["code"], code);
+        let document = http::openapi::browser_document();
+        assert_contract_shape(
+            &document,
+            &document["paths"]["/api/v1/auth/session"]["delete"]["responses"][status.as_str()]["content"]
+                ["application/json"]["schema"],
+            &body,
+        );
+        assert!(!body.to_string().contains(issued.token.expose()));
+        assert!(!body.to_string().contains("test-only payload"));
+    }
+    let after: (String, Option<String>) =
+        sqlx::query_as("SELECT last_activity_at, revoked_at FROM sessions WHERE id = ?")
+            .bind(&issued.id)
+            .fetch_one(database.pool())
+            .await
+            .unwrap();
+    assert_eq!(after, (before, None));
+    let audits: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM audit_events")
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
+    assert_eq!(audits, 0);
+    let mut head = request("/api/v1/auth/session", Some(&issued.token));
+    *head.method_mut() = Method::HEAD;
+    *head.body_mut() = Body::from("x");
+    let response = app.clone().oneshot(head).await.unwrap();
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    assert!(
+        response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .is_empty()
+    );
+    let mut empty = request("/api/v1/auth/session", Some(&issued.token));
+    empty
+        .headers_mut()
+        .insert(header::CONTENT_LENGTH, HeaderValue::from_static("0"));
+    json(app.oneshot(empty).await.unwrap(), StatusCode::OK).await;
+}
+
+#[tokio::test]
+async fn incomplete_chunked_body_times_out_over_real_http_without_starting_mutation() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let directory = TempDir::new().unwrap();
+    let database = database(&directory).await;
+    let actor = user(&database, "member").await;
+    let sessions = SessionStore::new(database.pool().clone(), policy());
+    let issued = sessions
+        .issue(&actor, Utc::now() - TimeDelta::minutes(10))
+        .await
+        .unwrap();
+    let app = app(&directory, database.clone());
+    let csrf = csrf(&app, &issued.token).await;
+    let before =
+        (Utc::now() - TimeDelta::minutes(10)).to_rfc3339_opts(chrono::SecondsFormat::Nanos, true);
+    sqlx::query("UPDATE sessions SET last_activity_at = ? WHERE id = ?")
+        .bind(&before)
+        .bind(&issued.id)
+        .execute(database.pool())
+        .await
+        .unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    for (suffix, status, code, retryable) in [
+        ("", "408", "request_timeout", true),
+        ("invalid-chunk\r\n", "400", "malformed_request", false),
+    ] {
+        let mut connection = tokio::net::TcpStream::connect(address).await.unwrap();
+        connection.write_all(format!("DELETE /api/v1/auth/session HTTP/1.1\r\nHost: tracker.example.test\r\nCookie: __Host-puxiri_session={}\r\nOrigin: https://tracker.example.test\r\nx-csrf-token: {csrf}\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n{suffix}", issued.token.expose()).as_bytes()).await.unwrap();
+        let mut response = String::new();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            connection.read_to_string(&mut response),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(response.starts_with(&format!("HTTP/1.1 {status}")));
+        let (_, body) = response.split_once("\r\n\r\n").unwrap();
+        let error: Value = serde_json::from_str(body).unwrap();
+        assert_eq!(error["code"], code);
+        assert_eq!(error["retryable"], retryable);
+        assert!(!response.to_ascii_lowercase().contains("set-cookie"));
+        let document = http::openapi::browser_document();
+        assert_contract_shape(
+            &document,
+            &document["paths"]["/api/v1/auth/session"]["delete"]["responses"][status]["content"]["application/json"]
+                ["schema"],
+            &error,
+        );
+    }
+    let after: (String, Option<String>) =
+        sqlx::query_as("SELECT last_activity_at, revoked_at FROM sessions WHERE id = ?")
+            .bind(&issued.id)
+            .fetch_one(database.pool())
+            .await
+            .unwrap();
+    assert_eq!(after, (before, None));
+    let audits: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM audit_events")
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
+    assert_eq!(audits, 0);
+    let health = reqwest::get(format!("http://{address}/health/ready"))
+        .await
+        .unwrap();
+    assert_eq!(health.status(), StatusCode::OK);
+    server.abort();
+    assert!(server.await.unwrap_err().is_cancelled());
+}
+
+#[tokio::test]
 async fn browser_session_listing_is_bounded_private_no_store_and_marks_the_current_session() {
     let directory = TempDir::new().unwrap();
     let database = database(&directory).await;

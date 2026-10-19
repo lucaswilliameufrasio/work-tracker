@@ -15,6 +15,7 @@ use tower_http::set_header::SetResponseHeaderLayer;
 use crate::db::Database;
 
 mod browser_api;
+mod browser_budget;
 pub mod browser_session;
 mod error;
 pub mod openapi;
