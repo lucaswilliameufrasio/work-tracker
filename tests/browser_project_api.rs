@@ -81,6 +81,159 @@ async fn json(response: Response, status: StatusCode) -> Value {
     serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap()
 }
 
+// Checks the subset of JSON Schema emitted by our metadata, not a general
+// OpenAPI/JSON Schema validator. Route behavior remains real Axum + SQLite.
+fn assert_contract_shape(document: &Value, schema: &Value, value: &Value) {
+    if let Some(reference) = schema.get("$ref") {
+        let schema = document.pointer(&reference.as_str().unwrap()[1..]).unwrap();
+        assert_contract_shape(document, schema, value);
+        return;
+    }
+    assert!(!value.is_null());
+    match schema["type"].as_str().unwrap() {
+        "object" => {
+            let fields = value.as_object().unwrap();
+            if let Some(required) = schema.get("required") {
+                for field in required.as_array().unwrap() {
+                    assert!(fields.contains_key(field.as_str().unwrap()));
+                }
+            }
+            for (name, value) in fields {
+                if let Some(property) = schema["properties"].get(name) {
+                    assert_contract_shape(document, property, value);
+                } else if schema["additionalProperties"] == false {
+                    panic!("undocumented response field: {name}");
+                } else if schema["additionalProperties"].is_object() {
+                    assert_contract_shape(document, &schema["additionalProperties"], value);
+                }
+            }
+        }
+        "array" => {
+            let items = value.as_array().unwrap();
+            if let Some(maximum) = schema["maxItems"].as_u64() {
+                assert!(items.len() as u64 <= maximum);
+            }
+            for item in items {
+                assert_contract_shape(document, &schema["items"], item);
+            }
+        }
+        "string" => {
+            let text = value.as_str().unwrap();
+            match schema["format"].as_str() {
+                Some("uuid") => {
+                    Uuid::parse_str(text).unwrap();
+                }
+                Some("date-time") => {
+                    chrono::DateTime::parse_from_rfc3339(text).unwrap();
+                }
+                _ => {}
+            }
+            if let Some(minimum) = schema["minLength"].as_u64() {
+                assert!(text.chars().count() as u64 >= minimum);
+            }
+            if let Some(maximum) = schema["maxLength"].as_u64() {
+                assert!(text.chars().count() as u64 <= maximum);
+            }
+        }
+        "boolean" => {
+            assert!(value.is_boolean());
+        }
+        "integer" => {
+            let number = value.as_i64().unwrap();
+            if let Some(minimum) = schema["minimum"].as_i64() {
+                assert!(number >= minimum);
+            }
+        }
+        kind => {
+            panic!("unchecked schema type: {kind}");
+        }
+    }
+    if let Some(values) = schema["enum"].as_array() {
+        assert!(values.contains(value));
+    }
+}
+
+#[tokio::test]
+async fn every_documented_browser_operation_matches_real_success_and_auth_error_shapes() {
+    let document = http::openapi::browser_document();
+    let directory = TempDir::new().unwrap();
+    let database = database(&directory).await;
+    let actor = user(&database, "owner").await;
+    ProjectStore::new(database.pool().clone())
+        .create(&actor, "API", "Contract fixture", None, Utc::now())
+        .await
+        .unwrap();
+    let sessions = SessionStore::new(database.pool().clone(), policy());
+    let app = app(&directory, database);
+    for (path, operations) in document["paths"].as_object().unwrap() {
+        for (method, operation) in operations.as_object().unwrap() {
+            let issued = sessions.issue(&actor, Utc::now()).await.unwrap();
+            let uri = path.replace("{session_id}", &issued.id);
+            let token = csrf(&app, &issued.token).await;
+            let mut req = if method == "delete" {
+                revoke_request(&uri, &issued.token, &token)
+            } else {
+                request(&uri, Some(&issued.token))
+            };
+            *req.method_mut() = Method::from_bytes(method.to_ascii_uppercase().as_bytes()).unwrap();
+            let response = app.clone().oneshot(req).await.unwrap();
+            let status = if method == "delete" {
+                StatusCode::NO_CONTENT
+            } else {
+                StatusCode::OK
+            };
+            assert_eq!(response.status(), status, "{method} {path}");
+            assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+            if method == "head" || method == "delete" {
+                assert!(
+                    response
+                        .into_body()
+                        .collect()
+                        .await
+                        .unwrap()
+                        .to_bytes()
+                        .is_empty()
+                );
+            } else {
+                let body = json(response, status).await;
+                assert_contract_shape(
+                    &document,
+                    &operation["responses"]["200"]["content"]["application/json"]["schema"],
+                    &body,
+                );
+            }
+            let mut req = request(&uri, None);
+            *req.method_mut() = Method::from_bytes(method.to_ascii_uppercase().as_bytes()).unwrap();
+            if method == "delete" {
+                req.headers_mut().insert(
+                    header::ORIGIN,
+                    HeaderValue::from_static("https://tracker.example.test"),
+                );
+            }
+            let response = app.clone().oneshot(req).await.unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            if method == "head" {
+                assert!(
+                    response
+                        .into_body()
+                        .collect()
+                        .await
+                        .unwrap()
+                        .to_bytes()
+                        .is_empty()
+                );
+            } else {
+                let error = json(response, StatusCode::UNAUTHORIZED).await;
+                assert_contract_shape(
+                    &document,
+                    &operation["responses"]["401"]["content"]["application/json"]["schema"],
+                    &error,
+                );
+            }
+        }
+    }
+}
+
 #[tokio::test]
 async fn routes_are_opt_in_and_invalid_origin_cli_fails_before_creating_data() {
     let directory = TempDir::new().unwrap();

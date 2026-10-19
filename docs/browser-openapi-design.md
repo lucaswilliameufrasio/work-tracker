@@ -1,0 +1,17 @@
+# Generated browser API contract
+
+Slice220 generates an OpenAPI 3.1 document for the **implemented opt-in browser API only**, from `src/http/openapi.rs` and a local export example. No documentation endpoint, login/setup route, API-token scheme, OAuth issuer or runtime dependency is introduced. This is a partial development contract, not a release/public-exposure approval or completion of the plan's full generated-OpenAPI gate.
+
+The document must match cookie-only authentication, same-origin/CSRF mutation checks, no-store responses, omitted optional fields, existing error envelopes, current-session logout, own-session pagination/revocation and the two separate project catalogs. Explicitly document empty candidate pages with continuation, current-only cookie clearing, operational metadata not granting issue access, disabled-by-default routes and absent request-rate budgets. Do not advertise 429 protection or login flows that do not exist.
+
+Metadata schemas are explicit, not automatically inferred from SQL or authorization rules. Tests must check local references and operation uniqueness, plus exercise each documented operation through the real router/SQLite and compare success/error shapes. Schema/route changes must update the metadata and contract tests together; this is not a claim of formal validation against every rule of the OpenAPI specification.
+
+Export locally (stdout contains JSON only; Cargo diagnostics go to stderr):
+
+```sh
+mise exec -- cargo run --locked --example export_browser_openapi > /tmp/opencode/puxiri-browser-openapi.json
+```
+
+There are five documented paths and eleven operations: current-session GET/HEAD/DELETE, own-session collection GET/HEAD/DELETE, selected-session DELETE, and both project catalogs GET/HEAD. Health probes, frontend assets and default fallbacks are outside this browser document. The global cookie security scheme cannot express the full Origin/Host/Fetch Metadata/CSRF policy; operation descriptions and required mutation headers document that additional boundary. No server URL, real session, credential, user data or usable token example is embedded.
+
+`tests/browser_openapi.rs` checks deterministic JSON serialization, local `$ref`s, unique operation IDs, explicit route/method inventory, mandatory mutation Origin/CSRF, absence of response bodies for HEAD/204, and no invented request bodies or 429 handling. The router/SQLite test in `tests/browser_project_api.rs` creates temporary sessions and exercises every generated operation's success and unauthenticated path, comparing response shapes, field allowlists, types/formats, item bounds and enums with the emitted schema subset. It does not replace the authorization/CSRF/rollback tests, a full OpenAPI/JSON Schema conformance validator, external client generation or browser HTTPS tests. No API specification is served publicly by this slice.

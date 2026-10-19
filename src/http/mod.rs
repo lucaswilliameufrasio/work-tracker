@@ -17,6 +17,7 @@ use crate::db::Database;
 mod browser_api;
 pub mod browser_session;
 mod error;
+pub mod openapi;
 
 #[derive(RustEmbed)]
 #[folder = "web/dist/"]
