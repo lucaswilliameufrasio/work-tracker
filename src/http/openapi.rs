@@ -12,8 +12,13 @@ pub fn browser_document() -> Value {
         json!({"name": "include_archived", "in": "query", "schema": {"type": "boolean", "default": false}}),
     ];
     let session_query = vec![
-        page_size,
+        page_size.clone(),
         json!({"name": "cursor", "in": "query", "schema": uuid.clone(), "description": "Exclusive canonical lowercase hyphenated UUID boundary, descending session-record ID order. Need not identify an existing record and never grants access."}),
+    ];
+    let issue_query = vec![
+        page_size,
+        json!({"name": "project_id", "in": "path", "required": true, "schema": uuid.clone(), "description": "Canonical UUID; explicit project membership is required, not organization/installation authority alone."}),
+        json!({"name": "cursor", "in": "query", "schema": decimal_i64(), "description": "Exclusive positive canonical decimal issue-number boundary, ascending order. No signs/zero/leading zeroes; maximum 9223372036854775807."}),
     ];
     let mut paths = serde_json::Map::new();
     for (path, id, schema, query, description) in [
@@ -37,6 +42,13 @@ pub fn browser_document() -> Value {
             "ProjectPage",
             project_query.clone(),
             "Explicit project memberships only, including eligible guests. Organization/admin authority does not grant project content access. Ascending immutable project-key order.",
+        ),
+        (
+            "/api/v1/projects/{project_id}/issues",
+            "listProjectIssues",
+            "IssuePage",
+            issue_query,
+            "Session identity, explicit current project read access and summaries share one SQLite snapshot. Missing/inaccessible project gives generic404. Archived projects are readable; trash excluded. No descriptions/history/rank. Issue numbers and versions are decimal JSON strings preserving positive i64 precision. No issue mutation/detail/search or MCP access is provided. Cross-request pagination is not a frozen snapshot.",
         ),
         (
             "/api/v1/admin/projects",
@@ -104,6 +116,16 @@ pub fn browser_document() -> Value {
                 "SessionPage": page("Session"),
                 "ProjectPage": page("Project"),
                 "OperationalProjectPage": page("OperationalProject"),
+                "Issue": object(json!({
+                    "id": uuid.clone(), "project_id": uuid.clone(), "issue_number": decimal_i64(),
+                    "issue_key": {"type": "string"}, "issue_type_id": uuid.clone(), "status_id": uuid.clone(),
+                    "title": {"type": "string", "minLength": 1, "maxLength": 240},
+                    "assignee_user_id": uuid.clone(), "creator_user_id": uuid.clone(),
+                    "priority": {"type": "string", "enum": ["none", "low", "medium", "high", "urgent"]},
+                    "due_date": {"type": "string", "format": "date"}, "version": decimal_i64(),
+                    "created_at": timestamp.clone(), "updated_at": timestamp.clone()
+                }), &["id", "project_id", "issue_number", "issue_key", "issue_type_id", "status_id", "title", "creator_user_id", "priority", "version", "created_at", "updated_at"]),
+                "IssuePage": page("Issue"),
                 "Error": object(json!({"code": {"type": "string"}, "message": {"type": "string"}, "request_id": {"type": "string", "format": "uuid"}, "field_errors": {"type": "object", "additionalProperties": {"type": "string"}}, "retryable": {"type": "boolean"}}), &["code", "message", "request_id", "field_errors", "retryable"])
             }
         }
@@ -112,6 +134,10 @@ pub fn browser_document() -> Value {
 
 fn object(properties: Value, required: &[&str]) -> Value {
     json!({"type": "object", "additionalProperties": false, "required": required, "properties": properties})
+}
+
+fn decimal_i64() -> Value {
+    json!({"type": "string", "pattern": "^[1-9][0-9]{0,18}$", "maxLength": 19, "description": "Canonical decimal integer from 1 through 9223372036854775807, encoded as a string to preserve i64 precision in JavaScript."})
 }
 
 fn page(item: &str) -> Value {

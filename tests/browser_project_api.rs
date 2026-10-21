@@ -159,8 +159,21 @@ async fn every_documented_browser_operation_matches_real_success_and_auth_error_
     let directory = TempDir::new().unwrap();
     let database = database(&directory).await;
     let actor = user(&database, "owner").await;
-    ProjectStore::new(database.pool().clone())
+    let project = ProjectStore::new(database.pool().clone())
         .create(&actor, "API", "Contract fixture", None, Utc::now())
+        .await
+        .unwrap();
+    puxiri::issues::IssueStore::new(database.pool().clone())
+        .create(
+            &actor,
+            &project.id,
+            puxiri::issues::NewIssue {
+                title: "Contract issue",
+                description: Some("Do not expose in list"),
+                assignee_user_id: None,
+            },
+            Utc::now(),
+        )
         .await
         .unwrap();
     let sessions = SessionStore::new(database.pool().clone(), policy());
@@ -168,7 +181,9 @@ async fn every_documented_browser_operation_matches_real_success_and_auth_error_
     for (path, operations) in document["paths"].as_object().unwrap() {
         for (method, operation) in operations.as_object().unwrap() {
             let issued = sessions.issue(&actor, Utc::now()).await.unwrap();
-            let uri = path.replace("{session_id}", &issued.id);
+            let uri = path
+                .replace("{session_id}", &issued.id)
+                .replace("{project_id}", &project.id);
             let token = csrf(&app, &issued.token).await;
             let mut req = if method == "delete" {
                 revoke_request(&uri, &issued.token, &token)

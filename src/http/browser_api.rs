@@ -37,7 +37,10 @@ struct BrowserState {
     security: BrowserSessionSecurity,
     sessions: SessionStore,
     projects: SessionProjectReader,
+    issues: crate::issues::session::SessionIssueReader,
 }
+
+mod issues;
 
 pub(super) fn routes(
     database: Arc<Database>,
@@ -48,6 +51,7 @@ pub(super) fn routes(
         security,
         sessions: SessionStore::new(database.pool().clone(), policy),
         projects: SessionProjectReader::new(database.pool().clone(), policy),
+        issues: crate::issues::session::SessionIssueReader::new(database.pool().clone(), policy),
         database,
     });
     Router::new()
@@ -59,6 +63,7 @@ pub(super) fn routes(
         .route("/api/v1/auth/sessions/{session_id}", delete(revoke_session))
         .route("/api/v1/projects", get(accessible_projects))
         .route("/api/v1/admin/projects", get(operational_projects))
+        .merge(issues::routes())
         .method_not_allowed_fallback(method_not_allowed)
         .with_state(state)
         .layer(middleware::from_fn_with_state(

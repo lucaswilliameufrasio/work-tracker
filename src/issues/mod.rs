@@ -13,6 +13,7 @@ const MAX_DESCRIPTION_BYTES: usize = 65_536;
 const MAX_TITLE_CHARS: usize = 240;
 
 mod queries;
+pub mod session;
 pub use queries::{
     IssueDetails, IssueEvent, IssueEventKind, IssueListPage, IssueReadError, IssueSummary,
 };

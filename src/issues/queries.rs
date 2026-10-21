@@ -82,15 +82,29 @@ impl IssueStore {
         after_issue_number: Option<i64>,
         page_size: u16,
     ) -> Result<IssueListPage, IssueReadError> {
-        if !(1..=MAX_PAGE_SIZE).contains(&page_size) {
-            return Err(IssueReadError::InvalidPageSize);
-        }
-        if after_issue_number.is_some_and(|issue_number| issue_number <= 0) {
-            return Err(IssueReadError::InvalidCursor);
-        }
-
+        validate_list_options(after_issue_number, page_size)?;
         let mut transaction = self.pool.begin().await?;
-        authorize_project_read(&mut transaction, actor_user_id, project_id).await?;
+        let page = Self::list_in_transaction(
+            &mut transaction,
+            actor_user_id,
+            project_id,
+            after_issue_number,
+            page_size,
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(page)
+    }
+
+    pub(crate) async fn list_in_transaction(
+        transaction: &mut Transaction<'_, Sqlite>,
+        actor_user_id: &str,
+        project_id: &str,
+        after_issue_number: Option<i64>,
+        page_size: u16,
+    ) -> Result<IssueListPage, IssueReadError> {
+        validate_list_options(after_issue_number, page_size)?;
+        authorize_project_read(transaction, actor_user_id, project_id).await?;
 
         let rows = sqlx::query(
             "SELECT issues.id, issues.project_id, issues.issue_number, \
@@ -109,7 +123,7 @@ impl IssueStore {
         .bind(project_id)
         .bind(after_issue_number)
         .bind(i64::from(page_size) + 1)
-        .fetch_all(&mut *transaction)
+        .fetch_all(&mut **transaction)
         .await?;
 
         let has_more = rows.len() > usize::from(page_size);
@@ -123,8 +137,6 @@ impl IssueStore {
         } else {
             None
         };
-        transaction.commit().await?;
-
         Ok(IssueListPage {
             items,
             next_after_issue_number,
@@ -186,6 +198,16 @@ impl IssueStore {
         transaction.commit().await?;
         Ok(IssueDetails { issue, history })
     }
+}
+
+fn validate_list_options(cursor: Option<i64>, page_size: u16) -> Result<(), IssueReadError> {
+    if !(1..=MAX_PAGE_SIZE).contains(&page_size) {
+        return Err(IssueReadError::InvalidPageSize);
+    }
+    if cursor.is_some_and(|issue_number| issue_number <= 0) {
+        return Err(IssueReadError::InvalidCursor);
+    }
+    Ok(())
 }
 
 async fn authorize_project_read(

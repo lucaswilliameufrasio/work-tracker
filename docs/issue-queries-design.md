@@ -1,6 +1,6 @@
 # Issue read queries — feature design
 
-**Status:** Authorized, internal SQLite detail and list queries are implemented and verified by `RUSTUP_TOOLCHAIN=1.99.0 PUXIRI_E2E_PORT=18498 make check`; no HTTP/MCP endpoint or UI is part of this slice.
+**Status:** Authorized internal SQLite detail/list queries are implemented. Slice225 adds a [session-bound browser list endpoint](browser-issue-list-design.md); detail/history HTTP, MCP and issue UI remain pending. The original internal-query gate used `RUSTUP_TOOLCHAIN=1.99.0 PUXIRI_E2E_PORT=18498 make check`; newer evidence is in the development plan.
 
 **Requirements:** `docs/development-plan.md`, sections 5–6 and 10.2–10.3.
 
@@ -14,7 +14,7 @@
 ## Consistent authorization and persistence
 
 - Start a read transaction, load current access context, authorize `ReadProjectContent`, and query the issue/list on the same SQLite transaction. This pins a consistent database snapshot: a membership change cannot be observed between the access check and content read.
-- `IssueStore` owns read-model queries. Project/session extraction remains the responsibility of a future authenticated route; callers supply a validated actor ID, never a client-selected principal.
+- `IssueStore` owns read-model queries. `SessionIssueReader` now binds the list query to bearer-derived identity and the same caller-owned read transaction. The remaining ID-based internal APIs require a trusted authenticated caller, never a client-selected principal.
 - List items are summaries that omit descriptions. Detail queries may include the Markdown description and the current content-free functional history.
 
 ## Ordering and bounds

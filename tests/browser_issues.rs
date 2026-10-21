@@ -1,0 +1,449 @@
+use std::sync::Arc;
+
+use axum::{
+    Router,
+    body::Body,
+    http::{Method, Request, StatusCode, header},
+    response::Response,
+};
+use chrono::{TimeDelta, Utc};
+use http_body_util::BodyExt;
+use puxiri::{
+    auth::{
+        SessionToken,
+        master_key::MasterKeyStore,
+        session::{IssuedSession, SessionPolicy, SessionStore},
+    },
+    db::Database,
+    http::{self, browser_session::BrowserSessionSecurity},
+    issues::{
+        IssueStore, NewIssue,
+        session::{IssueListOptions, SessionIssueReadError, SessionIssueReader},
+    },
+    projects::ProjectStore,
+};
+use serde_json::Value;
+use tempfile::TempDir;
+use tower::ServiceExt;
+use uuid::Uuid;
+
+fn policy() -> SessionPolicy {
+    SessionPolicy::initial(TimeDelta::minutes(5)).unwrap()
+}
+
+async fn user(db: &Database, role: &str) -> String {
+    let id = Uuid::now_v7().to_string();
+    sqlx::query("INSERT INTO users (id, display_name, state, created_at, updated_at) VALUES (?, 'Issue API fixture', 'active', 'now', 'now')")
+        .bind(&id).execute(db.pool()).await.unwrap();
+    sqlx::query("INSERT INTO organization_members (organization_id, user_id, role, created_at) VALUES (1, ?, ?, 'now')")
+        .bind(&id).bind(role).execute(db.pool()).await.unwrap();
+    id
+}
+
+async fn member(db: &Database, project: &str, user: &str, role: &str) {
+    sqlx::query("INSERT INTO project_members (project_id, organization_id, user_id, role, created_at) VALUES (?, 1, ?, ?, 'now')")
+        .bind(project).bind(user).bind(role).execute(db.pool()).await.unwrap();
+}
+
+struct Fixture {
+    _directory: TempDir,
+    db: Arc<Database>,
+    owner: String,
+    project: String,
+    token: IssuedSession,
+    app: Router,
+}
+
+impl Fixture {
+    async fn new() -> Self {
+        let directory = TempDir::new().unwrap();
+        let db = Arc::new(Database::open(directory.path()).await.unwrap());
+        sqlx::query("INSERT INTO organizations (id, name, locale, timezone, created_at, updated_at) VALUES (1, 'Issue API tests', 'en', 'UTC', 'now', 'now')").execute(db.pool()).await.unwrap();
+        let owner = user(&db, "owner").await;
+        let project = ProjectStore::new(db.pool().clone())
+            .create(&owner, "DEV", "Private project", None, Utc::now())
+            .await
+            .unwrap()
+            .id;
+        let token = SessionStore::new(db.pool().clone(), policy())
+            .issue(&owner, Utc::now())
+            .await
+            .unwrap();
+        let security = BrowserSessionSecurity::new(
+            "https://tracker.example.test",
+            MasterKeyStore::load_or_create(&directory.path().join("master.key")).unwrap(),
+        )
+        .unwrap();
+        let app = http::router_with_browser_sessions(db.clone(), security, policy());
+        Self {
+            _directory: directory,
+            db,
+            owner,
+            project,
+            token,
+            app,
+        }
+    }
+
+    fn path(&self, query: &str) -> String {
+        format!("/api/v1/projects/{}/issues{query}", self.project)
+    }
+
+    async fn create(&self, title: &str) -> String {
+        IssueStore::new(self.db.pool().clone())
+            .create(
+                &self.owner,
+                &self.project,
+                NewIssue {
+                    title,
+                    description: Some("PRIVATE DESCRIPTION NOT IN SUMMARY"),
+                    assignee_user_id: None,
+                },
+                Utc::now(),
+            )
+            .await
+            .unwrap()
+            .id
+    }
+
+    async fn get(&self, path: &str, token: Option<&SessionToken>) -> Response {
+        self.app
+            .clone()
+            .oneshot(request(path, token))
+            .await
+            .unwrap()
+    }
+}
+
+fn request(path: &str, token: Option<&SessionToken>) -> Request<Body> {
+    let mut request = Request::builder()
+        .uri(path)
+        .header(header::HOST, "tracker.example.test");
+    if let Some(token) = token {
+        request = request.header(
+            header::COOKIE,
+            format!("__Host-puxiri_session={}", token.expose()),
+        );
+    }
+    request.body(Body::empty()).unwrap()
+}
+
+async fn json(response: Response, status: StatusCode) -> Value {
+    assert_eq!(response.status(), status);
+    assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+    assert!(
+        response
+            .headers()
+            .contains_key(header::CONTENT_SECURITY_POLICY)
+    );
+    assert!(!response.headers().contains_key(header::SET_COOKIE));
+    serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap()
+}
+
+#[tokio::test]
+async fn issue_api_paginates_private_summaries_and_preserves_large_i64_decimal_values() {
+    let f = Fixture::new().await;
+    let first = f.create("First <script>untrusted title</script>").await;
+    let trashed = f.create("Hidden trash").await;
+    sqlx::query("UPDATE issues SET trashed_at = ? WHERE id = ?")
+        .bind(Utc::now().to_rfc3339())
+        .bind(&trashed)
+        .execute(f.db.pool())
+        .await
+        .unwrap();
+    sqlx::query("UPDATE projects SET next_issue_number = 9007199254740993 WHERE id = ?")
+        .bind(&f.project)
+        .execute(f.db.pool())
+        .await
+        .unwrap();
+    let large = f.create("Large issue number").await;
+    sqlx::query("UPDATE issues SET version = 9223372036854775807, due_date = '2028-02-29', assignee_user_id = ? WHERE id = ?")
+        .bind(&f.owner).bind(&large).execute(f.db.pool()).await.unwrap();
+    let page = json(
+        f.get(&f.path("?page_size=1"), Some(&f.token.token)).await,
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(page["data"][0]["id"], first);
+    assert_eq!(page["data"][0]["issue_number"], "1");
+    assert_eq!(page["data"][0]["issue_key"], "DEV-1");
+    assert_eq!(page["data"][0]["version"], "1");
+    assert_eq!(page["next_cursor"], "1");
+    assert!(page["data"][0].get("description").is_none());
+    assert!(page["data"][0].get("history").is_none());
+    assert!(page["data"][0].get("rank").is_none());
+    assert!(page["data"][0].get("assignee_user_id").is_none());
+    assert!(page["data"][0].get("due_date").is_none());
+    let last = json(
+        f.get(&f.path("?cursor=1&page_size=1"), Some(&f.token.token))
+            .await,
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(last["data"][0]["id"], large);
+    assert_eq!(last["data"][0]["issue_number"], "9007199254740993");
+    assert_eq!(last["data"][0]["version"], "9223372036854775807");
+    assert_eq!(last["data"][0]["due_date"], "2028-02-29");
+    assert_eq!(last["data"][0]["assignee_user_id"], f.owner);
+    assert_eq!(last["has_more"], false);
+    assert!(last.get("next_cursor").is_none());
+    assert!(!last.to_string().contains("PRIVATE DESCRIPTION"));
+    let empty = json(
+        f.get(&f.path("?cursor=9223372036854775807"), Some(&f.token.token))
+            .await,
+        StatusCode::OK,
+    )
+    .await;
+    assert!(empty["data"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn project_membership_not_organization_or_installation_authority_controls_content() {
+    let f = Fixture::new().await;
+    f.create("Private title must not leak").await;
+    let admin = user(&f.db, "admin").await;
+    let installation = user(&f.db, "member").await;
+    sqlx::query("INSERT INTO installation_admins (user_id, created_at) VALUES (?, 'now')")
+        .bind(&installation)
+        .execute(f.db.pool())
+        .await
+        .unwrap();
+    let guest = user(&f.db, "guest").await;
+    member(&f.db, &f.project, &guest, "viewer").await;
+    let sessions = SessionStore::new(f.db.pool().clone(), policy());
+    for actor in [&admin, &installation] {
+        let session = sessions.issue(actor, Utc::now()).await.unwrap();
+        let denied = json(
+            f.get(&f.path(""), Some(&session.token)).await,
+            StatusCode::NOT_FOUND,
+        )
+        .await;
+        let missing = json(
+            f.get(
+                &format!("/api/v1/projects/{}/issues", Uuid::now_v7()),
+                Some(&session.token),
+            )
+            .await,
+            StatusCode::NOT_FOUND,
+        )
+        .await;
+        for field in ["code", "message", "field_errors", "retryable"] {
+            assert_eq!(denied[field], missing[field]);
+        }
+        assert!(!denied.to_string().contains("Private title"));
+    }
+    let session = sessions.issue(&guest, Utc::now()).await.unwrap();
+    json(
+        f.get(&f.path(""), Some(&session.token)).await,
+        StatusCode::OK,
+    )
+    .await;
+    ProjectStore::new(f.db.pool().clone())
+        .set_archived(&f.owner, &f.project, true, Utc::now())
+        .await
+        .unwrap();
+    json(
+        f.get(&f.path(""), Some(&session.token)).await,
+        StatusCode::OK,
+    )
+    .await;
+    sqlx::query("DELETE FROM project_members WHERE project_id = ? AND user_id = ?")
+        .bind(&f.project)
+        .bind(&guest)
+        .execute(f.db.pool())
+        .await
+        .unwrap();
+    json(
+        f.get(&f.path(""), Some(&session.token)).await,
+        StatusCode::NOT_FOUND,
+    )
+    .await;
+    json(f.get(&f.path(""), None).await, StatusCode::UNAUTHORIZED).await;
+}
+
+#[tokio::test]
+async fn issue_api_rejects_invalid_selectors_methods_and_transport_without_reflection() {
+    let f = Fixture::new().await;
+    for query in [
+        "?actor_user_id=someone",
+        "?include_trashed=true",
+        "?page_size=1&page_size=2",
+        "?page_size=bad",
+        "?cursor=1&cursor=2",
+    ] {
+        json(
+            f.get(&f.path(query), Some(&f.token.token)).await,
+            StatusCode::BAD_REQUEST,
+        )
+        .await;
+    }
+    for query in [
+        "?cursor=0",
+        "?cursor=-1",
+        "?cursor=01",
+        "?cursor=%2B1",
+        "?cursor=",
+        "?cursor=9223372036854775808",
+        "?page_size=0",
+        "?page_size=101",
+    ] {
+        let error = json(
+            f.get(&f.path(query), Some(&f.token.token)).await,
+            StatusCode::UNPROCESSABLE_ENTITY,
+        )
+        .await;
+        assert_eq!(error["code"], "invalid_params");
+    }
+    for id in ["invalid", "%FF", "00000000000000000000000000000000"] {
+        let error = json(
+            f.get(
+                &format!("/api/v1/projects/{id}/issues"),
+                Some(&f.token.token),
+            )
+            .await,
+            StatusCode::UNPROCESSABLE_ENTITY,
+        )
+        .await;
+        assert!(error["field_errors"]["project_id"].is_string());
+    }
+    let mut hostile = request(&f.path(""), Some(&f.token.token));
+    hostile.headers_mut().insert(
+        header::ORIGIN,
+        "https://attacker.example.test".parse().unwrap(),
+    );
+    json(
+        f.app.clone().oneshot(hostile).await.unwrap(),
+        StatusCode::FORBIDDEN,
+    )
+    .await;
+    let mut payload = request(&f.path(""), Some(&f.token.token));
+    *payload.body_mut() = Body::from("not accepted");
+    json(
+        f.app.clone().oneshot(payload).await.unwrap(),
+        StatusCode::PAYLOAD_TOO_LARGE,
+    )
+    .await;
+    for method in [Method::POST, Method::DELETE, Method::PATCH] {
+        let mut req = request(&f.path(""), Some(&f.token.token));
+        *req.method_mut() = method;
+        let response = f.app.clone().oneshot(req).await.unwrap();
+        assert_eq!(response.headers()[header::ALLOW], "GET, HEAD");
+        json(response, StatusCode::METHOD_NOT_ALLOWED).await;
+    }
+    let mut head = request(&f.path(""), Some(&f.token.token));
+    *head.method_mut() = Method::HEAD;
+    let response = f.app.clone().oneshot(head).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+    assert!(
+        response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .is_empty()
+    );
+    let closed = http::router(f.db.clone())
+        .oneshot(request(&f.path(""), Some(&f.token.token)))
+        .await
+        .unwrap();
+    json(closed, StatusCode::NOT_FOUND).await;
+}
+
+#[tokio::test]
+async fn session_bound_issue_queries_revalidate_without_touch_and_fail_closed_on_corrupt_storage() {
+    let f = Fixture::new().await;
+    let issue = f.create("Corruption fixture").await;
+    let reader = SessionIssueReader::new(f.db.pool().clone(), policy());
+    let options = IssueListOptions {
+        after_issue_number: None,
+        page_size: 50,
+    };
+    let before: String = sqlx::query_scalar("SELECT last_activity_at FROM sessions WHERE id = ?")
+        .bind(&f.token.id)
+        .fetch_one(f.db.pool())
+        .await
+        .unwrap();
+    reader
+        .list_project_issues(
+            &f.token.token,
+            &f.project,
+            options,
+            Utc::now() + TimeDelta::minutes(10),
+        )
+        .await
+        .unwrap();
+    let after: String = sqlx::query_scalar("SELECT last_activity_at FROM sessions WHERE id = ?")
+        .bind(&f.token.id)
+        .fetch_one(f.db.pool())
+        .await
+        .unwrap();
+    assert_eq!(before, after);
+    assert!(matches!(
+        reader
+            .list_project_issues(
+                &f.token.token,
+                &f.project,
+                options,
+                Utc::now() + TimeDelta::hours(24)
+            )
+            .await,
+        Err(SessionIssueReadError::Unauthenticated)
+    ));
+    sqlx::query("UPDATE issues SET due_date = '2026-02-31' WHERE id = ?")
+        .bind(issue)
+        .execute(f.db.pool())
+        .await
+        .unwrap();
+    let error = json(
+        f.get(&f.path(""), Some(&f.token.token)).await,
+        StatusCode::INTERNAL_SERVER_ERROR,
+    )
+    .await;
+    assert_eq!(error["code"], "unexpected_error");
+    assert!(!error.to_string().contains("2026-02-31"));
+    SessionStore::new(f.db.pool().clone(), policy())
+        .revoke(&f.owner, &f.token.id, Utc::now())
+        .await
+        .unwrap();
+    assert!(matches!(
+        reader
+            .list_project_issues(&f.token.token, &f.project, options, Utc::now())
+            .await,
+        Err(SessionIssueReadError::Unauthenticated)
+    ));
+    f.db.pool().close().await;
+    let error = json(
+        f.get(&f.path(""), Some(&f.token.token)).await,
+        StatusCode::SERVICE_UNAVAILABLE,
+    )
+    .await;
+    assert_eq!(error["code"], "storage_unavailable");
+}
+
+#[tokio::test]
+async fn exact_maximum_page_is_bounded_and_next_page_can_include_new_issues() {
+    let f = Fixture::new().await;
+    for _ in 0..101 {
+        f.create("Bounded list").await;
+    }
+    let page = json(
+        f.get(&f.path("?page_size=100"), Some(&f.token.token)).await,
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(page["data"].as_array().unwrap().len(), 100);
+    assert_eq!(page["next_cursor"], "100");
+    f.create("Created after page one").await;
+    let page = json(
+        f.get(&f.path("?page_size=100&cursor=100"), Some(&f.token.token))
+            .await,
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(page["data"].as_array().unwrap().len(), 2);
+    assert_eq!(page["data"][0]["issue_number"], "101");
+    assert_eq!(page["data"][1]["issue_number"], "102");
+    assert_eq!(page["has_more"], false);
+}
