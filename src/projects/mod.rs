@@ -3,6 +3,8 @@ use sqlx::SqlitePool;
 use thiserror::Error;
 use uuid::Uuid;
 
+pub mod catalog;
+
 pub mod membership;
 mod queries;
 pub mod session;

@@ -669,3 +669,289 @@ async fn detail_and_history_reject_invalid_inputs_and_corrupt_storage_without_le
         assert!(!error.to_string().contains("private timestamp"));
     }
 }
+
+#[tokio::test]
+async fn project_catalogs_expose_bounded_schema_with_lossless_positions_and_optional_omission() {
+    let f = Fixture::new().await;
+    let base = format!("/api/v1/projects/{}", f.project);
+    let statuses = json(
+        f.get(&format!("{base}/statuses"), Some(&f.token.token))
+            .await,
+        StatusCode::OK,
+    )
+    .await;
+    let items = statuses["data"].as_array().unwrap();
+    assert_eq!(items.len(), 5);
+    assert_eq!(
+        items
+            .iter()
+            .filter(|item| item["board_visible"] == true)
+            .count(),
+        3
+    );
+    let mut previous = "";
+    for status in items {
+        let id = status["id"].as_str().unwrap();
+        assert!(id > previous);
+        previous = id;
+        assert_eq!(status["project_id"], f.project);
+        assert!(status["position"].is_string());
+        assert!(status.get("archived_at").is_none());
+        assert!(status.get("icon_key").is_none());
+    }
+    let types = json(
+        f.get(&format!("{base}/issue-types"), Some(&f.token.token))
+            .await,
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(types["data"][0]["name"], "Task");
+    assert_eq!(types["data"][0]["system_key"], "task");
+    assert!(types["data"][0].get("icon_key").is_none());
+    assert!(types["data"][0].get("color_key").is_none());
+    let id = items[0]["id"].as_str().unwrap();
+    sqlx::query("UPDATE statuses SET position = 9223372036854775807, archived_at = ? WHERE id = ?")
+        .bind(Utc::now().to_rfc3339())
+        .bind(id)
+        .execute(f.db.pool())
+        .await
+        .unwrap();
+    sqlx::query("UPDATE issue_types SET icon_key = 'opaque_icon', color_key = 'opaque-color', archived_at = ? WHERE project_id = ?").bind(Utc::now().to_rfc3339()).bind(&f.project).execute(f.db.pool()).await.unwrap();
+    ProjectStore::new(f.db.pool().clone())
+        .set_archived(&f.owner, &f.project, true, Utc::now())
+        .await
+        .unwrap();
+    let visible = json(
+        f.get(&format!("{base}/statuses"), Some(&f.token.token))
+            .await,
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(visible["data"].as_array().unwrap().len(), 4);
+    let all = json(
+        f.get(
+            &format!("{base}/statuses?include_archived=true"),
+            Some(&f.token.token),
+        )
+        .await,
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(all["data"][0]["position"], "9223372036854775807");
+    assert!(all["data"][0]["archived_at"].is_string());
+    let hidden = json(
+        f.get(&format!("{base}/issue-types"), Some(&f.token.token))
+            .await,
+        StatusCode::OK,
+    )
+    .await;
+    assert!(hidden["data"].as_array().unwrap().is_empty());
+    let all = json(
+        f.get(
+            &format!("{base}/issue-types?include_archived=true"),
+            Some(&f.token.token),
+        )
+        .await,
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(all["data"][0]["icon_key"], "opaque_icon");
+    assert_eq!(all["data"][0]["color_key"], "opaque-color");
+}
+
+#[tokio::test]
+async fn catalog_keysets_use_existing_indexes_and_exact_pages_without_expanding_project_scope() {
+    use sqlx::Row;
+    let f = Fixture::new().await;
+    for number in 0..101 {
+        sqlx::query("INSERT INTO issue_types (id, project_id, name, created_at, updated_at) VALUES (?, ?, ?, 'now', 'now')")
+            .bind(Uuid::now_v7().to_string()).bind(&f.project).bind(format!("Custom {number}")).execute(f.db.pool()).await.unwrap();
+    }
+    let base = format!("/api/v1/projects/{}", f.project);
+    let first = json(
+        f.get(
+            &format!("{base}/issue-types?page_size=100"),
+            Some(&f.token.token),
+        )
+        .await,
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(first["data"].as_array().unwrap().len(), 100);
+    assert_eq!(first["next_cursor"], first["data"][99]["id"]);
+    let cursor = first["next_cursor"].as_str().unwrap();
+    let end = json(
+        f.get(
+            &format!("{base}/issue-types?page_size=100&cursor={cursor}"),
+            Some(&f.token.token),
+        )
+        .await,
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(end["data"].as_array().unwrap().len(), 2);
+    assert_eq!(end["has_more"], false);
+    assert!(end.get("next_cursor").is_none());
+    for query in [
+        "EXPLAIN QUERY PLAN SELECT id FROM statuses WHERE project_id = ? AND id > ? AND (? OR archived_at IS NULL) ORDER BY id ASC LIMIT ?",
+        "EXPLAIN QUERY PLAN SELECT id FROM issue_types WHERE project_id = ? AND id > ? AND (? OR archived_at IS NULL) ORDER BY id ASC LIMIT ?",
+    ] {
+        let plan = sqlx::query(query)
+            .bind(&f.project)
+            .bind(cursor)
+            .bind(false)
+            .bind(101_i64)
+            .fetch_all(f.db.pool())
+            .await
+            .unwrap();
+        let details: Vec<String> = plan.iter().map(|row| row.get("detail")).collect();
+        assert!(
+            details
+                .iter()
+                .any(|line| line.contains("project_id=? AND id>?")),
+            "{details:?}"
+        );
+        assert!(!details.iter().any(|line| line.contains("TEMP B-TREE")));
+    }
+    let admin = user(&f.db, "admin").await;
+    let guest = user(&f.db, "guest").await;
+    member(&f.db, &f.project, &guest, "viewer").await;
+    let sessions = SessionStore::new(f.db.pool().clone(), policy());
+    let denied = sessions.issue(&admin, Utc::now()).await.unwrap();
+    let viewer = sessions.issue(&guest, Utc::now()).await.unwrap();
+    for endpoint in ["statuses", "issue-types"] {
+        let path = format!("{base}/{endpoint}");
+        let inaccessible = json(
+            f.get(&path, Some(&denied.token)).await,
+            StatusCode::NOT_FOUND,
+        )
+        .await;
+        let missing = json(
+            f.get(
+                &format!("/api/v1/projects/{}/{endpoint}", Uuid::now_v7()),
+                Some(&denied.token),
+            )
+            .await,
+            StatusCode::NOT_FOUND,
+        )
+        .await;
+        for field in ["code", "message", "field_errors", "retryable"] {
+            assert_eq!(inaccessible[field], missing[field]);
+        }
+        json(f.get(&path, Some(&viewer.token)).await, StatusCode::OK).await;
+        json(f.get(&path, None).await, StatusCode::UNAUTHORIZED).await;
+    }
+    sqlx::query("DELETE FROM project_members WHERE project_id = ? AND user_id = ?")
+        .bind(&f.project)
+        .bind(&guest)
+        .execute(f.db.pool())
+        .await
+        .unwrap();
+    for endpoint in ["statuses", "issue-types"] {
+        json(
+            f.get(
+                &format!("{base}/{endpoint}?include_archived=true"),
+                Some(&viewer.token),
+            )
+            .await,
+            StatusCode::NOT_FOUND,
+        )
+        .await;
+    }
+    SessionStore::new(f.db.pool().clone(), policy())
+        .revoke(&f.owner, &f.token.id, Utc::now())
+        .await
+        .unwrap();
+    json(
+        f.get(&format!("{base}/statuses"), Some(&f.token.token))
+            .await,
+        StatusCode::UNAUTHORIZED,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn catalog_routes_reject_invalid_inputs_methods_and_corruption_with_closed_opt_in() {
+    let f = Fixture::new().await;
+    for endpoint in ["statuses", "issue-types"] {
+        let path = format!("/api/v1/projects/{}/{endpoint}", f.project);
+        for query in ["?page_size=0", "?page_size=101", "?cursor=bad"] {
+            json(
+                f.get(&format!("{path}{query}"), Some(&f.token.token)).await,
+                StatusCode::UNPROCESSABLE_ENTITY,
+            )
+            .await;
+        }
+        for query in [
+            "?include_archived=bad",
+            "?actor_user_id=other",
+            "?cursor=a&cursor=b",
+        ] {
+            json(
+                f.get(&format!("{path}{query}"), Some(&f.token.token)).await,
+                StatusCode::BAD_REQUEST,
+            )
+            .await;
+        }
+        json(
+            f.get(
+                &format!("/api/v1/projects/bad/{endpoint}"),
+                Some(&f.token.token),
+            )
+            .await,
+            StatusCode::UNPROCESSABLE_ENTITY,
+        )
+        .await;
+        let mut head = request(&path, Some(&f.token.token));
+        *head.method_mut() = Method::HEAD;
+        let response = f.app.clone().oneshot(head).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(
+            response
+                .into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes()
+                .is_empty()
+        );
+        let mut post = request(&path, Some(&f.token.token));
+        *post.method_mut() = Method::POST;
+        let response = f.app.clone().oneshot(post).await.unwrap();
+        assert_eq!(response.headers()[header::ALLOW], "GET, HEAD");
+        json(response, StatusCode::METHOD_NOT_ALLOWED).await;
+        json(
+            http::router(f.db.clone())
+                .oneshot(request(&path, Some(&f.token.token)))
+                .await
+                .unwrap(),
+            StatusCode::NOT_FOUND,
+        )
+        .await;
+    }
+    sqlx::query("UPDATE statuses SET archived_at = 'PRIVATE corrupt time' WHERE project_id = ?")
+        .bind(&f.project)
+        .execute(f.db.pool())
+        .await
+        .unwrap();
+    sqlx::query("UPDATE issue_types SET archived_at = 'PRIVATE corrupt time' WHERE project_id = ?")
+        .bind(&f.project)
+        .execute(f.db.pool())
+        .await
+        .unwrap();
+    for endpoint in ["statuses", "issue-types"] {
+        let error = json(
+            f.get(
+                &format!(
+                    "/api/v1/projects/{}/{endpoint}?include_archived=true",
+                    f.project
+                ),
+                Some(&f.token.token),
+            )
+            .await,
+            StatusCode::INTERNAL_SERVER_ERROR,
+        )
+        .await;
+        assert!(!error.to_string().contains("PRIVATE"));
+    }
+}

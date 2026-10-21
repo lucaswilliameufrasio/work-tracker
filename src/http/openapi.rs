@@ -122,6 +122,27 @@ pub fn browser_document() -> Value {
     ] {
         paths.insert(path.into(), json!({"get": operation(id, Some(schema), query.clone(), description), "head": operation(&format!("{id}Head"), None, query, description)}));
     }
+    let catalog_query = vec![
+        json!({"name": "project_id", "in": "path", "required": true, "schema": uuid.clone()}),
+        json!({"name": "page_size", "in": "query", "schema": {"type": "integer", "minimum": 1, "maximum": 100, "default": 50}}),
+        json!({"name": "cursor", "in": "query", "schema": uuid.clone(), "description": "Exclusive canonical UUID ascending boundary, not board display order; does not grant access."}),
+        json!({"name": "include_archived", "in": "query", "schema": {"type": "boolean", "default": false}}),
+    ];
+    for (path, id, schema) in [
+        (
+            "/api/v1/projects/{project_id}/statuses",
+            "listProjectStatuses",
+            "StatusPage",
+        ),
+        (
+            "/api/v1/projects/{project_id}/issue-types",
+            "listProjectIssueTypes",
+            "IssueTypePage",
+        ),
+    ] {
+        let description = "Explicit project membership and session identity revalidated with catalog data in one snapshot. Missing/inaccessible project returns generic404. Archived projects readable; archived catalog records excluded by default. UUID keyset traversal is not display order or a frozen cross-request snapshot. No editor or board query is enabled.";
+        paths.insert(path.into(), json!({"get": operation(id, Some(schema), catalog_query.clone(), description), "head": operation(&format!("{id}Head"), None, catalog_query.clone(), description)}));
+    }
     let mut document = json!({
         "openapi": "3.1.0",
         "info": {
@@ -172,6 +193,36 @@ pub fn browser_document() -> Value {
         ],
     );
     document["components"]["schemas"]["IssueHistoryPage"] = page("IssueHistoryEvent");
+    let mut properties = json!({
+        "id": {"type": "string", "format": "uuid"},
+        "project_id": {"type": "string", "format": "uuid"},
+        "name": {"type": "string", "minLength": 1},
+        "system_key": {"type": "string", "pattern": "^[a-z0-9_-]{1,48}$"},
+        "archived_at": {"type": "string", "format": "date-time"}
+    });
+    properties["icon_key"] = json!({"type": "string", "pattern": "^[a-z0-9_-]{1,48}$", "description": "Opaque existing token; no visual palette is defined by this read route."});
+    properties["color_key"] = properties["icon_key"].clone();
+    document["components"]["schemas"]["IssueType"] =
+        object(properties.clone(), &["id", "project_id", "name"]);
+    properties.as_object_mut().unwrap().remove("icon_key");
+    properties.as_object_mut().unwrap().remove("color_key");
+    properties["category"] =
+        json!({"type": "string", "enum": ["backlog", "active", "done", "canceled"]});
+    properties["position"] = json!({"type": "string", "pattern": "^(0|[1-9][0-9]{0,18})$", "maxLength": 19, "description": "Nonnegative i64 as lossless decimal string, maximum9223372036854775807. Board display order, distinct from UUID pagination order."});
+    properties["board_visible"] = json!({"type": "boolean"});
+    document["components"]["schemas"]["Status"] = object(
+        properties,
+        &[
+            "id",
+            "project_id",
+            "name",
+            "category",
+            "position",
+            "board_visible",
+        ],
+    );
+    document["components"]["schemas"]["StatusPage"] = page("Status");
+    document["components"]["schemas"]["IssueTypePage"] = page("IssueType");
     document
 }
 

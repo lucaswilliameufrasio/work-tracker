@@ -38,8 +38,10 @@ struct BrowserState {
     sessions: SessionStore,
     projects: SessionProjectReader,
     issues: crate::issues::session::SessionIssueReader,
+    catalogs: crate::projects::catalog::SessionProjectCatalogReader,
 }
 
+mod catalogs;
 mod issues;
 
 pub(super) fn routes(
@@ -52,6 +54,10 @@ pub(super) fn routes(
         sessions: SessionStore::new(database.pool().clone(), policy),
         projects: SessionProjectReader::new(database.pool().clone(), policy),
         issues: crate::issues::session::SessionIssueReader::new(database.pool().clone(), policy),
+        catalogs: crate::projects::catalog::SessionProjectCatalogReader::new(
+            database.pool().clone(),
+            policy,
+        ),
         database,
     });
     Router::new()
@@ -64,6 +70,7 @@ pub(super) fn routes(
         .route("/api/v1/projects", get(accessible_projects))
         .route("/api/v1/admin/projects", get(operational_projects))
         .merge(issues::routes())
+        .merge(catalogs::routes())
         .method_not_allowed_fallback(method_not_allowed)
         .with_state(state)
         .layer(middleware::from_fn_with_state(
