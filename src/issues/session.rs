@@ -7,7 +7,9 @@ use crate::auth::{
     session::{SessionError, SessionPolicy, SessionStore},
 };
 
-use super::{IssueListPage, IssueReadError, IssueStore};
+use super::{
+    IssueHistoryCursor, IssueHistoryPage, IssueListPage, IssueReadError, IssueRecord, IssueStore,
+};
 
 #[derive(Debug, Error)]
 pub enum SessionIssueReadError {
@@ -34,6 +36,57 @@ pub struct SessionIssueReader {
 }
 
 impl SessionIssueReader {
+    pub async fn get_project_issue(
+        &self,
+        token: &SessionToken,
+        project_id: &str,
+        issue_number: i64,
+        now: DateTime<Utc>,
+    ) -> Result<IssueRecord, SessionIssueReadError> {
+        let mut transaction = self.pool.begin().await?;
+        let principal = self
+            .sessions
+            .authenticate_in_transaction(&mut transaction, token, now)
+            .await?
+            .ok_or(SessionIssueReadError::Unauthenticated)?;
+        let issue = IssueStore::record_in_transaction(
+            &mut transaction,
+            principal.user_id(),
+            project_id,
+            issue_number,
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(issue)
+    }
+
+    pub async fn list_history(
+        &self,
+        token: &SessionToken,
+        project_id: &str,
+        issue_number: i64,
+        after: Option<&IssueHistoryCursor>,
+        page_size: u16,
+        now: DateTime<Utc>,
+    ) -> Result<IssueHistoryPage, SessionIssueReadError> {
+        let mut transaction = self.pool.begin().await?;
+        let principal = self
+            .sessions
+            .authenticate_in_transaction(&mut transaction, token, now)
+            .await?
+            .ok_or(SessionIssueReadError::Unauthenticated)?;
+        let page = IssueStore::history_in_transaction(
+            &mut transaction,
+            principal.user_id(),
+            project_id,
+            issue_number,
+            after,
+            page_size,
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(page)
+    }
     pub fn new(pool: SqlitePool, policy: SessionPolicy) -> Self {
         Self {
             sessions: SessionStore::new(pool.clone(), policy),
@@ -147,8 +200,47 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(old.items[0].title, "Before");
+        let old_detail = IssueStore::record_in_transaction(
+            &mut snapshot,
+            principal.user_id(),
+            &project.id,
+            issue.issue_number,
+        )
+        .await
+        .unwrap();
+        assert_eq!(old_detail.title, "Before");
+        let old_history = IssueStore::history_in_transaction(
+            &mut snapshot,
+            principal.user_id(),
+            &project.id,
+            issue.issue_number,
+            None,
+            50,
+        )
+        .await
+        .unwrap();
+        assert_eq!(old_history.items.len(), 1);
         snapshot.commit().await.unwrap();
         let reader = SessionIssueReader::new(db.pool().clone(), policy);
+        assert!(matches!(
+            reader
+                .get_project_issue(&issued.token, &project.id, issue.issue_number, now)
+                .await,
+            Err(SessionIssueReadError::Unauthenticated)
+        ));
+        assert!(matches!(
+            reader
+                .list_history(
+                    &issued.token,
+                    &project.id,
+                    issue.issue_number,
+                    None,
+                    50,
+                    now
+                )
+                .await,
+            Err(SessionIssueReadError::Unauthenticated)
+        ));
         assert!(matches!(
             reader
                 .list_project_issues(

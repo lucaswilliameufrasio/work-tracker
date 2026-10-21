@@ -97,7 +97,32 @@ pub fn browser_document() -> Value {
         });
         paths.entry(path).or_insert_with(|| json!({}))["delete"] = delete;
     }
-    json!({
+    let selectors = vec![
+        json!({"name": "project_id", "in": "path", "required": true, "schema": uuid.clone()}),
+        json!({"name": "issue_number", "in": "path", "required": true, "schema": decimal_i64()}),
+    ];
+    let mut history_query = selectors.clone();
+    history_query.push(json!({"name": "page_size", "in": "query", "schema": {"type": "integer", "minimum": 1, "maximum": 100, "default": 50}}));
+    history_query.push(json!({"name": "cursor", "in": "query", "schema": {"type": "string", "minLength": 90, "maxLength": 90}, "description": "Opaque canonical Base64URL timestamp/UUID keyset boundary; no padding. Does not grant access or require a surviving boundary row."}));
+    for (path, id, schema, query, description) in [
+        (
+            "/api/v1/projects/{project_id}/issues/{issue_number}",
+            "getProjectIssue",
+            "IssueDetail",
+            selectors,
+            "Authorized bounded issue record, including retained trash/archived projects. No embedded unbounded history; use history subresource. No query options. Markdown description is JSON data, not rendered HTML.",
+        ),
+        (
+            "/api/v1/projects/{project_id}/issues/{issue_number}/history",
+            "listIssueHistory",
+            "IssueHistoryPage",
+            history_query,
+            "Content-free actor/event/time journal. Explicit project/session authorization in one snapshot. Ascending occurred_at/id keyset, at most page_size plus one lookahead. Cross-request traversal is not frozen.",
+        ),
+    ] {
+        paths.insert(path.into(), json!({"get": operation(id, Some(schema), query.clone(), description), "head": operation(&format!("{id}Head"), None, query, description)}));
+    }
+    let mut document = json!({
         "openapi": "3.1.0",
         "info": {
             "title": "Puxiri opt-in browser API — partial development contract",
@@ -129,7 +154,25 @@ pub fn browser_document() -> Value {
                 "Error": object(json!({"code": {"type": "string"}, "message": {"type": "string"}, "request_id": {"type": "string", "format": "uuid"}, "field_errors": {"type": "object", "additionalProperties": {"type": "string"}}, "retryable": {"type": "boolean"}}), &["code", "message", "request_id", "field_errors", "retryable"])
             }
         }
-    })
+    });
+    let mut detail = document["components"]["schemas"]["Issue"].clone();
+    detail["properties"]["description"] = json!({"type": "string", "maxLength": 65536, "description": "Optional Markdown data, capped at 65536 UTF-8 bytes by the domain; never HTML-rendered by this endpoint."});
+    detail["properties"]["completed_at"] = timestamp.clone();
+    detail["properties"]["trashed_at"] = timestamp;
+    document["components"]["schemas"]["IssueDetail"] = detail;
+    document["components"]["schemas"]["IssueHistoryEvent"] = object(
+        json!({"id": uuid.clone(), "project_id": uuid.clone(), "issue_id": uuid.clone(), "actor_user_id": uuid, "event_kind": {"type": "string", "enum": ["issue.created"]}, "occurred_at": {"type": "string", "format": "date-time"}}),
+        &[
+            "id",
+            "project_id",
+            "issue_id",
+            "actor_user_id",
+            "event_kind",
+            "occurred_at",
+        ],
+    );
+    document["components"]["schemas"]["IssueHistoryPage"] = page("IssueHistoryEvent");
+    document
 }
 
 fn object(properties: Value, required: &[&str]) -> Value {
@@ -186,7 +229,7 @@ fn operation(id: &str, schema: Option<&str>, parameters: Vec<Value>, description
         ),
         (
             "404",
-            "not_found: browser API opt-in disabled, or individual target absent/foreign/already revoked",
+            "not_found: browser API opt-in disabled, or selected private resource absent/inaccessible/already revoked",
         ),
         (
             "500",
@@ -200,10 +243,11 @@ fn operation(id: &str, schema: Option<&str>, parameters: Vec<Value>, description
         responses.insert(status.into(), error_response(message, schema.is_some()));
     }
     responses.get_mut("503").unwrap()["headers"]["Retry-After"] = json!({"schema": {"type": "string", "const": "1"}, "description": "Present only for service_busy admission rejection."});
-    if parameters
-        .iter()
-        .any(|parameter| parameter["name"] == "page_size" || parameter["name"] == "session_id")
-    {
+    if parameters.iter().any(|parameter| {
+        parameter["name"] == "page_size"
+            || parameter["name"] == "session_id"
+            || parameter["name"] == "issue_number"
+    }) {
         responses.insert(
             "422".into(),
             error_response(

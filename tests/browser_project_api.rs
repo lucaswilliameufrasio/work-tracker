@@ -163,7 +163,7 @@ async fn every_documented_browser_operation_matches_real_success_and_auth_error_
         .create(&actor, "API", "Contract fixture", None, Utc::now())
         .await
         .unwrap();
-    puxiri::issues::IssueStore::new(database.pool().clone())
+    let contract_issue = puxiri::issues::IssueStore::new(database.pool().clone())
         .create(
             &actor,
             &project.id,
@@ -184,6 +184,7 @@ async fn every_documented_browser_operation_matches_real_success_and_auth_error_
             let uri = path
                 .replace("{session_id}", &issued.id)
                 .replace("{project_id}", &project.id);
+            let uri = uri.replace("{issue_number}", &contract_issue.issue_number.to_string());
             let token = csrf(&app, &issued.token).await;
             let mut req = if method == "delete" {
                 revoke_request(&uri, &issued.token, &token)

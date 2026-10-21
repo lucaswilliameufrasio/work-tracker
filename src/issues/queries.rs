@@ -1,3 +1,4 @@
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{DateTime, NaiveDate, Utc};
 use sqlx::{Row, Sqlite, Transaction, sqlite::SqliteRow};
 use thiserror::Error;
@@ -16,6 +17,8 @@ pub enum IssueReadError {
     InvalidIssueNumber,
     #[error("issue-list cursor must be a positive issue number")]
     InvalidCursor,
+    #[error("issue history cursor is invalid")]
+    InvalidHistoryCursor,
     #[error("issue-list page size must be between 1 and 100")]
     InvalidPageSize,
     #[error("persisted issue or history data is invalid")]
@@ -70,6 +73,54 @@ pub struct IssueEvent {
 pub struct IssueDetails {
     pub issue: IssueRecord,
     pub history: Vec<IssueEvent>,
+}
+
+#[derive(Clone)]
+pub struct IssueHistoryCursor {
+    occurred_at: String,
+    event_id: String,
+}
+
+impl IssueHistoryCursor {
+    pub fn decode(value: &str) -> Result<Self, IssueReadError> {
+        if value.len() != 90 {
+            return Err(IssueReadError::InvalidHistoryCursor);
+        }
+        let bytes = URL_SAFE_NO_PAD
+            .decode(value)
+            .map_err(|_| IssueReadError::InvalidHistoryCursor)?;
+        if bytes.len() != 67 || URL_SAFE_NO_PAD.encode(&bytes) != value {
+            return Err(IssueReadError::InvalidHistoryCursor);
+        }
+        let text = std::str::from_utf8(&bytes).map_err(|_| IssueReadError::InvalidHistoryCursor)?;
+        let (time, id) = text
+            .split_once('/')
+            .ok_or(IssueReadError::InvalidHistoryCursor)?;
+        let timestamp = parse_timestamp(time).map_err(|_| IssueReadError::InvalidHistoryCursor)?;
+        if time.len() != 30
+            || crate::auth::time::format_timestamp(timestamp) != time
+            || uuid::Uuid::parse_str(id)
+                .map(|id| id.to_string())
+                .ok()
+                .as_deref()
+                != Some(id)
+        {
+            return Err(IssueReadError::InvalidHistoryCursor);
+        }
+        Ok(Self {
+            occurred_at: time.to_owned(),
+            event_id: id.to_owned(),
+        })
+    }
+
+    pub fn encode(&self) -> String {
+        URL_SAFE_NO_PAD.encode(format!("{}/{}", self.occurred_at, self.event_id))
+    }
+}
+
+pub struct IssueHistoryPage {
+    pub items: Vec<IssueEvent>,
+    pub next_cursor: Option<IssueHistoryCursor>,
 }
 
 impl IssueStore {
@@ -156,8 +207,32 @@ impl IssueStore {
         }
 
         let mut transaction = self.pool.begin().await?;
-        authorize_project_read(&mut transaction, actor_user_id, project_id).await?;
+        let issue =
+            Self::record_in_transaction(&mut transaction, actor_user_id, project_id, issue_number)
+                .await?;
+        let history = sqlx::query("SELECT id, project_id, issue_id, actor_user_id, event_kind, occurred_at FROM issue_events WHERE project_id = ? AND issue_id = ? ORDER BY occurred_at ASC, id ASC")
+            .bind(project_id).bind(&issue.id).fetch_all(&mut *transaction).await?;
+        let mut events = Vec::with_capacity(history.len());
+        for row in history {
+            events.push(issue_event_from_row(&row)?);
+        }
+        transaction.commit().await?;
+        Ok(IssueDetails {
+            issue,
+            history: events,
+        })
+    }
 
+    pub(crate) async fn record_in_transaction(
+        transaction: &mut Transaction<'_, Sqlite>,
+        actor_user_id: &str,
+        project_id: &str,
+        issue_number: i64,
+    ) -> Result<IssueRecord, IssueReadError> {
+        if issue_number <= 0 {
+            return Err(IssueReadError::InvalidIssueNumber);
+        }
+        authorize_project_read(transaction, actor_user_id, project_id).await?;
         let row = sqlx::query(
             "SELECT issues.id, issues.project_id, issues.issue_number, \
                     projects.project_key, issues.issue_type_id, issues.status_id, \
@@ -171,32 +246,68 @@ impl IssueStore {
         )
         .bind(project_id)
         .bind(issue_number)
-        .fetch_optional(&mut *transaction)
+        .fetch_optional(&mut **transaction)
         .await?
         .ok_or(IssueReadError::Unavailable)?;
         let issue = issue_record_from_row(&row)?;
 
-        let event_rows = sqlx::query(
+        let creation = sqlx::query(
             "SELECT id, project_id, issue_id, actor_user_id, event_kind, occurred_at \
              FROM issue_events \
-             WHERE project_id = ? AND issue_id = ? \
-             ORDER BY occurred_at ASC, id ASC",
+              WHERE project_id = ? AND issue_id = ? AND event_kind = 'issue.created' \
+              ORDER BY occurred_at ASC, id ASC LIMIT 1",
         )
         .bind(project_id)
         .bind(&issue.id)
-        .fetch_all(&mut *transaction)
-        .await?;
-        if event_rows.is_empty() {
-            return Err(IssueReadError::CorruptData);
-        }
+        .fetch_optional(&mut **transaction)
+        .await?
+        .ok_or(IssueReadError::CorruptData)?;
+        issue_event_from_row(&creation)?;
+        Ok(issue)
+    }
 
-        let mut history = Vec::with_capacity(event_rows.len());
-        for event_row in event_rows {
-            history.push(issue_event_from_row(&event_row)?);
+    pub(crate) async fn history_in_transaction(
+        transaction: &mut Transaction<'_, Sqlite>,
+        actor_user_id: &str,
+        project_id: &str,
+        issue_number: i64,
+        after: Option<&IssueHistoryCursor>,
+        page_size: u16,
+    ) -> Result<IssueHistoryPage, IssueReadError> {
+        validate_list_options(None, page_size)?;
+        let issue =
+            Self::record_in_transaction(transaction, actor_user_id, project_id, issue_number)
+                .await?;
+        let rows = sqlx::query("SELECT id, project_id, issue_id, actor_user_id, event_kind, occurred_at FROM issue_events WHERE project_id = ? AND issue_id = ? AND (occurred_at, id) > (?, ?) ORDER BY occurred_at ASC, id ASC LIMIT ?")
+            .bind(project_id).bind(&issue.id)
+            .bind(after.map(|cursor| cursor.occurred_at.as_str()).unwrap_or(""))
+            .bind(after.map(|cursor| cursor.event_id.as_str()).unwrap_or(""))
+            .bind(i64::from(page_size) + 1).fetch_all(&mut **transaction).await?;
+        let has_more = rows.len() > usize::from(page_size);
+        let mut items = Vec::with_capacity(rows.len().min(usize::from(page_size)));
+        let mut last = None;
+        for row in rows.into_iter().take(usize::from(page_size)) {
+            let event = issue_event_from_row(&row)?;
+            let canonical = crate::auth::time::format_timestamp(event.occurred_at);
+            if row.try_get::<String, _>("occurred_at")? != canonical
+                || uuid::Uuid::parse_str(&event.id)
+                    .map(|id| id.to_string())
+                    .ok()
+                    .as_deref()
+                    != Some(event.id.as_str())
+            {
+                return Err(IssueReadError::CorruptData);
+            }
+            last = Some(IssueHistoryCursor {
+                occurred_at: canonical,
+                event_id: event.id.clone(),
+            });
+            items.push(event);
         }
-
-        transaction.commit().await?;
-        Ok(IssueDetails { issue, history })
+        Ok(IssueHistoryPage {
+            items,
+            next_cursor: if has_more { last } else { None },
+        })
     }
 }
 

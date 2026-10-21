@@ -1,6 +1,6 @@
 # Issue read queries — feature design
 
-**Status:** Authorized internal SQLite detail/list queries are implemented. Slice225 adds a [session-bound browser list endpoint](browser-issue-list-design.md); detail/history HTTP, MCP and issue UI remain pending. The original internal-query gate used `RUSTUP_TOOLCHAIN=1.99.0 PUXIRI_E2E_PORT=18498 make check`; newer evidence is in the development plan.
+**Status:** Authorized internal SQLite detail/list queries are implemented. Slice225 adds a [session-bound browser list endpoint](browser-issue-list-design.md); slice226 adds [bounded detail/history HTTP](browser-issue-detail-design.md). MCP and issue UI remain pending. The original internal-query gate used `RUSTUP_TOOLCHAIN=1.99.0 PUXIRI_E2E_PORT=18498 make check`; newer evidence is in the development plan.
 
 **Requirements:** `docs/development-plan.md`, sections 5–6 and 10.2–10.3.
 

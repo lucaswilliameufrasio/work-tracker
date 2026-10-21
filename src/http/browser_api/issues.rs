@@ -26,8 +26,12 @@ use super::{
 };
 
 pub(super) fn routes() -> Router<Arc<BrowserState>> {
-    Router::new().route("/api/v1/projects/{project_id}/issues", get(list))
+    Router::new()
+        .route("/api/v1/projects/{project_id}/issues", get(list))
+        .merge(detail::routes())
 }
+
+mod detail;
 
 #[derive(Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -123,7 +127,11 @@ async fn list(
     let query = Query::<ListQuery>::try_from_uri(&request.uri)
         .map_err(|_| malformed_query())?
         .0;
-    let cursor = query.cursor.as_deref().map(parse_cursor).transpose()?;
+    let cursor = query
+        .cursor
+        .as_deref()
+        .map(|value| positive_i64(value, "cursor"))
+        .transpose()?;
     let page = state
         .issues
         .list_project_issues(
@@ -157,20 +165,20 @@ fn canonical_uuid(value: &str) -> bool {
             .unwrap_or(false)
 }
 
-fn parse_cursor(value: &str) -> Result<i64, ApiError> {
+fn positive_i64(value: &str, field: &'static str) -> Result<i64, ApiError> {
     if value.is_empty()
         || value.len() > 19
         || value.starts_with('0')
         || !value.bytes().all(|byte| byte.is_ascii_digit())
     {
         return Err(ApiError::invalid_field(
-            "cursor",
+            field,
             "Use a positive canonical decimal i64",
         ));
     }
     value
         .parse()
-        .map_err(|_| ApiError::invalid_field("cursor", "Use a positive canonical decimal i64"))
+        .map_err(|_| ApiError::invalid_field(field, "Use a positive canonical decimal i64"))
 }
 
 fn read_error(error: SessionIssueReadError) -> ApiError {
@@ -193,6 +201,12 @@ fn read_error(error: SessionIssueReadError) -> ApiError {
         }
         SessionIssueReadError::Issue(IssueReadError::InvalidCursor) => {
             ApiError::invalid_field("cursor", "Use a positive canonical decimal i64")
+        }
+        SessionIssueReadError::Issue(IssueReadError::InvalidIssueNumber) => {
+            ApiError::invalid_field("issue_number", "Use a positive canonical decimal i64")
+        }
+        SessionIssueReadError::Issue(IssueReadError::InvalidHistoryCursor) => {
+            ApiError::invalid_field("cursor", "Use a valid issue-history cursor")
         }
         _ => ApiError::new(
             StatusCode::INTERNAL_SERVER_ERROR,

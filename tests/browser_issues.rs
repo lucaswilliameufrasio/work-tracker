@@ -447,3 +447,225 @@ async fn exact_maximum_page_is_bounded_and_next_page_can_include_new_issues() {
     assert_eq!(page["data"][1]["issue_number"], "102");
     assert_eq!(page["has_more"], false);
 }
+
+#[tokio::test]
+async fn direct_detail_and_history_include_retained_trash_but_do_not_embed_unbounded_journals() {
+    let f = Fixture::new().await;
+    let issue = f.create("Visible private detail").await;
+    sqlx::query("UPDATE issues SET description = ?, completed_at = ?, trashed_at = ? WHERE id = ?")
+        .bind("é".repeat(32768))
+        .bind(Utc::now().to_rfc3339())
+        .bind(Utc::now().to_rfc3339())
+        .bind(&issue)
+        .execute(f.db.pool())
+        .await
+        .unwrap();
+    ProjectStore::new(f.db.pool().clone())
+        .set_archived(&f.owner, &f.project, true, Utc::now())
+        .await
+        .unwrap();
+    let detail = json(
+        f.get(&f.path("/1"), Some(&f.token.token)).await,
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(detail["id"], issue);
+    assert_eq!(detail["description"].as_str().unwrap().len(), 65536);
+    assert!(detail["completed_at"].is_string());
+    assert!(detail["trashed_at"].is_string());
+    assert!(detail.get("history").is_none());
+    let history = json(
+        f.get(&f.path("/1/history?page_size=100"), Some(&f.token.token))
+            .await,
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(history["data"].as_array().unwrap().len(), 1);
+    assert_eq!(history["data"][0]["issue_id"], issue);
+    assert_eq!(history["data"][0]["event_kind"], "issue.created");
+    assert_eq!(history["data"][0].as_object().unwrap().len(), 6);
+    assert!(history.get("next_cursor").is_none());
+    assert_eq!(history["has_more"], false);
+    let list = json(
+        f.get(&f.path(""), Some(&f.token.token)).await,
+        StatusCode::OK,
+    )
+    .await;
+    assert!(list["data"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn history_cursor_boundaries_are_canonical_scoped_and_not_authorization_tokens() {
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+    use puxiri::issues::IssueHistoryCursor;
+    let f = Fixture::new().await;
+    f.create("History fixture").await;
+    let history = json(
+        f.get(&f.path("/1/history?page_size=1"), Some(&f.token.token))
+            .await,
+        StatusCode::OK,
+    )
+    .await;
+    let event = &history["data"][0];
+    let encoded = URL_SAFE_NO_PAD.encode(format!(
+        "{}/{}",
+        event["occurred_at"].as_str().unwrap(),
+        event["id"].as_str().unwrap()
+    ));
+    assert_eq!(encoded.len(), 90);
+    assert_eq!(
+        IssueHistoryCursor::decode(&encoded).unwrap().encode(),
+        encoded
+    );
+    let last = json(
+        f.get(
+            &f.path(&format!("/1/history?cursor={encoded}")),
+            Some(&f.token.token),
+        )
+        .await,
+        StatusCode::OK,
+    )
+    .await;
+    assert!(last["data"].as_array().unwrap().is_empty());
+    let before = URL_SAFE_NO_PAD
+        .encode("2000-01-01T00:00:00.000000000Z/00000000-0000-0000-0000-000000000000");
+    let first = json(
+        f.get(
+            &f.path(&format!("/1/history?cursor={before}")),
+            Some(&f.token.token),
+        )
+        .await,
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(first["data"].as_array().unwrap().len(), 1);
+    let plan = sqlx::query("EXPLAIN QUERY PLAN SELECT id FROM issue_events WHERE project_id = ? AND issue_id = ? AND (occurred_at, id) > (?, ?) ORDER BY occurred_at ASC, id ASC LIMIT ?")
+        .bind(&f.project).bind(event["issue_id"].as_str().unwrap()).bind("").bind("").bind(101_i64).fetch_all(f.db.pool()).await.unwrap();
+    use sqlx::Row;
+    let details: Vec<String> = plan.iter().map(|row| row.get("detail")).collect();
+    assert!(
+        details
+            .iter()
+            .any(|line| line.contains("issue_events_issue_time_idx"))
+    );
+    assert!(!details.iter().any(|line| line.contains("TEMP B-TREE")));
+    let admin = user(&f.db, "admin").await;
+    let other = SessionStore::new(f.db.pool().clone(), policy())
+        .issue(&admin, Utc::now())
+        .await
+        .unwrap();
+    for suffix in ["/1".to_owned(), format!("/1/history?cursor={before}")] {
+        json(
+            f.get(&f.path(&suffix), Some(&other.token)).await,
+            StatusCode::NOT_FOUND,
+        )
+        .await;
+        json(
+            f.get(&f.path(&suffix), None).await,
+            StatusCode::UNAUTHORIZED,
+        )
+        .await;
+    }
+    for cursor in [
+        "bad".to_owned(),
+        format!("{encoded}="),
+        URL_SAFE_NO_PAD
+            .encode("2026-99-99T00:00:00.000000000Z/00000000-0000-0000-0000-000000000000"),
+        URL_SAFE_NO_PAD
+            .encode("2026-01-01T00:00:00.000000000Z/gggggggg-gggg-gggg-gggg-gggggggggggg"),
+    ] {
+        json(
+            f.get(
+                &f.path(&format!("/1/history?cursor={cursor}")),
+                Some(&f.token.token),
+            )
+            .await,
+            StatusCode::UNPROCESSABLE_ENTITY,
+        )
+        .await;
+    }
+}
+
+#[tokio::test]
+async fn detail_and_history_reject_invalid_inputs_and_corrupt_storage_without_leaking_content() {
+    let f = Fixture::new().await;
+    let issue = f.create("Do not leak private detail on errors").await;
+    for suffix in [
+        "/0",
+        "/01",
+        "/-1",
+        "/9223372036854775808",
+        "/%FF",
+        "/0/history",
+        "/1/history?page_size=0",
+        "/1/history?page_size=101",
+    ] {
+        json(
+            f.get(&f.path(suffix), Some(&f.token.token)).await,
+            StatusCode::UNPROCESSABLE_ENTITY,
+        )
+        .await;
+    }
+    for suffix in [
+        "/1?cursor=1",
+        "/1/history?user_id=other",
+        "/1/history?page_size=1&page_size=2",
+    ] {
+        json(
+            f.get(&f.path(suffix), Some(&f.token.token)).await,
+            StatusCode::BAD_REQUEST,
+        )
+        .await;
+    }
+    for suffix in ["/999", "/999/history"] {
+        let error = json(
+            f.get(&f.path(suffix), Some(&f.token.token)).await,
+            StatusCode::NOT_FOUND,
+        )
+        .await;
+        assert!(!error.to_string().contains("private detail"));
+    }
+    for suffix in ["/1", "/1/history"] {
+        let mut head = request(&f.path(suffix), Some(&f.token.token));
+        *head.method_mut() = Method::HEAD;
+        let response = f.app.clone().oneshot(head).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(
+            response
+                .into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes()
+                .is_empty()
+        );
+        let mut post = request(&f.path(suffix), Some(&f.token.token));
+        *post.method_mut() = Method::POST;
+        let response = f.app.clone().oneshot(post).await.unwrap();
+        assert_eq!(response.headers()[header::ALLOW], "GET, HEAD");
+        json(response, StatusCode::METHOD_NOT_ALLOWED).await;
+        json(
+            http::router(f.db.clone())
+                .oneshot(request(&f.path(suffix), Some(&f.token.token)))
+                .await
+                .unwrap(),
+            StatusCode::NOT_FOUND,
+        )
+        .await;
+    }
+    sqlx::query(
+        "UPDATE issue_events SET occurred_at = 'malformed private timestamp' WHERE issue_id = ?",
+    )
+    .bind(&issue)
+    .execute(f.db.pool())
+    .await
+    .unwrap();
+    for suffix in ["/1", "/1/history"] {
+        let error = json(
+            f.get(&f.path(suffix), Some(&f.token.token)).await,
+            StatusCode::INTERNAL_SERVER_ERROR,
+        )
+        .await;
+        assert!(!error.to_string().contains("private timestamp"));
+    }
+}
