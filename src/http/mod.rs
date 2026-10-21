@@ -117,7 +117,14 @@ async fn frontend(request: Request) -> Response {
         || path == "index.html"
         || !path.contains('.') && !path.starts_with("assets/")
     {
-        ("index.html", "no-cache")
+        (
+            "index.html",
+            if path == "settings/sessions" {
+                "no-store"
+            } else {
+                "no-cache"
+            },
+        )
     } else {
         (path, "public, max-age=31536000, immutable")
     };

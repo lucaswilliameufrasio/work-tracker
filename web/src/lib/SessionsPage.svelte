@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, tick } from 'svelte';
+  import { flushSync, onMount, tick } from 'svelte';
   import {
     SessionScreen,
     type SessionScreenState,
@@ -48,8 +48,42 @@
   }
 
   onMount(() => {
-    void screen.start();
-    return () => screen.dispose();
+    const conceal = () => flushSync(() => screen.suspend());
+    const restore = () => {
+      if (document.visibilityState === 'visible') {
+        void screen.resume();
+      }
+    };
+    const visibility = () => {
+      if (document.visibilityState === 'hidden') {
+        conceal();
+      } else {
+        restore();
+      }
+    };
+    const pageShow = (event: globalThis.PageTransitionEvent) => {
+      if (event.persisted) {
+        restore();
+      }
+    };
+    globalThis.addEventListener('pagehide', conceal);
+    globalThis.addEventListener('blur', conceal);
+    globalThis.addEventListener('focus', restore);
+    globalThis.addEventListener('pageshow', pageShow);
+    document.addEventListener('visibilitychange', visibility);
+    if (document.visibilityState === 'visible') {
+      void screen.start();
+    } else {
+      screen.suspend();
+    }
+    return () => {
+      globalThis.removeEventListener('pagehide', conceal);
+      globalThis.removeEventListener('blur', conceal);
+      globalThis.removeEventListener('focus', restore);
+      globalThis.removeEventListener('pageshow', pageShow);
+      document.removeEventListener('visibilitychange', visibility);
+      screen.dispose();
+    };
   });
 </script>
 
@@ -59,6 +93,14 @@
 
   {#if view.type === 'idle' || view.type === 'loading'}
     <p role="status">Carregando sessões…</p>
+  {:else if view.type === 'suspended'}
+    <h2 tabindex="-1" data-view-heading>
+      Sessões ocultas até nova verificação
+    </h2>
+    <p role="status">Ao retornar, seus acessos serão consultados novamente.</p>
+    <button onclick={() => void perform(() => screen.refresh())}
+      >Consultar sessões</button
+    >
   {:else if view.type === 'ready'}
     {#if view.notice}<p role="status" class="success">{view.notice}</p>{/if}
     <h2 tabindex="-1" data-view-heading>Sessões ativas nesta página</h2>

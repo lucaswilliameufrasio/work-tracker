@@ -33,6 +33,114 @@ function fixture() {
 }
 
 describe('single-state session workflow', () => {
+  it('drops private rows and confirmations on suspension and only reads on return', async () => {
+    const { screen, api } = fixture();
+    await screen.start();
+    screen.chooseAll();
+    screen.suspend();
+    expect(screen.state).toEqual({ type: 'suspended' });
+    await screen.submit();
+    expect(api.revokeAll).not.toHaveBeenCalled();
+    await screen.resume();
+    expect(api.read).toHaveBeenCalledTimes(2);
+    expect(api.read.mock.calls[1]?.[0].cursor).toBeUndefined();
+    expect(screen.state.type).toBe('ready');
+  });
+
+  it('ignores late private reads after a newer revalidation denies access', async () => {
+    const { screen, api } = fixture();
+    let finish: ((value: SessionPage) => void) | undefined;
+    api.read.mockImplementationOnce(
+      () =>
+        new Promise<SessionPage>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const old = screen.start();
+    screen.suspend();
+    expect(api.read.mock.calls[0]?.[1].aborted).toBe(true);
+    api.read.mockRejectedValueOnce(
+      new SessionRequestError(401, 'unauthenticated', id, false),
+    );
+    await screen.resume();
+    expect(screen.state).toEqual({ type: 'signed-out', reason: 'expired' });
+    finish?.(page);
+    await old;
+    expect(screen.state).toEqual({ type: 'signed-out', reason: 'expired' });
+  });
+
+  it('reconciles a suspended command with a read and ignores its late success', async () => {
+    const { screen, api } = fixture();
+    let finish: (() => void) | undefined;
+    api.revokeAll.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    await screen.start();
+    screen.chooseAll();
+    const pending = screen.submit();
+    screen.suspend();
+    expect(api.revokeAll.mock.calls[0]?.[0].aborted).toBe(true);
+    expect(screen.state).toEqual({ type: 'mutation-uncertain' });
+    await screen.resume();
+    expect(screen.state).toMatchObject({
+      type: 'ready',
+      notice:
+        'O resultado do encerramento anterior não foi confirmado. Revise a lista.',
+    });
+    finish?.();
+    await pending;
+    expect(screen.state.type).toBe('ready');
+    expect(api.revokeAll).toHaveBeenCalledTimes(1);
+    expect(api.read).toHaveBeenCalledTimes(2);
+  });
+
+  it('coalesces repeated restore events and ignores late read failures', async () => {
+    const { screen, api } = fixture();
+    let fail: ((reason: Error) => void) | undefined;
+    api.read.mockImplementationOnce(
+      () =>
+        new Promise<SessionPage>((_resolve, reject) => {
+          fail = reject;
+        }),
+    );
+    const old = screen.start();
+    screen.suspend();
+    const restoring = screen.resume();
+    await screen.resume();
+    await restoring;
+    expect(api.read).toHaveBeenCalledTimes(2);
+    fail?.(new Error('late aborted read'));
+    await old;
+    expect(screen.state.type).toBe('ready');
+    screen.suspend();
+    screen.dispose();
+    await screen.resume();
+    expect(api.read).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not overwrite a new ready view with an old suspended command failure', async () => {
+    const { screen, api } = fixture();
+    let fail: ((reason: Error) => void) | undefined;
+    api.revokeAll.mockImplementationOnce(
+      () =>
+        new Promise<void>((_resolve, reject) => {
+          fail = reject;
+        }),
+    );
+    await screen.start();
+    screen.chooseAll();
+    const old = screen.submit();
+    screen.suspend();
+    await screen.resume();
+    fail?.(new Error('late failed command'));
+    await old;
+    expect(screen.state.type).toBe('ready');
+    expect(api.revokeAll).toHaveBeenCalledTimes(1);
+  });
+
   it('loads only one bounded page and does not skip empty continuation pages', async () => {
     const { screen, api } = fixture();
     api.read.mockResolvedValueOnce({

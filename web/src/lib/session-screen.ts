@@ -13,6 +13,7 @@ export type TerminationTarget =
 export type SessionScreenState =
   | { type: 'idle' }
   | { type: 'loading' }
+  | { type: 'suspended' }
   | { type: 'ready'; page: SessionPage; notice?: string }
   | { type: 'confirm'; page: SessionPage; target: TerminationTarget }
   | { type: 'submitting'; target: TerminationTarget }
@@ -36,6 +37,8 @@ const client: Client = {
 export class SessionScreen {
   private current: SessionScreenState = { type: 'idle' };
   private readonly lifetime = new AbortController();
+  private operation = new AbortController();
+  private generation = 0;
   private readonly changed: (state: SessionScreenState) => void;
   private readonly client: Client;
 
@@ -53,6 +56,34 @@ export class SessionScreen {
 
   dispose(): void {
     this.lifetime.abort();
+    this.invalidate();
+  }
+
+  suspend(): void {
+    if (this.lifetime.signal.aborted) {
+      return;
+    }
+    this.invalidate();
+    if (this.current.type === 'submitting') {
+      this.set({ type: 'mutation-uncertain' });
+    } else if (
+      ['idle', 'loading', 'ready', 'confirm'].includes(this.current.type)
+    ) {
+      this.set({ type: 'suspended' });
+    }
+  }
+
+  async resume(): Promise<void> {
+    if (
+      this.current.type === 'suspended' ||
+      this.current.type === 'mutation-uncertain'
+    ) {
+      const notice =
+        this.current.type === 'mutation-uncertain'
+          ? 'O resultado do encerramento anterior não foi confirmado. Revise a lista.'
+          : undefined;
+      await this.read(undefined, notice);
+    }
   }
 
   async start(): Promise<void> {
@@ -63,9 +94,13 @@ export class SessionScreen {
 
   async refresh(): Promise<void> {
     if (
-      ['ready', 'read-error', 'unavailable', 'mutation-uncertain'].includes(
-        this.current.type,
-      )
+      [
+        'ready',
+        'read-error',
+        'unavailable',
+        'mutation-uncertain',
+        'suspended',
+      ].includes(this.current.type)
     ) {
       await this.read();
     }
@@ -114,15 +149,16 @@ export class SessionScreen {
       return;
     }
     const target = this.current.target;
+    const operation = this.begin();
     this.set({ type: 'submitting', target });
     try {
       if (target.type === 'all') {
-        await this.client.revokeAll(this.lifetime.signal);
+        await this.client.revokeAll(operation.signal);
       } else {
-        await this.client.revoke(target.session.id, this.lifetime.signal);
+        await this.client.revoke(target.session.id, operation.signal);
       }
     } catch (error) {
-      if (this.lifetime.signal.aborted) {
+      if (!this.active(operation.generation)) {
         return;
       }
       if (error instanceof SessionRequestError && error.status === 401) {
@@ -137,7 +173,7 @@ export class SessionScreen {
       }
       return;
     }
-    if (this.lifetime.signal.aborted) {
+    if (!this.active(operation.generation)) {
       return;
     }
     if (target.type === 'all' || target.session.is_current) {
@@ -154,23 +190,45 @@ export class SessionScreen {
     }
   }
 
+  private invalidate(): void {
+    this.operation.abort();
+    this.generation += 1;
+  }
+
+  private begin(): { signal: AbortSignal; generation: number } {
+    this.invalidate();
+    this.operation = new AbortController();
+    return {
+      signal: AbortSignal.any([this.lifetime.signal, this.operation.signal]),
+      generation: this.generation,
+    };
+  }
+
+  private active(generation: number): boolean {
+    return !this.lifetime.signal.aborted && generation === this.generation;
+  }
+
   private async read(cursor?: string, notice?: string): Promise<void> {
     if (this.lifetime.signal.aborted) {
       return;
     }
+    const operation = this.begin();
     this.set({ type: 'loading' });
     try {
       const page = await this.client.read(
         { cursor, page_size: 20 },
-        this.lifetime.signal,
+        operation.signal,
       );
+      if (!this.active(operation.generation)) {
+        return;
+      }
       this.set({
         type: 'ready',
         page,
         ...(notice === undefined ? {} : { notice }),
       });
     } catch (error) {
-      if (this.lifetime.signal.aborted) {
+      if (!this.active(operation.generation)) {
         return;
       }
       if (error instanceof SessionRequestError && error.status === 401) {

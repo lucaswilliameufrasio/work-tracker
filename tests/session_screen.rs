@@ -150,7 +150,13 @@ async fn session_screen_uses_real_https_browser_cookies_confirmations_and_transa
     });
     let mut fixtures = Vec::new();
     let mut owners = Vec::new();
-    for kind in ["uncertain", "global", "current", "native-retry"] {
+    for kind in [
+        "uncertain",
+        "global",
+        "current",
+        "native-retry",
+        "lifecycle",
+    ] {
         let actor = user(&database).await;
         let own = sessions.issue(&actor, Utc::now()).await.unwrap();
         let other = sessions.issue(&actor, Utc::now()).await.unwrap();
@@ -161,7 +167,14 @@ async fn session_screen_uses_real_https_browser_cookies_confirmations_and_transa
                 .unwrap();
         }
         fixtures.push(json!({"kind": kind, "token": own.token.expose(), "current_id": own.id, "other_id": other.id}));
-        owners.push((actor, if kind == "current" { 2_i64 } else { 22_i64 }));
+        owners.push((
+            actor,
+            if matches!(kind, "current" | "lifecycle") {
+                2_i64
+            } else {
+                22_i64
+            },
+        ));
     }
     let stranger = user(&database).await;
     let foreign = sessions.issue(&stranger, Utc::now()).await.unwrap();

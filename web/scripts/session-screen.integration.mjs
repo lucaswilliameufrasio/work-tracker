@@ -124,7 +124,8 @@ try {
     assert.equal(sessionCookie.path, '/');
     const page = await context.newPage();
     page.on('pageerror', (error) => errors.push(error.message));
-    await page.goto(`${origin}/settings/sessions`);
+    const documentResponse = await page.goto(`${origin}/settings/sessions`);
+    assert.equal(documentResponse?.headers()['cache-control'], 'no-store');
     await expect(page.getByRole('status')).toContainText(
       'Nenhuma sessão ativa nesta página.',
     );
@@ -133,6 +134,28 @@ try {
     await expect(
       page.getByRole('heading', { name: 'Sessão atual', exact: true }),
     ).toBeVisible();
+    if (fixture.kind === 'global') {
+      // Headless tabs remain visibilityState=visible. Exercise the standard
+      // persisted-page event seam explicitly, not a claim of actual BFCache.
+      const remainingRows = await page.evaluate(() => {
+        globalThis.dispatchEvent(
+          new globalThis.PageTransitionEvent('pagehide', { persisted: true }),
+        );
+        return document.querySelectorAll('[data-session-id]').length;
+      });
+      assert.equal(remainingRows, 0);
+      await expect(page.locator('[data-session-id]')).toHaveCount(0);
+      await page.evaluate(() =>
+        globalThis.dispatchEvent(
+          new globalThis.PageTransitionEvent('pageshow', { persisted: true }),
+        ),
+      );
+      await expect(page.getByRole('status')).toContainText(
+        'Nenhuma sessão ativa nesta página.',
+      );
+      await page.getByRole('button', { name: 'Próxima página' }).click();
+      await expect(page.locator('[data-session-id]')).toHaveCount(2);
+    }
     assert.equal(
       await page.evaluate(() =>
         document.cookie.includes('__Host-puxiri_session'),
@@ -208,6 +231,47 @@ try {
     assert.equal(mutations, before + 1);
     await page.getByRole('button', { name: 'Próxima página' }).click();
     await expect(page.locator('[data-session-id]')).toHaveCount(1);
+    if (fixture.kind === 'lifecycle') {
+      await page.evaluate(() =>
+        globalThis.dispatchEvent(
+          new globalThis.PageTransitionEvent('pagehide', { persisted: true }),
+        ),
+      );
+      await expect(page.locator('[data-session-id]')).toHaveCount(0);
+      const secondTab = await context.newPage();
+      await secondTab.goto(origin);
+      const result = await secondTab.evaluate(async () => {
+        const response = await fetch('/api/v1/auth/session', {
+          credentials: 'same-origin',
+          cache: 'no-store',
+        });
+        const current = await response.json();
+        return (
+          await fetch('/api/v1/auth/session', {
+            method: 'DELETE',
+            credentials: 'same-origin',
+            headers: { 'x-csrf-token': current.csrf_token },
+          })
+        ).status;
+      });
+      assert.equal(result, 204);
+      await secondTab.close();
+      await page.bringToFront();
+      await page.evaluate(() =>
+        globalThis.dispatchEvent(
+          new globalThis.PageTransitionEvent('pageshow', { persisted: true }),
+        ),
+      );
+      await expect(
+        page.getByRole('heading', { name: 'Sua sessão não está ativa' }),
+      ).toBeVisible();
+      await expect(page.locator('[data-session-id]')).toHaveCount(0);
+      assert.equal(mutations, before + 2);
+      assert.deepEqual(errors, []);
+      assert.deepEqual(external, []);
+      await context.close();
+      continue;
+    }
     if (fixture.kind === 'current') {
       await page.getByRole('button', { name: 'Encerrar sessão atual' }).click();
       await expect(

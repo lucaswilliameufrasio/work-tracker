@@ -479,6 +479,19 @@ async fn spa_and_built_assets_are_embedded_with_correct_cache_and_security_heade
                 .contains("frame-ancestors 'none'")
         );
     }
+    for method in [Method::GET, Method::HEAD] {
+        let response = request(&router, method.clone(), "/settings/sessions").await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+        if method == Method::HEAD {
+            assert!(
+                to_bytes(response.into_body(), 1024 * 1024)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+    }
     let response = request(&router, Method::GET, "/").await;
     let html = String::from_utf8(
         to_bytes(response.into_body(), 1024 * 1024)
