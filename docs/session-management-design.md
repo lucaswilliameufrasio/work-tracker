@@ -1,13 +1,13 @@
 # User session management — feature design
 
-**Status:** Domain listing/revocation and opt-in authenticated current-session/list/individual/global-revoke HTTP are implemented; UI remains pending.
+**Status:** Domain listing/revocation, opt-in authenticated HTTP, the validated client and `/settings/sessions` UI are implemented with controlled local HTTPS-browser evidence. Login/setup and broader release/browser-lifecycle gates remain open.
 **Requirements:** `docs/development-plan.md`, sections 7.2 and 19.2.
 
 `SessionStore::list_active` returns only sessions owned by the supplied authenticated user that still pass the same active-account, timestamp, absolute-expiry, and inactivity checks used for token validation. It marks the current session by opaque session ID and returns creation, activity, and expiry timestamps. It never returns token digests or bearer values, and this schema does not collect IP address, user-agent, or device fingerprint metadata.
 
 Expired, revoked, malformed, future-dated, and otherwise invalid rows are omitted rather than exposed as active. Session revocation is already owner-scoped; global revocation ends every session for the user. The HTTP adapter must derive the user/current session only from a validated cookie, never request input, and use generic not-found behavior for a foreign session ID.
 
-`DELETE /api/v1/auth/session` (slice216) validates the exact cookie plus Origin/CSRF and derives the revoked user/session inside the same write transaction as audit. It clears the cookie only after commit and leaves other sessions intact. See [session logout](session-logout-design.md). Slices218–219 extend termination and listing as documented below. The product still needs the “My sessions” UI with current-session labeling and explicit confirmations. Whether to capture coarse device metadata is a product/privacy decision and is intentionally not guessed here.
+`DELETE /api/v1/auth/session` (slice216) validates the exact cookie plus Origin/CSRF and derives the revoked user/session inside the same write transaction as audit. It clears the cookie only after commit and leaves other sessions intact. See [session logout](session-logout-design.md). Slices218–219 extend termination and listing as documented below. Slice223 adds the [My sessions screen](session-screen-design.md) with current-session labeling, explicit confirmations, closed/error states and safe read-only reconciliation after an unconfirmed command. Whether to capture coarse device metadata is a product/privacy decision and is intentionally not guessed here.
 
 ## Individual/global revocation contract — 2026-10-19
 

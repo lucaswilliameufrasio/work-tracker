@@ -1,0 +1,222 @@
+use std::{
+    io::{BufRead, BufReader, Write},
+    process::{Command, Stdio},
+    sync::Arc,
+};
+
+use chrono::{TimeDelta, Utc};
+use openssl::{
+    asn1::Asn1Time,
+    bn::BigNum,
+    hash::MessageDigest,
+    pkey::PKey,
+    rsa::Rsa,
+    x509::{X509, X509NameBuilder, extension::SubjectAlternativeName},
+};
+use puxiri::{
+    auth::{
+        master_key::MasterKeyStore,
+        session::{SessionPolicy, SessionStore},
+    },
+    db::Database,
+    http::{self, browser_session::BrowserSessionSecurity},
+};
+use serde_json::{Value, json};
+use tempfile::TempDir;
+use uuid::Uuid;
+
+struct BrowserChild(std::process::Child);
+
+impl Drop for BrowserChild {
+    fn drop(&mut self) {
+        if self.0.try_wait().ok().flatten().is_none() {
+            let _ = self.0.kill();
+        }
+        let _ = self.0.wait();
+    }
+}
+
+fn certificate(directory: &std::path::Path) {
+    let key = PKey::from_rsa(Rsa::generate(2048).unwrap()).unwrap();
+    let mut name = X509NameBuilder::new().unwrap();
+    name.append_entry_by_text("CN", "Puxiri loopback test only")
+        .unwrap();
+    let name = name.build();
+    let mut cert = X509::builder().unwrap();
+    cert.set_version(2).unwrap();
+    cert.set_serial_number(&BigNum::from_u32(1).unwrap().to_asn1_integer().unwrap())
+        .unwrap();
+    cert.set_subject_name(&name).unwrap();
+    cert.set_issuer_name(&name).unwrap();
+    cert.set_pubkey(&key).unwrap();
+    cert.set_not_before(&Asn1Time::days_from_now(0).unwrap())
+        .unwrap();
+    cert.set_not_after(&Asn1Time::days_from_now(1).unwrap())
+        .unwrap();
+    let san = SubjectAlternativeName::new()
+        .ip("127.0.0.1")
+        .build(&cert.x509v3_context(None, None))
+        .unwrap();
+    cert.append_extension(san).unwrap();
+    cert.sign(&key, MessageDigest::sha256()).unwrap();
+    std::fs::write(
+        directory.join("certificate.pem"),
+        cert.build().to_pem().unwrap(),
+    )
+    .unwrap();
+    let key_path = directory.join("key.pem");
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options
+        .open(key_path)
+        .unwrap()
+        .write_all(&key.private_key_to_pem_pkcs8().unwrap())
+        .unwrap();
+}
+
+async fn user(database: &Database) -> String {
+    let id = Uuid::now_v7().to_string();
+    sqlx::query("INSERT INTO users (id, display_name, state, created_at, updated_at) VALUES (?, 'Synthetic browser user', 'active', 'now', 'now')")
+        .bind(&id).execute(database.pool()).await.unwrap();
+    id
+}
+
+#[tokio::test]
+async fn session_screen_uses_real_https_browser_cookies_confirmations_and_transactional_api() {
+    let directory = TempDir::new().unwrap();
+    certificate(directory.path());
+    let database = Arc::new(
+        Database::open(&directory.path().join("data"))
+            .await
+            .unwrap(),
+    );
+    let policy = SessionPolicy::initial(TimeDelta::minutes(5)).unwrap();
+    let sessions = SessionStore::new(database.pool().clone(), policy);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let backend = listener.local_addr().unwrap();
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let fixture_dir = directory.path().to_path_buf();
+    let artifacts = std::env::var_os("PUXIRI_UI_SCREENSHOTS")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| directory.path().join("screenshots"));
+    std::fs::create_dir_all(&artifacts).unwrap();
+    let (mut child, origin, diagnostic_reader) = tokio::task::spawn_blocking(move || {
+        let mut child = BrowserChild(
+            Command::new("node")
+                .arg(root.join("web/scripts/session-screen.integration.mjs"))
+                .env("PUXIRI_TEST_TLS_DIR", fixture_dir)
+                .env("PUXIRI_TEST_BACKEND", format!("http://{backend}"))
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap(),
+        );
+        let stderr = child.0.stderr.take().unwrap();
+        let diagnostic_reader = std::thread::spawn(move || {
+            use std::io::Read;
+            let mut diagnostic = String::new();
+            stderr
+                .take(64 * 1024)
+                .read_to_string(&mut diagnostic)
+                .unwrap();
+            diagnostic
+        });
+        let stdout = child.0.stdout.take().unwrap();
+        let mut reader = BufReader::new(stdout);
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        let ready: Value = serde_json::from_str(&line)
+            .expect("TLS fixture must announce only its loopback origin");
+        let origin = ready["origin"].as_str().unwrap().to_owned();
+        (child, origin, diagnostic_reader)
+    })
+    .await
+    .unwrap();
+    assert!(origin.starts_with("https://127.0.0.1:"));
+    let security = BrowserSessionSecurity::new(
+        &origin,
+        MasterKeyStore::load_or_create(&directory.path().join("master.key")).unwrap(),
+    )
+    .unwrap();
+    let app = http::router_with_browser_sessions(database.clone(), security, policy);
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let mut fixtures = Vec::new();
+    let mut owners = Vec::new();
+    for kind in ["uncertain", "global", "current", "native-retry"] {
+        let actor = user(&database).await;
+        let own = sessions.issue(&actor, Utc::now()).await.unwrap();
+        let other = sessions.issue(&actor, Utc::now()).await.unwrap();
+        for _ in 0..20 {
+            sessions
+                .issue(&actor, Utc::now() - TimeDelta::days(8))
+                .await
+                .unwrap();
+        }
+        fixtures.push(json!({"kind": kind, "token": own.token.expose(), "current_id": own.id, "other_id": other.id}));
+        owners.push((actor, if kind == "current" { 2_i64 } else { 22_i64 }));
+    }
+    let stranger = user(&database).await;
+    let foreign = sessions.issue(&stranger, Utc::now()).await.unwrap();
+    let input = json!({"fixtures": fixtures, "artifacts": artifacts});
+    let mut stdin = child.0.stdin.take().unwrap();
+    serde_json::to_writer(&mut stdin, &input).unwrap();
+    stdin.write_all(b"\n").unwrap();
+    drop(stdin);
+    let result = tokio::task::spawn_blocking(move || {
+        let status = child.0.wait().unwrap();
+        (child, status, diagnostic_reader.join().unwrap())
+    })
+    .await
+    .unwrap();
+    let (_child, status, mut diagnostic) = result;
+    server.abort();
+    assert!(server.await.unwrap_err().is_cancelled());
+    if !status.success() {
+        for fixture in input["fixtures"].as_array().unwrap() {
+            diagnostic = diagnostic.replace(
+                fixture["token"].as_str().unwrap(),
+                "[redacted synthetic session]",
+            );
+        }
+        panic!("isolated browser fixture failed: {diagnostic}");
+    }
+    for (actor, expected) in owners {
+        let revoked: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sessions WHERE user_id = ? AND revoked_at IS NOT NULL",
+        )
+        .bind(&actor)
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
+        assert_eq!(revoked, expected);
+        let audits: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM audit_events WHERE actor_user_id = ?")
+                .bind(actor)
+                .fetch_one(database.pool())
+                .await
+                .unwrap();
+        assert_eq!(audits, 2);
+    }
+    let global: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM audit_events WHERE event_kind = 'auth.sessions.revoked'",
+    )
+    .fetch_one(database.pool())
+    .await
+    .unwrap();
+    assert_eq!(global, 3);
+    assert!(
+        sessions
+            .validate(&foreign.token, Utc::now())
+            .await
+            .unwrap()
+            .is_some()
+    );
+}

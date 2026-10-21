@@ -18,6 +18,7 @@ export default ts.config(
     languageOptions: {
       globals: {
         document: 'readonly',
+        HTMLElement: 'readonly',
         fetch: 'readonly',
         AbortSignal: 'readonly',
         AbortController: 'readonly',
