@@ -1,5 +1,5 @@
 use chrono::{DateTime, NaiveDate, Utc};
-use sqlx::{Row, SqlitePool};
+use sqlx::{Row, Sqlite, SqlitePool, Transaction};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -15,6 +15,7 @@ const MAX_TITLE_CHARS: usize = 240;
 mod board;
 mod queries;
 pub use board::{BoardColumnPage, BoardCursor, BoardOptions};
+pub mod creation;
 pub mod session;
 pub use queries::{
     IssueDetails, IssueEvent, IssueEventKind, IssueHistoryCursor, IssueHistoryPage, IssueListPage,
@@ -103,33 +104,36 @@ impl IssueStore {
         input: NewIssue<'_>,
         now: DateTime<Utc>,
     ) -> Result<IssueRecord, IssueCreationError> {
-        let title = input.title.trim();
-        let title_chars = title.chars().count();
-        if !(1..=MAX_TITLE_CHARS).contains(&title_chars) {
-            return Err(IssueCreationError::InvalidTitle);
-        }
-        if input
-            .description
-            .is_some_and(|description| description.len() > MAX_DESCRIPTION_BYTES)
-        {
-            return Err(IssueCreationError::DescriptionTooLong);
-        }
-
-        let timestamp = format_timestamp(now);
+        validate_creation(input)?;
         let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let issue =
+            Self::create_in_transaction(&mut transaction, actor_user_id, project_id, input, now)
+                .await?;
+        transaction.commit().await?;
+        Ok(issue)
+    }
+
+    pub(crate) async fn create_in_transaction(
+        transaction: &mut Transaction<'_, Sqlite>,
+        actor_user_id: &str,
+        project_id: &str,
+        input: NewIssue<'_>,
+        now: DateTime<Utc>,
+    ) -> Result<IssueRecord, IssueCreationError> {
+        validate_creation(input)?;
+        let title = input.title.trim();
+        let timestamp = format_timestamp(now);
         let context = AccessStore::load_project_context_in_transaction(
-            &mut transaction,
+            transaction,
             actor_user_id,
             project_id,
             false,
         )
         .await?;
         let Some(context) = context else {
-            transaction.rollback().await?;
             return Err(IssueCreationError::UnknownProjectOrActor);
         };
         if authorize(&context, AccessCapability::MutateIssues).is_err() {
-            transaction.rollback().await?;
             return Err(IssueCreationError::Forbidden);
         }
 
@@ -138,7 +142,7 @@ impl IssueStore {
              WHERE project_id = ? AND system_key = 'task' AND archived_at IS NULL",
         )
         .bind(project_id)
-        .fetch_optional(&mut *transaction)
+        .fetch_optional(&mut **transaction)
         .await?
         .ok_or(IssueCreationError::DefaultSchemaUnavailable)?;
 
@@ -147,7 +151,7 @@ impl IssueStore {
              WHERE project_id = ? AND system_key = 'todo' AND archived_at IS NULL",
         )
         .bind(project_id)
-        .fetch_optional(&mut *transaction)
+        .fetch_optional(&mut **transaction)
         .await?
         .ok_or(IssueCreationError::DefaultSchemaUnavailable)?;
 
@@ -165,10 +169,9 @@ impl IssueStore {
             )
             .bind(project_id)
             .bind(assignee_user_id)
-            .fetch_one(&mut *transaction)
+            .fetch_one(&mut **transaction)
             .await?;
             if eligible_assignee != 1 {
-                transaction.rollback().await?;
                 return Err(IssueCreationError::AssigneeUnavailable);
             }
         }
@@ -179,10 +182,9 @@ impl IssueStore {
              WHERE id = ? AND archived_at IS NULL",
         )
         .bind(project_id)
-        .fetch_optional(&mut *transaction)
+        .fetch_optional(&mut **transaction)
         .await?;
         let Some(project_row) = project_row else {
-            transaction.rollback().await?;
             return Err(IssueCreationError::Forbidden);
         };
         let project_key: String = project_row.try_get("project_key")?;
@@ -197,7 +199,7 @@ impl IssueStore {
         )
         .bind(project_id)
         .bind(&status_id)
-        .fetch_one(&mut *transaction)
+        .fetch_one(&mut **transaction)
         .await?;
         let rank = current_max_rank
             .unwrap_or(0)
@@ -212,10 +214,9 @@ impl IssueStore {
         .bind(next_issue_number)
         .bind(project_id)
         .bind(issue_number)
-        .execute(&mut *transaction)
+        .execute(&mut **transaction)
         .await?;
         if updated.rows_affected() != 1 {
-            transaction.rollback().await?;
             return Err(IssueCreationError::Forbidden);
         }
 
@@ -238,7 +239,7 @@ impl IssueStore {
         .bind(rank)
         .bind(&timestamp)
         .bind(&timestamp)
-        .execute(&mut *transaction)
+        .execute(&mut **transaction)
         .await?;
 
         sqlx::query(
@@ -251,10 +252,11 @@ impl IssueStore {
         .bind(&issue_id)
         .bind(actor_user_id)
         .bind(&timestamp)
-        .execute(&mut *transaction)
+        .execute(&mut **transaction)
         .await?;
 
-        transaction.commit().await?;
+        sqlx::query("INSERT INTO outbox_events (id, event_kind, payload_version, project_id, issue_id, actor_user_id, issue_version, occurred_at) VALUES (?, 'issue.created', 1, ?, ?, ?, 1, ?)")
+            .bind(Uuid::now_v7().to_string()).bind(project_id).bind(&issue_id).bind(actor_user_id).bind(&timestamp).execute(&mut **transaction).await?;
 
         Ok(IssueRecord {
             id: issue_id,
@@ -277,4 +279,17 @@ impl IssueStore {
             updated_at: now,
         })
     }
+}
+
+pub(crate) fn validate_creation(input: NewIssue<'_>) -> Result<(), IssueCreationError> {
+    if !(1..=MAX_TITLE_CHARS).contains(&input.title.trim().chars().count()) {
+        return Err(IssueCreationError::InvalidTitle);
+    }
+    if input
+        .description
+        .is_some_and(|description| description.len() > MAX_DESCRIPTION_BYTES)
+    {
+        return Err(IssueCreationError::DescriptionTooLong);
+    }
+    Ok(())
 }

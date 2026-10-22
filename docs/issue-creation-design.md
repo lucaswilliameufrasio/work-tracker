@@ -1,6 +1,6 @@
 # Issue creation — feature design
 
-**Status:** The SQLite issue model and internal atomic creation command are implemented and verified by `RUSTUP_TOOLCHAIN=1.99.0 PUXIRI_E2E_PORT=18495 make check`. No HTTP/MCP route, UI, due-date operation, idempotency record, or outbox worker is included in this slice.
+**Status:** The original SQLite issue model/internal creation slice used `RUSTUP_TOOLCHAIN=1.99.0 PUXIRI_E2E_PORT=18495 make check`. Follow-up slice235 adds [session-bound idempotent creation and durable outbox envelopes](idempotent-issue-creation-design.md); the canonical development plan records its newer gate. HTTP/MCP creation, mutation UI, due-date operations and outbox workers remain pending.
 
 **Requirements:** `docs/development-plan.md`, sections 2, 4–6, and 11.
 
@@ -10,7 +10,7 @@
 - The application boundary will supply the actor ID from a validated session. `IssueStore::create` is an internal use case, not an HTTP authorization boundary; it reloads current account, organization, project membership, and archive state inside `BEGIN IMMEDIATE` before authorization.
 - The caller supplies a required title, optional Markdown description, and optional assignee. Type/status are not client-selectable in this command: the use case resolves the active `task` and `todo` system keys, independent of localized/editable names. Priority starts at `none`; due date is omitted until the organization-timezone rule is available.
 - Optional assignee must be an active project manager/member, including a guest with explicit project membership. Viewers and non-members cannot be assigned.
-- Under the same write transaction, allocate the next project issue number, choose a rank in the `todo` column, insert the issue, append a content-free `issue.created` history event, and commit. A failure at any step leaves no issue, history event, or consumed counter value.
+- Under the same write transaction, allocate the next project issue number, choose a rank in the `todo` column, insert the issue and append content-free history and (since migration0031) a versioned outbox envelope. SessionIssueWriter additionally persists an idempotency receipt before commit. A failure at any step leaves no partial issue/event/receipt or consumed counter value.
 
 ## Data and invariants
 
@@ -25,11 +25,11 @@
 - `src/access.rs` loads current authorization context and evaluates `MutateIssues`.
 - `src/issues/` owns title/description validation, default type/status resolution, assignment eligibility, number/rank allocation, issue persistence, and its initial history event.
 - SQLite migrations own same-project FKs, uniqueness, limits, and the project counter.
-- The caller owns HTTP/MCP serialization, cookie/session/CSRF, response codes, and future idempotency-key handling. No outbox consumer or automation is installed; issue creation does not yet trigger notifications/automations.
+- The caller owns HTTP/MCP serialization, cookie/session/CSRF and response codes. SessionIssueWriter owns token-derived transactional authentication/idempotency; the older ID-based API remains for trusted internal callers. Transaction-owned helpers never commit: callers must propagate errors and roll back rather than commit a partially failed command. No outbox consumer or automation is installed; issue creation does not yet trigger notifications/automations.
 
 ## Deliberately deferred
 
-Idempotency-Key semantics and retention, outbox event/job leases and delivery, due dates, arbitrary type/status selection, issue update/move/reopen/trash/purge, comments, FTS, routes/UI, and real-time delivery are not silently approximated. Before exposing creation through a retrying transport, implement its operation/principal-scoped idempotency contract. Before supporting due dates, parse and compare against the organization-local day. Before triggering automations, persist versioned outbox work in the same mutation transaction and implement durable claim/retry/recovery.
+Slice235 implements the internal operation/principal-scoped receipt contract and atomic versioned outbox persistence; no expiry/reuse policy is enabled. Public HTTP/MCP idempotency/envelope contracts, production retention/quotas/key rotation, outbox job leases/delivery, due dates, arbitrary type/status selection, issue update/move/reopen/trash/purge, comments, FTS, mutation routes/UI and real-time delivery remain separate. Before supporting due dates, use the organization-local day. Before triggering automations, implement durable claim/retry/recovery and current relevance/access checks, not an in-memory event queue.
 
 ## Verification plan
 
