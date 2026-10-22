@@ -152,6 +152,20 @@ async fn replacement_journals_each_changed_field_and_replays_original_receipt_af
         .unwrap();
     assert!(replay.replayed);
     assert_eq!(replay.receipt, first.receipt);
+    let numbered = f
+        .writer
+        .replace_by_number(
+            &f.session.token,
+            &f.project,
+            1,
+            &key,
+            input(1, " Changed "),
+            Utc::now(),
+        )
+        .await
+        .unwrap();
+    assert!(numbered.replayed);
+    assert_eq!(numbered.receipt, first.receipt);
     assert_eq!(f.counts().await, (4, 4, 4, 3));
     let after = sqlx::query_as("SELECT status_id, issue_type_id, priority, rank, issue_number, creator_user_id FROM issues WHERE id = ?").bind(&f.issue).fetch_one(f.db.pool()).await.unwrap();
     assert_eq!(before, after);

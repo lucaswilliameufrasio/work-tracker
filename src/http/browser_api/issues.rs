@@ -5,7 +5,7 @@ use axum::{
     extract::{Path, Query, Request, State, rejection::PathRejection},
     http::StatusCode,
     response::Response,
-    routing::get,
+    routing::{get, put},
 };
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -33,11 +33,16 @@ pub(super) fn routes() -> Router<Arc<BrowserState>> {
         )
         .merge(detail::routes())
         .merge(board::routes())
+        .route(
+            "/api/v1/projects/{project_id}/issues/{issue_number}/text",
+            put(text::replace),
+        )
 }
 
 mod board;
 mod create;
 mod detail;
+mod text;
 
 #[derive(Default, Deserialize)]
 #[serde(deny_unknown_fields)]

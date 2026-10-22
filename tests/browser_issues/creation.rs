@@ -308,10 +308,15 @@ async fn post_transport_media_framing_and_body_deadline_reject_before_activity_o
     let server = tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
     });
-    for (suffix, status) in [("", "408"), ("invalid-chunk\r\n", "400")] {
+    for (method, route, suffix, status) in [
+        ("POST", "", "", "408"),
+        ("POST", "", "invalid-chunk\r\n", "400"),
+        ("PUT", "/1/text", "", "408"),
+        ("PUT", "/1/text", "invalid-chunk\r\n", "400"),
+    ] {
         let mut connection = tokio::net::TcpStream::connect(address).await.unwrap();
         let csrf = base.headers()["x-csrf-token"].to_str().unwrap();
-        connection.write_all(format!("POST {} HTTP/1.1\r\nHost: tracker.example.test\r\nCookie: __Host-puxiri_session={}\r\nOrigin: https://tracker.example.test\r\nx-csrf-token: {csrf}\r\nIdempotency-Key: {key}\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n{suffix}", f.path(""), f.token.token.expose()).as_bytes()).await.unwrap();
+        connection.write_all(format!("{method} {}{route} HTTP/1.1\r\nHost: tracker.example.test\r\nCookie: __Host-puxiri_session={}\r\nOrigin: https://tracker.example.test\r\nx-csrf-token: {csrf}\r\nIdempotency-Key: {key}\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n{suffix}", f.path(""), f.token.token.expose()).as_bytes()).await.unwrap();
         let mut response = String::new();
         tokio::time::timeout(
             std::time::Duration::from_secs(5),

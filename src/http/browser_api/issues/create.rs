@@ -33,8 +33,33 @@ struct Input {
     assignee_user_id: Option<String>,
 }
 
-fn present_string<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<String>, D::Error> {
+pub(super) fn present_string<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error> {
     String::deserialize(deserializer).map(Some)
+}
+
+pub(super) fn idempotency_key(headers: &axum::http::HeaderMap) -> Result<&str, ApiError> {
+    let mut keys = headers.get_all("idempotency-key").iter();
+    let key = keys
+        .next()
+        .and_then(|value| value.to_str().ok())
+        .ok_or_else(|| {
+            ApiError::invalid_field(
+                "idempotency_key",
+                "Supply one canonical UUID Idempotency-Key",
+            )
+        })?;
+    if keys.next().is_some() {
+        return Err(malformed_query());
+    }
+    if !canonical_uuid(key) {
+        return Err(ApiError::invalid_field(
+            "idempotency_key",
+            "Supply one canonical UUID Idempotency-Key",
+        ));
+    }
+    Ok(key)
 }
 
 #[derive(Serialize)]
@@ -64,25 +89,7 @@ pub(super) async fn create(
     if request.uri.query().is_some() {
         return Err(malformed_query());
     }
-    let mut keys = request.headers.get_all("idempotency-key").iter();
-    let key = keys
-        .next()
-        .and_then(|value| value.to_str().ok())
-        .ok_or_else(|| {
-            ApiError::invalid_field(
-                "idempotency_key",
-                "Supply one canonical UUID Idempotency-Key",
-            )
-        })?;
-    if keys.next().is_some() {
-        return Err(malformed_query());
-    }
-    if !canonical_uuid(key) {
-        return Err(ApiError::invalid_field(
-            "idempotency_key",
-            "Supply one canonical UUID Idempotency-Key",
-        ));
-    }
+    let key = idempotency_key(&request.headers)?;
     // Admission already collected this bounded body before entering the handler.
     let bytes = to_bytes(body, 512 * 1024).await.map_err(|_| {
         ApiError::new(

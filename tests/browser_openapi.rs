@@ -59,6 +59,10 @@ fn generated_contract_has_unique_operations_resolved_refs_and_only_implemented_r
         ("/api/v1/projects/{project_id}/issues", "get"),
         ("/api/v1/projects/{project_id}/issues", "head"),
         ("/api/v1/projects/{project_id}/issues", "post"),
+        (
+            "/api/v1/projects/{project_id}/issues/{issue_number}/text",
+            "put",
+        ),
         ("/api/v1/projects/{project_id}/statuses", "get"),
         ("/api/v1/projects/{project_id}/statuses", "head"),
         ("/api/v1/projects/{project_id}/issue-types", "get"),
@@ -95,7 +99,10 @@ fn generated_contract_has_unique_operations_resolved_refs_and_only_implemented_r
         for (method, operation) in operations.as_object().unwrap() {
             actual.insert((path.as_str(), method.as_str()));
             assert!(operation_ids.insert(operation["operationId"].as_str().unwrap()));
-            assert_eq!(operation.get("requestBody").is_some(), method == "post");
+            assert_eq!(
+                operation.get("requestBody").is_some(),
+                method == "post" || method == "put"
+            );
             if method == "post" {
                 assert!(operation["responses"].get("201").is_some());
                 assert!(operation["responses"].get("200").is_none());

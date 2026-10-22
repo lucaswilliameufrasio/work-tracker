@@ -33,6 +33,9 @@ mod creation;
 #[path = "browser_issues/capabilities.rs"]
 mod capabilities;
 
+#[path = "browser_issues/text.rs"]
+mod text;
+
 #[tokio::test]
 async fn history_serializes_repeated_typed_text_changes_without_content_snapshots() {
     let f = Fixture::new().await;

@@ -92,6 +92,12 @@ pub struct SessionIssueTextWriter {
     master_key: MasterKey,
 }
 
+#[derive(Clone, Copy)]
+enum TextTarget<'a> {
+    Id(&'a str),
+    Number(i64),
+}
+
 impl SessionIssueTextWriter {
     pub fn new(pool: SqlitePool, policy: SessionPolicy, master_key: MasterKey) -> Self {
         Self {
@@ -110,6 +116,32 @@ impl SessionIssueTextWriter {
         input: ReplaceIssueText<'_>,
         now: DateTime<Utc>,
     ) -> Result<IssueTextOutcome, IssueTextError> {
+        self.replace_target(token, project, TextTarget::Id(issue), key, input, now)
+            .await
+    }
+
+    pub async fn replace_by_number(
+        &self,
+        token: &SessionToken,
+        project: &str,
+        number: i64,
+        key: &str,
+        input: ReplaceIssueText<'_>,
+        now: DateTime<Utc>,
+    ) -> Result<IssueTextOutcome, IssueTextError> {
+        self.replace_target(token, project, TextTarget::Number(number), key, input, now)
+            .await
+    }
+
+    async fn replace_target(
+        &self,
+        token: &SessionToken,
+        project: &str,
+        target: TextTarget<'_>,
+        key: &str,
+        input: ReplaceIssueText<'_>,
+        now: DateTime<Utc>,
+    ) -> Result<IssueTextOutcome, IssueTextError> {
         validate_creation(NewIssue {
             title: input.title,
             description: input.description,
@@ -118,7 +150,16 @@ impl SessionIssueTextWriter {
         if input.expected_version < 1 {
             return Err(IssueTextError::InvalidVersion);
         }
-        for target in [project, issue] {
+        let supplied_id = match target {
+            TextTarget::Id(id) => Some(id),
+            TextTarget::Number(number) => {
+                if number < 1 {
+                    return Err(IssueTextError::Unavailable);
+                }
+                None
+            }
+        };
+        for target in [Some(project), supplied_id].into_iter().flatten() {
             if Uuid::parse_str(target)
                 .map(|id| id.to_string())
                 .ok()
@@ -131,6 +172,41 @@ impl SessionIssueTextWriter {
         let parsed_key = Uuid::parse_str(key).map_err(|_| IssueTextError::InvalidIdempotencyKey)?;
         if parsed_key.to_string() != key {
             return Err(IssueTextError::InvalidIdempotencyKey);
+        }
+        let key_id = self.master_key.key_id();
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let principal = self
+            .sessions
+            .authenticate_in_transaction(&mut tx, token, now)
+            .await?
+            .ok_or(IssueTextError::Unauthenticated)?;
+        let actor = principal.user_id();
+        let context =
+            AccessStore::load_project_context_in_transaction(&mut tx, actor, project, false)
+                .await?
+                .ok_or(IssueTextError::Unavailable)?;
+        if authorize(&context, AccessCapability::MutateIssues).is_err() {
+            return Err(IssueTextError::Unavailable);
+        }
+        let resolved_id = match target {
+            TextTarget::Id(id) => id.to_owned(),
+            TextTarget::Number(number) => sqlx::query_scalar::<_, String>(
+                "SELECT id FROM issues WHERE project_id = ? AND issue_number = ?",
+            )
+            .bind(project)
+            .bind(number)
+            .fetch_optional(&mut *tx)
+            .await?
+            .ok_or(IssueTextError::Unavailable)?,
+        };
+        let issue = resolved_id.as_str();
+        if Uuid::parse_str(issue)
+            .map(|id| id.to_string())
+            .ok()
+            .as_deref()
+            != Some(issue)
+        {
+            return Err(IssueTextError::CorruptData);
         }
         let mut encoded = RequestDigest(Sha256::new());
         serde_json::to_writer(
@@ -149,21 +225,6 @@ impl SessionIssueTextWriter {
             b"issue.replace_text request sha256-json v1",
             digest.as_slice(),
         );
-        let key_id = self.master_key.key_id();
-        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-        let principal = self
-            .sessions
-            .authenticate_in_transaction(&mut tx, token, now)
-            .await?
-            .ok_or(IssueTextError::Unauthenticated)?;
-        let actor = principal.user_id();
-        let context =
-            AccessStore::load_project_context_in_transaction(&mut tx, actor, project, false)
-                .await?
-                .ok_or(IssueTextError::Unavailable)?;
-        if authorize(&context, AccessCapability::MutateIssues).is_err() {
-            return Err(IssueTextError::Unavailable);
-        }
         let row = sqlx::query("SELECT issues.issue_number, issues.version, issues.title, issues.description, issues.trashed_at, issues.updated_at, projects.project_key FROM issues JOIN projects ON projects.id = issues.project_id WHERE issues.project_id = ? AND issues.id = ?")
             .bind(project).bind(issue).fetch_optional(&mut *tx).await?.ok_or(IssueTextError::Unavailable)?;
         if row.try_get::<Option<String>, _>("trashed_at")?.is_some() {

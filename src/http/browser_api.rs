@@ -40,6 +40,7 @@ struct BrowserState {
     issues: crate::issues::session::SessionIssueReader,
     catalogs: crate::projects::catalog::SessionProjectCatalogReader,
     writer: crate::issues::creation::SessionIssueWriter,
+    text_writer: crate::issues::text::SessionIssueTextWriter,
 }
 
 mod catalogs;
@@ -59,6 +60,11 @@ pub(super) fn routes(
         security.master_key(),
     );
     let state = Arc::new(BrowserState {
+        text_writer: crate::issues::text::SessionIssueTextWriter::new(
+            database.pool().clone(),
+            policy,
+            security.master_key(),
+        ),
         writer,
         security,
         sessions: SessionStore::new(database.pool().clone(), policy),
@@ -481,6 +487,14 @@ async fn method_not_allowed(request: Request) -> Response {
                 .is_some_and(|path| path.as_str() == "/api/v1/projects/{project_id}/issues")
             {
                 "GET, HEAD, POST"
+            } else if request
+                .extensions()
+                .get::<axum::extract::MatchedPath>()
+                .is_some_and(|path| {
+                    path.as_str() == "/api/v1/projects/{project_id}/issues/{issue_number}/text"
+                })
+            {
+                "PUT"
             } else if request.uri().path().starts_with("/api/v1/auth/sessions/") {
                 "DELETE"
             } else if matches!(

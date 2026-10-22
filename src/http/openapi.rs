@@ -220,6 +220,35 @@ pub fn browser_document() -> Value {
     ] {
         create["responses"][status] = error_response(description, true);
     }
+    let mut replace = create.clone();
+    replace["operationId"] = json!("replaceIssueText");
+    replace["description"] = json!(
+        "Full title/description replacement in the session-authorized expected-version/idempotent transaction; omitted description clears it. Only content-free stable receipts, no text snapshot. Current rights/trash/archive revalidated even on replay.409 issue_version_conflict requires reload and draft preservation, never automatic overwrite/retry. No query/unknown/duplicate/null fields or arbitrary field editing."
+    );
+    replace["parameters"].as_array_mut().unwrap().push(
+        json!({"name": "issue_number", "in": "path", "required": true, "schema": decimal_i64()}),
+    );
+    replace["requestBody"] = json!({"required": true, "description": "Uncompressed JSON <=524288 bytes/one-second pre-handler deadline. Required full title and expected_version positive i64 decimal string. Omit description to clear; never null.", "content": {"application/json": {"schema": object(json!({"title": {"type": "string"}, "description": {"type": "string"}, "expected_version": decimal_i64()}), &["title", "expected_version"])}}});
+    replace["responses"]["413"] = error_response(
+        "payload_too_large: replacement JSON exceeds524288 bytes",
+        true,
+    );
+    let mut success = replace["responses"]["201"].clone();
+    success["description"] = json!(
+        "Committed replacement, effective no-op or exact replay. changed/result_version describe the original command, not subsequent state."
+    );
+    success["content"]["application/json"]["schema"] =
+        json!({"$ref": "#/components/schemas/IssueTextReceipt"});
+    replace["responses"].as_object_mut().unwrap().remove("201");
+    replace["responses"]["200"] = success;
+    replace["responses"]["409"] = error_response(
+        "issue_version_conflict/idempotency_conflict/issue_capacity_exhausted/issue_clock_conflict; retryable=false",
+        true,
+    );
+    paths.insert(
+        "/api/v1/projects/{project_id}/issues/{issue_number}/text".into(),
+        json!({"put": replace}),
+    );
     paths
         .get_mut("/api/v1/projects/{project_id}/issues")
         .unwrap()["post"] = create;
@@ -228,7 +257,7 @@ pub fn browser_document() -> Value {
         "info": {
             "title": "Puxiri opt-in browser API — partial development contract",
             "version": env!("CARGO_PKG_VERSION"),
-            "description": "Disabled (404) unless --browser-origin/PUXIRI_BROWSER_ORIGIN is configured. Listener does not terminate TLS; use an explicitly configured HTTPS origin. Cookie-only authentication; no Authorization fallback. Host must match; Origin and Fetch Metadata are checked when supplied, and mutations require exact Origin plus CSRF. Unknown/duplicate query fields are rejected. Every operation has no-store responses; HEAD has no body, including errors. Browser admission: eight in-flight requests per router instance, no admission queue; path+query <=2048 bytes, headers <=64 entries/16384 aggregate name+value bytes. Only POST issue creation accepts JSON body bytes (<=524288); all other operations require an empty body. Bodies must finish within one second before any handler/transaction starts. There is no whole-handler timeout or per-client requests-per-second limit. No login/signup/setup/session issuance, API tokens or OAuth are provided by this contract. Do not store bearer tokens in localStorage. This document is generated locally, not served as an endpoint or a production readiness claim."
+            "description": "Disabled (404) unless --browser-origin/PUXIRI_BROWSER_ORIGIN is configured. Listener does not terminate TLS; use an explicitly configured HTTPS origin. Cookie-only authentication; no Authorization fallback. Host must match; Origin and Fetch Metadata are checked when supplied, and mutations require exact Origin plus CSRF. Unknown/duplicate query fields are rejected. Every operation has no-store responses; HEAD has no body, including errors. Browser admission: eight in-flight requests per router instance, no admission queue; path+query <=2048 bytes, headers <=64 entries/16384 aggregate name+value bytes. Only matched POST issue creation and PUT issue text replacement accept JSON body bytes (<=524288); all other operations require an empty body. Bodies must finish within one second before any handler/transaction starts. There is no whole-handler timeout or per-client requests-per-second limit. No login/signup/setup/session issuance, API tokens or OAuth are provided by this contract. Do not store bearer tokens in localStorage. This document is generated locally, not served as an endpoint or a production readiness claim."
         },
         "security": [{"browserSession": []}],
         "paths": paths,
@@ -252,6 +281,7 @@ pub fn browser_document() -> Value {
                     "created_at": timestamp.clone(), "updated_at": timestamp.clone()
                 }), &["id", "project_id", "issue_number", "issue_key", "issue_type_id", "status_id", "title", "creator_user_id", "priority", "version", "created_at", "updated_at"]),
                 "IssuePage": page("Issue"),
+                "IssueTextReceipt": object(json!({"id": uuid.clone(), "project_id": uuid.clone(), "issue_number": decimal_i64(), "issue_key": {"type": "string"}, "result_version": decimal_i64(), "changed": {"type": "boolean"}}), &["id", "project_id", "issue_number", "issue_key", "result_version", "changed"]),
                 "ProjectCapabilities": object(json!({"project_id": uuid.clone(), "can_create_issues": {"type": "boolean"}}), &["project_id", "can_create_issues"]),
                 "IssueCreationReceipt": object(json!({"id": uuid.clone(), "project_id": uuid.clone(), "issue_number": decimal_i64(), "issue_key": {"type": "string"}, "created_version": {"type": "string", "enum": ["1"]}}), &["id", "project_id", "issue_number", "issue_key", "created_version"]),
                 "Error": object(json!({"code": {"type": "string"}, "message": {"type": "string"}, "request_id": {"type": "string", "format": "uuid"}, "field_errors": {"type": "object", "additionalProperties": {"type": "string"}}, "retryable": {"type": "boolean"}}), &["code", "message", "request_id", "field_errors", "retryable"])

@@ -195,13 +195,13 @@ async fn every_documented_browser_operation_matches_real_success_and_auth_error_
                 },
             );
             let token = csrf(&app, &issued.token).await;
-            let mut req = if method == "delete" || method == "post" {
+            let mut req = if method == "delete" || method == "post" || method == "put" {
                 revoke_request(&uri, &issued.token, &token)
             } else {
                 request(&uri, Some(&issued.token))
             };
             *req.method_mut() = Method::from_bytes(method.to_ascii_uppercase().as_bytes()).unwrap();
-            if method == "post" {
+            if method == "post" || method == "put" {
                 req.headers_mut().insert(
                     header::CONTENT_TYPE,
                     HeaderValue::from_static("application/json"),
@@ -210,7 +210,11 @@ async fn every_documented_browser_operation_matches_real_success_and_auth_error_
                     "idempotency-key",
                     HeaderValue::from_str(&Uuid::now_v7().to_string()).unwrap(),
                 );
-                *req.body_mut() = Body::from(r#"{"title":"Contract creation"}"#);
+                *req.body_mut() = Body::from(if method == "put" {
+                    r#"{"title":"Contract replacement","expected_version":"1"}"#
+                } else {
+                    r#"{"title":"Contract creation"}"#
+                });
             }
             let response = app.clone().oneshot(req).await.unwrap();
             let status = if method == "delete" {
@@ -242,7 +246,7 @@ async fn every_documented_browser_operation_matches_real_success_and_auth_error_
             }
             let mut req = request(&uri, None);
             *req.method_mut() = Method::from_bytes(method.to_ascii_uppercase().as_bytes()).unwrap();
-            if method == "delete" || method == "post" {
+            if method == "delete" || method == "post" || method == "put" {
                 req.headers_mut().insert(
                     header::ORIGIN,
                     HeaderValue::from_static("https://tracker.example.test"),

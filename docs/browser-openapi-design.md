@@ -1,6 +1,6 @@
 # Generated browser API contract
 
-Latest239 inventory: fifteen paths and thirty-two operations, adding GET/HEAD project capabilities. The minimal boolean is advisory, never mutation authority; explicit read membership is required. See [capability projection](project-capabilities-design.md). Historical inventories below identify their slice; creation remains the only JSON request body.
+Latest242 inventory: sixteen paths and thirty-three operations, adding PUT issue text replacement after239 GET/HEAD project capabilities. The capability boolean is advisory, never mutation authority; explicit read membership is required. See [capability projection](project-capabilities-design.md) and [full text replacement](browser-text-replacement-design.md). Historical inventories below identify their slice; only POST creation and PUT text replacement accept JSON bodies.
 
 Slice220 generates an OpenAPI 3.1 document for the **implemented opt-in browser API only**, from `src/http/openapi.rs` and a local export example. No documentation endpoint, login/setup route, API-token scheme, OAuth issuer or runtime dependency is introduced. This is a partial development contract, not a release/public-exposure approval or completion of the plan's full generated-OpenAPI gate.
 

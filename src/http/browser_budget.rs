@@ -14,7 +14,7 @@ use super::error::ApiError;
 const MAX_URI_BYTES: usize = 2 * 1024;
 const MAX_HEADER_BYTES: usize = 16 * 1024;
 const MAX_HEADER_ENTRIES: usize = 64;
-const MAX_CREATION_BODY: usize = 512 * 1024;
+const MAX_JSON_BODY: usize = 512 * 1024;
 
 pub(super) struct BrowserBudget {
     slots: Semaphore,
@@ -82,13 +82,17 @@ async fn admit_request(budget: &BrowserBudget, request: Request, next: Next) -> 
             );
         }
     }
-    let creation = parts.method == axum::http::Method::POST
-        && parts
-            .extensions
-            .get::<axum::extract::MatchedPath>()
-            .is_some_and(|path| path.as_str() == "/api/v1/projects/{project_id}/issues")
+    let json_mutation = parts
+        .extensions
+        .get::<axum::extract::MatchedPath>()
+        .is_some_and(|path| {
+            (parts.method == axum::http::Method::POST
+                && path.as_str() == "/api/v1/projects/{project_id}/issues")
+                || (parts.method == axum::http::Method::PUT
+                    && path.as_str() == "/api/v1/projects/{project_id}/issues/{issue_number}/text")
+        })
         && budget.security.is_some();
-    let limit = if creation { MAX_CREATION_BODY } else { 0 };
+    let limit = if json_mutation { MAX_JSON_BODY } else { 0 };
     let declared = match content_length(&parts.headers, limit) {
         Err(error) => {
             return match error {
@@ -108,7 +112,7 @@ async fn admit_request(budget: &BrowserBudget, request: Request, next: Next) -> 
         }
         Ok(declared) => declared,
     };
-    if creation {
+    if json_mutation {
         let Some(security) = &budget.security else {
             return rejection(
                 StatusCode::FORBIDDEN,
