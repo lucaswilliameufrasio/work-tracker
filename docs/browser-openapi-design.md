@@ -1,5 +1,7 @@
 # Generated browser API contract
 
+Latest239 inventory: fifteen paths and thirty-two operations, adding GET/HEAD project capabilities. The minimal boolean is advisory, never mutation authority; explicit read membership is required. See [capability projection](project-capabilities-design.md). Historical inventories below identify their slice; creation remains the only JSON request body.
+
 Slice220 generates an OpenAPI 3.1 document for the **implemented opt-in browser API only**, from `src/http/openapi.rs` and a local export example. No documentation endpoint, login/setup route, API-token scheme, OAuth issuer or runtime dependency is introduced. This is a partial development contract, not a release/public-exposure approval or completion of the plan's full generated-OpenAPI gate.
 
 The document must match cookie-only authentication, same-origin/CSRF mutation checks, no-store responses, omitted optional fields, existing error envelopes, current-session logout, own-session pagination/revocation and the two separate project catalogs. Explicitly document empty candidate pages with continuation, current-only cookie clearing, operational metadata not granting issue access, disabled-by-default routes and absent per-client request-rate limits. Slice221 documents the separate [browser admission/envelope budgets](browser-request-budgets-design.md) with408/413/414/431 and503 `service_busy`. Do not advertise 429 protection or login flows that do not exist.

@@ -162,6 +162,16 @@ export async function createWork(context, origin, fixture, artifacts) {
     page.getByRole('heading', { name: 'Conteúdo indisponível' }),
   ).toBeVisible();
   await expect(page.locator('[data-issue-create-form]')).toHaveCount(0);
+  await page.goto(
+    `${origin}/projects/${fixture.read_only_project_id}/issues/new`,
+  );
+  await expect(
+    page.getByRole('heading', {
+      name: 'Projeto somente leitura para este acesso',
+    }),
+  ).toBeVisible();
+  await expect(page.locator('[data-issue-create-form]')).toHaveCount(0);
+  assert.equal(posts, 5);
   assert.deepEqual(errors, []);
   await page.close();
 }

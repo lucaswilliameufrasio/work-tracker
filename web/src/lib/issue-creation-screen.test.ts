@@ -6,6 +6,7 @@ import {
   type CreationState,
 } from './issue-creation-screen';
 import { createIssue, type IssueCreationResult } from './issue-creation';
+import { parseProjectCapabilities } from './projects';
 
 const id = '019a0000-0000-7000-8000-000000000001';
 const other = '019a0000-0000-7000-8000-000000000002';
@@ -47,7 +48,7 @@ it('recognizes only canonical dedicated creation URLs without query payloads', (
   }
 });
 
-it('checks session identity and current read access using bodyless fixed HEAD', async () => {
+it('checks session identity and advisory mutation capability using fixed GET', async () => {
   const fetcher = vi
     .fn<typeof fetch>()
     .mockResolvedValueOnce(
@@ -60,20 +61,68 @@ it('checks session identity and current read access using bodyless fixed HEAD', 
         { headers: { 'content-type': 'application/json' } },
       ),
     )
-    .mockResolvedValueOnce(new Response(null, { status: 200 }));
+    .mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({ project_id: id, can_create_issues: true }),
+        { headers: { 'content-type': 'application/json' } },
+      ),
+    );
   vi.stubGlobal('fetch', fetcher);
   expect(await creationAccess(id, id, new AbortController().signal)).toBe(id);
   expect(fetcher.mock.calls[1]?.[0]).toBe(
-    `/api/v1/projects/${id}/issues?page_size=1`,
+    `/api/v1/projects/${id}/capabilities`,
   );
   expect(fetcher.mock.calls[1]?.[1]).toMatchObject({
-    method: 'HEAD',
+    method: 'GET',
     mode: 'same-origin',
     credentials: 'same-origin',
     cache: 'no-store',
     redirect: 'error',
   });
   expect(fetcher.mock.calls[1]?.[1]?.body).toBeUndefined();
+});
+
+it('rejects corrupt capability DTOs and hides form/retry for known read-only access', async () => {
+  for (const value of [
+    null,
+    {},
+    { project_id: other, can_create_issues: true },
+    { project_id: id, can_create_issues: 'true' },
+    { project_id: id, can_create_issues: null },
+    { project_id: id, can_create_issues: true, token: 'untrusted' },
+  ]) {
+    expect(() => parseProjectCapabilities(value, id)).toThrow();
+  }
+  expect(
+    parseProjectCapabilities({ project_id: id, can_create_issues: false }, id)
+      .can_create_issues,
+  ).toBe(false);
+  const send = vi.fn<typeof createIssue>();
+  const fetcher = vi
+    .fn<typeof fetch>()
+    .mockImplementation(
+      async (path) =>
+        new Response(
+          JSON.stringify(
+            path === '/api/v1/auth/session'
+              ? { user_id: id, session_id: other, csrf_token: 'A'.repeat(43) }
+              : { project_id: id, can_create_issues: false },
+          ),
+          { headers: { 'content-type': 'application/json' } },
+        ),
+    );
+  vi.stubGlobal('fetch', fetcher);
+  const screen = new IssueCreationScreen(id, () => undefined, {
+    access: creationAccess,
+    send,
+    key: () => key,
+  });
+  await screen.start();
+  expect(screen.state.type).toBe('read-only');
+  await screen.submit({ title: 'Not permitted' });
+  await screen.retry();
+  expect(send).not.toHaveBeenCalled();
+  screen.dispose();
 });
 
 it('snapshots one submission and blocks duplicate submits and retry after confirmation', async () => {

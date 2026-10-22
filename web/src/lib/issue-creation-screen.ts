@@ -4,7 +4,8 @@ import {
   type IssueCreationInput,
   type IssueCreationReceipt,
 } from './issue-creation.ts';
-import { uuid } from './issue-transport.ts';
+import { uuid, IssueRequestError } from './issue-transport.ts';
+import { getProjectCapabilities } from './projects.ts';
 import { getCurrentSession, SessionRequestError } from './sessions.ts';
 
 export type CreationState =
@@ -12,6 +13,7 @@ export type CreationState =
   | { type: 'checking' }
   | { type: 'suspended' }
   | { type: 'editing' }
+  | { type: 'read-only' }
   | { type: 'submitting' }
   | { type: 'uncertain' }
   | { type: 'confirmed'; receipt: IssueCreationReceipt }
@@ -20,7 +22,9 @@ export type CreationState =
   | { type: 'read-error' };
 
 class AccessError extends Error {
-  constructor(readonly kind: 'signed-out' | 'unavailable' | 'read-error') {
+  constructor(
+    readonly kind: 'signed-out' | 'unavailable' | 'read-error' | 'read-only',
+  ) {
     super('Creation access unavailable');
   }
 }
@@ -56,25 +60,9 @@ export async function creationAccess(
   if (expectedActor !== undefined && session.user_id !== expectedActor) {
     throw new AccessError('unavailable');
   }
-  const response = await fetch(
-    `/api/v1/projects/${project}/issues?page_size=1`,
-    {
-      method: 'HEAD',
-      mode: 'same-origin',
-      credentials: 'same-origin',
-      cache: 'no-store',
-      redirect: 'error',
-      signal,
-    },
-  );
-  if (response.status !== 200) {
-    throw new AccessError(
-      response.status === 401
-        ? 'signed-out'
-        : [403, 404].includes(response.status)
-          ? 'unavailable'
-          : 'read-error',
-    );
+  const capability = await getProjectCapabilities(project, signal);
+  if (!capability.can_create_issues) {
+    throw new AccessError('read-only');
   }
   return session.user_id;
 }
@@ -142,6 +130,7 @@ export class IssueCreationScreen {
         'read-error',
         'unavailable',
         'signed-out',
+        'read-only',
       ].includes(this.current.type)
     ) {
       return;
@@ -184,9 +173,12 @@ export class IssueCreationScreen {
       const type =
         error instanceof AccessError
           ? error.kind
-          : error instanceof SessionRequestError && error.status === 401
+          : (error instanceof SessionRequestError ||
+                error instanceof IssueRequestError) &&
+              error.status === 401
             ? 'signed-out'
-            : error instanceof SessionRequestError &&
+            : (error instanceof SessionRequestError ||
+                  error instanceof IssueRequestError) &&
                 [403, 404].includes(error.status)
               ? 'unavailable'
               : 'read-error';

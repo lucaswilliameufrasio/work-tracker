@@ -30,6 +30,9 @@ use uuid::Uuid;
 #[path = "browser_issues/creation.rs"]
 mod creation;
 
+#[path = "browser_issues/capabilities.rs"]
+mod capabilities;
+
 fn policy() -> SessionPolicy {
     SessionPolicy::initial(TimeDelta::minutes(5)).unwrap()
 }

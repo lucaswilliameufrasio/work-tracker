@@ -177,6 +177,10 @@ pub fn browser_document() -> Value {
     ];
     let description = "Visible nonarchived board statuses ordered globally by position/id, not UUID catalog order. Session, membership and metadata share a snapshot. Missing/inaccessible project returns generic404; archived projects remain readable. No hidden candidate rows, unbounded traversal or reordering command.";
     paths.insert("/api/v1/projects/{project_id}/board".into(), json!({"get": operation("listBoardStatuses", Some("BoardStatusPage"), status_query.clone(), description), "head": operation("listBoardStatusesHead", None, status_query, description)}));
+    let parameters =
+        vec![json!({"name": "project_id", "in": "path", "required": true, "schema": uuid.clone()})];
+    let description = "Advisory current can_create_issues projection for explicit project readers. Session, account, membership, archive and manager context share one SQLite snapshot. Viewer/read-only project returns false; missing/private project generic404. Not an authorization token: every POST independently revalidates current mutation authority; defaults/capacity can still reject. No query parameters or free text.";
+    paths.insert("/api/v1/projects/{project_id}/capabilities".into(), json!({"get": operation("getProjectCapabilities", Some("ProjectCapabilities"), parameters.clone(), description), "head": operation("getProjectCapabilitiesHead", None, parameters, description)}));
     let mut create = operation(
         "createProjectIssue",
         Some("IssueCreationReceipt"),
@@ -248,6 +252,7 @@ pub fn browser_document() -> Value {
                     "created_at": timestamp.clone(), "updated_at": timestamp.clone()
                 }), &["id", "project_id", "issue_number", "issue_key", "issue_type_id", "status_id", "title", "creator_user_id", "priority", "version", "created_at", "updated_at"]),
                 "IssuePage": page("Issue"),
+                "ProjectCapabilities": object(json!({"project_id": uuid.clone(), "can_create_issues": {"type": "boolean"}}), &["project_id", "can_create_issues"]),
                 "IssueCreationReceipt": object(json!({"id": uuid.clone(), "project_id": uuid.clone(), "issue_number": decimal_i64(), "issue_key": {"type": "string"}, "created_version": {"type": "string", "enum": ["1"]}}), &["id", "project_id", "issue_number", "issue_key", "created_version"]),
                 "Error": object(json!({"code": {"type": "string"}, "message": {"type": "string"}, "request_id": {"type": "string", "format": "uuid"}, "field_errors": {"type": "object", "additionalProperties": {"type": "string"}}, "retryable": {"type": "boolean"}}), &["code", "message", "request_id", "field_errors", "retryable"])
             }
@@ -395,6 +400,7 @@ fn operation(id: &str, schema: Option<&str>, parameters: Vec<Value>, description
             || parameter["name"] == "session_id"
             || parameter["name"] == "issue_number"
             || parameter["name"] == "record_id"
+            || parameter["name"] == "project_id"
     }) {
         responses.insert(
             "422".into(),

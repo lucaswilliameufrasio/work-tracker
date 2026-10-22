@@ -2,6 +2,7 @@ use chrono::{DateTime, Utc};
 use sqlx::SqlitePool;
 use thiserror::Error;
 
+use crate::access::{AccessCapability, AccessStore, authorize};
 use crate::auth::{
     SessionToken,
     session::{SessionError, SessionPolicy, SessionStore},
@@ -32,6 +33,36 @@ pub struct SessionProjectReader {
 }
 
 impl SessionProjectReader {
+    pub async fn can_create_issues(
+        &self,
+        token: &SessionToken,
+        project_id: &str,
+        now: DateTime<Utc>,
+    ) -> Result<Option<bool>, SessionProjectReadError> {
+        let mut transaction = self.pool.begin().await?;
+        let principal = self
+            .sessions
+            .authenticate_in_transaction(&mut transaction, token, now)
+            .await?
+            .ok_or(SessionProjectReadError::Unauthenticated)?;
+        let context = AccessStore::load_project_context_in_transaction(
+            &mut transaction,
+            principal.user_id(),
+            project_id,
+            false,
+        )
+        .await
+        .map_err(ProjectReadError::from)?;
+        let capability = context.and_then(|context| {
+            if authorize(&context, AccessCapability::ReadProjectContent).is_err() {
+                return None;
+            }
+            Some(authorize(&context, AccessCapability::MutateIssues).is_ok())
+        });
+        transaction.commit().await?;
+        Ok(capability)
+    }
+
     pub fn new(pool: SqlitePool, policy: SessionPolicy) -> Self {
         Self {
             sessions: SessionStore::new(pool.clone(), policy),

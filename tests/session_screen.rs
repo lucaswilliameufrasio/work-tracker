@@ -269,7 +269,8 @@ async fn session_screen_uses_real_https_browser_cookies_confirmations_and_transa
             .await
             .unwrap();
         let issued = sessions.issue(&creator, Utc::now()).await.unwrap();
-        fixtures.push(json!({"kind": kind, "token": issued.token.expose(), "project_id": created.id, "private_project_id": private.id}));
+        sqlx::query("INSERT INTO project_members (project_id, organization_id, user_id, role, created_at) VALUES (?, 1, ?, 'viewer', 'now')").bind(&archived.id).bind(&creator).execute(database.pool()).await.unwrap();
+        fixtures.push(json!({"kind": kind, "token": issued.token.expose(), "project_id": created.id, "private_project_id": private.id, "read_only_project_id": archived.id}));
         creation_projects.push(created.id);
     }
     let input = json!({"fixtures": fixtures, "artifacts": artifacts});

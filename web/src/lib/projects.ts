@@ -9,6 +9,32 @@ export type AccessibleProject = {
   archived_at?: string;
 };
 
+export function parseProjectCapabilities(
+  value: unknown,
+  projectId: string,
+): { project_id: string; can_create_issues: boolean } {
+  const item = fields(value, ['project_id', 'can_create_issues']);
+  const project = uuid(item.project_id);
+  if (
+    project !== uuid(projectId) ||
+    typeof item.can_create_issues !== 'boolean'
+  ) {
+    return invalid();
+  }
+  return { project_id: project, can_create_issues: item.can_create_issues };
+}
+
+export async function getProjectCapabilities(
+  projectId: string,
+  signal: AbortSignal,
+): Promise<{ project_id: string; can_create_issues: boolean }> {
+  uuid(projectId);
+  return parseProjectCapabilities(
+    await readIssueJson(`/api/v1/projects/${projectId}/capabilities`, signal),
+    projectId,
+  );
+}
+
 export function projectKey(value: unknown): string {
   if (typeof value !== 'string' || !/^[A-Z]{2,6}$/.test(value)) {
     return invalid();

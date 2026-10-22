@@ -1,5 +1,7 @@
 # Private issue creation journey
 
+Follow-up239 replaces the initial HEAD read proof with the [advisory session-bound mutation capability projection](project-capabilities-design.md). Known read-only access no longer mounts a form or retry control. The POST remains the independent authorization boundary; the rest of the lifecycle/key preservation design below is unchanged.
+
 Slice238 adds `/projects/{uuid}/issues/new` as a separate create screen, not an editor in the board or detail screen. Entry links from issue lists/boards and eligible project cards. No assignee picker without a project roster API: initial form is title and optional plain Markdown-source description, with server-selected task/todo defaults. Existing typography/colors/responsive spacing remain; associated labels, inline errors, live status, focus heading on transitions and44px actions support keyboard/mobile use. No Markdown preview or unsanitized HTML.
 
 Check current-session then HEAD issue collection with page_size1 (read membership proof, no response content). This does not claim mutation capability: server revalidates active member/manager/archive/defaults at commit. Readable viewers/archived projects may reach a form by direct link but receive generic rejection on submit; the UI must explicitly explain that creation permission is checked on send, not infer permission from organization authority. Do not walk arbitrary project catalog pages to infer access. Route/query selectors are strict; no private text or keys in URLs.

@@ -78,6 +78,10 @@ pub(super) fn routes(
         )
         .route("/api/v1/auth/sessions/{session_id}", delete(revoke_session))
         .route("/api/v1/projects", get(accessible_projects))
+        .route(
+            "/api/v1/projects/{project_id}/capabilities",
+            get(project_capabilities),
+        )
         .route("/api/v1/admin/projects", get(operational_projects))
         .merge(issues::routes())
         .merge(catalogs::routes())
@@ -87,6 +91,58 @@ pub(super) fn routes(
             budget,
             super::browser_budget::admit,
         ))
+}
+
+#[derive(Serialize)]
+struct ProjectCapabilities {
+    project_id: String,
+    can_create_issues: bool,
+}
+
+async fn project_capabilities(
+    State(state): State<Arc<BrowserState>>,
+    path: Result<Path<String>, axum::extract::rejection::PathRejection>,
+    request: Request,
+) -> Result<Response, ApiError> {
+    let (request, _) = request.into_parts();
+    let token = authenticated_token(&state, &request).await?;
+    let Path(project_id) =
+        path.map_err(|_| ApiError::invalid_field("project_id", "Use a canonical UUID"))?;
+    if uuid::Uuid::parse_str(&project_id)
+        .map(|id| id.to_string())
+        .ok()
+        .as_deref()
+        != Some(project_id.as_str())
+    {
+        return Err(ApiError::invalid_field(
+            "project_id",
+            "Use a canonical UUID",
+        ));
+    }
+    if request.uri.query().is_some() {
+        return Err(malformed_query());
+    }
+    let can_create_issues = state
+        .projects
+        .can_create_issues(&token, &project_id, Utc::now())
+        .await
+        .map_err(project_error)?
+        .ok_or_else(|| {
+            ApiError::new(
+                StatusCode::NOT_FOUND,
+                "not_found",
+                "Resource not found",
+                false,
+            )
+        })?;
+    Ok((
+        [(header::CACHE_CONTROL, "no-store")],
+        Json(ProjectCapabilities {
+            project_id,
+            can_create_issues,
+        }),
+    )
+        .into_response())
 }
 
 #[derive(Default, Deserialize)]

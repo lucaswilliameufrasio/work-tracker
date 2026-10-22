@@ -104,6 +104,13 @@
     <h2>Conteúdo indisponível</h2>
     <p role="status">O endereço não está disponível para este acesso.</p>
     <button onclick={() => void check()}>Verificar acesso novamente</button>
+  {:else if view.type === 'read-only'}
+    <h2>Projeto somente leitura para este acesso</h2>
+    <p role="status">
+      Você pode consultar o projeto, mas não criar issues agora. Nenhuma
+      solicitação foi reenviada.
+    </p>
+    <button onclick={() => void check()}>Verificar acesso novamente</button>
   {:else if view.type === 'read-error'}
     <p role="status">
       Não foi possível verificar o acesso. Nenhuma solicitação foi reenviada.
