@@ -1,0 +1,418 @@
+<script lang="ts">
+  import { flushSync, onMount, tick } from 'svelte';
+  import { SvelteURLSearchParams } from 'svelte/reactivity';
+  import { WorkScreen, workRoute, type WorkState } from './issue-navigation';
+
+  const route = workRoute(
+    globalThis.location.pathname,
+    globalThis.location.search,
+  );
+  let view = $state<WorkState>({ type: 'idle' });
+  let heading: HTMLElement | undefined;
+  const screen = new WorkScreen(route, (state) => {
+    view = state;
+  });
+  const priorities = {
+    none: 'Sem prioridade',
+    low: 'Baixa',
+    medium: 'Média',
+    high: 'Alta',
+    urgent: 'Urgente',
+  };
+  const roles = { manager: 'Gerente', member: 'Membro', viewer: 'Leitor' };
+  const date = (value: string) =>
+    `${new Intl.DateTimeFormat('pt-BR', { dateStyle: 'medium', timeStyle: 'short', timeZone: 'UTC' }).format(new Date(value))} UTC`;
+
+  function projectLink(cursor?: string): string {
+    const query = new SvelteURLSearchParams({
+      include_archived: String(
+        route.type === 'projects' && route.includeArchived,
+      ),
+    });
+    if (cursor !== undefined) {
+      query.set('cursor', cursor);
+    }
+    return `/projects?${query}`;
+  }
+
+  function listLink(project: string, cursor?: string): string {
+    return `/projects/${project}/issues${cursor === undefined ? '' : `?cursor=${cursor}`}`;
+  }
+
+  function detailLink(
+    project: string,
+    number: string,
+    history?: string,
+  ): string {
+    const query = new SvelteURLSearchParams();
+    const from =
+      route.type === 'issues'
+        ? route.cursor
+        : route.type === 'detail'
+          ? route.from
+          : undefined;
+    if (from !== undefined) {
+      query.set('from', from);
+    }
+    if (history !== undefined) {
+      query.set('history_cursor', history);
+    }
+    return `/projects/${project}/issues/${number}${query.size === 0 ? '' : `?${query}`}`;
+  }
+
+  async function refresh(): Promise<void> {
+    await screen.refresh();
+    await tick();
+    heading?.focus();
+  }
+
+  onMount(() => {
+    const conceal = () => flushSync(() => screen.suspend());
+    const restore = () => {
+      if (document.visibilityState === 'visible') {
+        void screen.start();
+      }
+    };
+    const visibility = () => {
+      if (document.visibilityState === 'hidden') {
+        conceal();
+      } else {
+        restore();
+      }
+    };
+    const pageShow = (event: globalThis.PageTransitionEvent) => {
+      if (event.persisted) {
+        restore();
+      }
+    };
+    globalThis.addEventListener('pagehide', conceal);
+    globalThis.addEventListener('blur', conceal);
+    globalThis.addEventListener('focus', restore);
+    globalThis.addEventListener('pageshow', pageShow);
+    document.addEventListener('visibilitychange', visibility);
+    if (document.visibilityState === 'visible') {
+      void screen.start();
+    } else {
+      screen.suspend();
+    }
+    return () => {
+      globalThis.removeEventListener('pagehide', conceal);
+      globalThis.removeEventListener('blur', conceal);
+      globalThis.removeEventListener('focus', restore);
+      globalThis.removeEventListener('pageshow', pageShow);
+      document.removeEventListener('visibilitychange', visibility);
+      screen.dispose();
+    };
+  });
+</script>
+
+<main class="work">
+  <h1 tabindex="-1" bind:this={heading}>
+    {route.type === 'projects'
+      ? 'Meus projetos'
+      : route.type === 'detail'
+        ? 'Leitura da issue'
+        : 'Issues do projeto'}
+  </h1>
+  <p class="intro">
+    Consulta em desenvolvimento. Edição, board e busca ainda não estão
+    disponíveis.
+  </p>
+  <nav class="work-links" aria-label="Navegação do trabalho">
+    <a href="/projects">Meus projetos</a>
+    {#if route.type === 'detail'}<a href={listLink(route.projectId, route.from)}
+        >Voltar à lista de issues</a
+      >{/if}
+  </nav>
+  {#if view.type === 'idle' || view.type === 'loading'}
+    <p role="status">Consultando acesso e dados…</p>
+  {:else if view.type === 'suspended'}
+    <p role="status">Dados ocultos até nova verificação.</p>
+    <button onclick={() => void refresh()}>Consultar novamente</button>
+  {:else if view.type === 'signed-out'}
+    <h2>Sessão encerrada ou expirada</h2>
+    <p role="status">
+      Nenhum dado privado é exibido. Uma nova sessão é necessária; login ainda
+      não está disponível nesta versão.
+    </p>
+  {:else if view.type === 'unavailable'}
+    <h2>Conteúdo indisponível</h2>
+    <p role="status">O endereço não está disponível para este acesso.</p>
+    <button onclick={() => void refresh()}>Verificar acesso novamente</button>
+  {:else if view.type === 'read-error'}
+    <h2>Não foi possível consultar</h2>
+    <p role="status">
+      Nenhum dado anterior foi mantido. Confira a conexão e tente novamente.
+    </p>
+    <button onclick={() => void refresh()}>Tentar novamente</button>
+  {:else if view.type === 'ready'}
+    {@const data = view.data}
+    <div data-private-work>
+      {#if data.type === 'projects'}
+        <p class="hint">
+          Somente projetos com participação explícita. Seu papel de organização
+          não amplia esta lista.
+        </p>
+        <a
+          class="archive-toggle"
+          href={route.type === 'projects' && route.includeArchived
+            ? '/projects'
+            : '/projects?include_archived=true'}
+          >{route.type === 'projects' && route.includeArchived
+            ? 'Ocultar projetos arquivados'
+            : 'Incluir projetos arquivados'}</a
+        >
+        {#if data.page.data.length === 0}<p role="status">
+            Nenhum projeto acessível nesta página.
+          </p>{/if}
+        <ul class="work-index" aria-label="Projetos acessíveis">
+          {#each data.page.data as project (project.id)}
+            <li data-project-id={project.id}>
+              <a href={listLink(project.id)}
+                ><span class="key">{project.project_key}</span><strong
+                  >{project.name}</strong
+                ></a
+              >
+              <p class="hint">
+                {roles[project.role]}{project.archived_at === undefined
+                  ? ''
+                  : ' · Arquivado, somente leitura'}
+              </p>
+            </li>
+          {/each}
+        </ul>
+        {#if data.page.has_more}<a
+            class="next-page"
+            href={projectLink(data.page.next_cursor)}
+            >Próxima página de projetos</a
+          >{/if}
+      {:else if data.type === 'issues'}
+        {#if data.page.data.length === 0}<p role="status">
+            Nenhuma issue fora da lixeira nesta página.
+          </p>{/if}
+        <ul class="work-index" aria-label="Issues do projeto">
+          {#each data.page.data as issue (issue.id)}
+            <li data-issue-id={issue.id}>
+              <a href={detailLink(issue.project_id, issue.issue_number)}
+                ><span class="key">{issue.issue_key}</span><strong
+                  >{issue.title}</strong
+                ></a
+              >
+              <p class="hint">
+                {priorities[issue.priority]}{issue.due_date === undefined
+                  ? ''
+                  : ` · Prazo ${issue.due_date}`}
+              </p>
+            </li>
+          {/each}
+        </ul>
+        {#if data.page.has_more && route.type === 'issues'}<a
+            class="next-page"
+            href={listLink(route.projectId, data.page.next_cursor)}
+            >Próxima página de issues</a
+          >{/if}
+      {:else}
+        {@const issue = data.issue}
+        {@const status = data.statuses.data.find(
+          (item) => item.id === issue.status_id,
+        )}
+        {@const type = data.types.data.find(
+          (item) => item.id === issue.issue_type_id,
+        )}
+        <article data-issue-detail={issue.id}>
+          <p class="key">{issue.issue_key}</p>
+          <h2 class="issue-title">{issue.title}</h2>
+          {#if issue.trashed_at !== undefined}<p role="status">
+              Na lixeira. A leitura permanece até a remoção definitiva.
+            </p>{/if}
+          <dl>
+            <div>
+              <dt>Prioridade</dt>
+              <dd>{priorities[issue.priority]}</dd>
+            </div>
+            <div>
+              <dt>Status</dt>
+              <dd>
+                {status?.name ??
+                  `Nome não carregado; referência ${issue.status_id}`}
+              </dd>
+            </div>
+            <div>
+              <dt>Tipo</dt>
+              <dd>
+                {type?.name ??
+                  `Nome não carregado; referência ${issue.issue_type_id}`}
+              </dd>
+            </div>
+            {#if issue.due_date !== undefined}<div>
+                <dt>Prazo</dt>
+                <dd>{issue.due_date}</dd>
+              </div>{/if}
+            <div>
+              <dt>Versão</dt>
+              <dd>{issue.version}</dd>
+            </div>
+            <div>
+              <dt>Atualizada</dt>
+              <dd>
+                <time datetime={issue.updated_at}>{date(issue.updated_at)}</time
+                >
+              </dd>
+            </div>
+          </dl>
+          {#if data.statuses.has_more || data.types.has_more}<p class="hint">
+              Catálogos parciais: alguns nomes podem não estar carregados.
+            </p>{/if}
+          <section aria-labelledby="description-title">
+            <h3 id="description-title">Descrição · fonte Markdown</h3>
+            <p class="hint">
+              Texto original, sem renderização de links ou imagens.
+            </p>
+            <pre>{issue.description ?? 'Sem descrição.'}</pre>
+          </section>
+          <section aria-labelledby="history-title">
+            <h3 id="history-title">Histórico desta página</h3>
+            {#if data.history.data.length === 0}<p role="status">
+                Nenhum evento nesta página.
+              </p>{/if}
+            <ul class="journal" aria-label="Histórico da issue">
+              {#each data.history.data as event (event.id)}<li>
+                  <strong>Issue criada</strong><time
+                    datetime={event.occurred_at}>{date(event.occurred_at)}</time
+                  ><span class="hint"
+                    >Referência do autor {event.actor_user_id}</span
+                  >
+                </li>{/each}
+            </ul>
+            {#if data.history.has_more}<a
+                class="next-page"
+                href={detailLink(
+                  issue.project_id,
+                  issue.issue_number,
+                  data.history.next_cursor,
+                )}>Próxima página do histórico</a
+              >{/if}
+          </section>
+        </article>
+      {/if}
+    </div>
+    <button onclick={() => void refresh()}>Atualizar consulta</button>
+  {/if}
+</main>
+
+<style>
+  .work {
+    max-width: 800px;
+    margin-top: 48px;
+  }
+  .work-links {
+    display: flex;
+    gap: 20px;
+    flex-wrap: wrap;
+    margin: 20px 0;
+  }
+  a {
+    color: var(--primary);
+    min-height: 44px;
+    display: inline-flex;
+    align-items: center;
+  }
+  a:focus-visible,
+  h1:focus-visible {
+    outline: 3px solid var(--primary);
+    outline-offset: 4px;
+  }
+  .work-index,
+  .journal {
+    list-style: none;
+    padding: 0;
+    margin: 24px 0;
+  }
+  .work-index li {
+    border-bottom: 1px solid var(--border);
+    padding: 16px 0;
+    overflow-wrap: anywhere;
+  }
+  .work-index li > a {
+    display: grid;
+    grid-template-columns: minmax(90px, auto) 1fr;
+    gap: 16px;
+    text-decoration: none;
+    align-items: baseline;
+  }
+  .work-index strong {
+    font-weight: 600;
+    line-height: 1.5;
+  }
+  .work-index li > a:hover strong {
+    text-decoration: underline;
+  }
+  .key {
+    color: var(--muted);
+    font-size: 14px;
+    font-weight: 500;
+    overflow-wrap: anywhere;
+  }
+  .work-index p {
+    margin: 4px 0 0;
+  }
+  .next-page {
+    margin: 8px 20px 16px 0;
+    font-weight: 600;
+  }
+  .issue-title {
+    font-size: 28px;
+    line-height: 1.3;
+    overflow-wrap: anywhere;
+  }
+  dl {
+    display: grid;
+    gap: 12px;
+    margin: 28px 0;
+  }
+  dl > div {
+    display: grid;
+    grid-template-columns: 110px 1fr;
+    gap: 12px;
+  }
+  dt {
+    color: var(--muted);
+  }
+  dd {
+    margin: 0;
+    overflow-wrap: anywhere;
+  }
+  section {
+    margin-top: 32px;
+    border-top: 1px solid var(--border);
+    padding-top: 20px;
+  }
+  h3 {
+    font-size: 16px;
+    margin: 0 0 12px;
+  }
+  pre {
+    font-family: inherit;
+    font-size: 16px;
+    line-height: 1.65;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    margin: 12px 0;
+  }
+  .journal li {
+    display: grid;
+    gap: 6px;
+    padding: 12px 0;
+    overflow-wrap: anywhere;
+  }
+  @media (max-width: 480px) {
+    .work-index li > a {
+      grid-template-columns: 1fr;
+      gap: 6px;
+    }
+    dl > div {
+      grid-template-columns: 1fr;
+      gap: 4px;
+    }
+  }
+</style>

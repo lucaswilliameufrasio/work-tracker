@@ -178,6 +178,56 @@ async fn session_screen_uses_real_https_browser_cookies_confirmations_and_transa
     }
     let stranger = user(&database).await;
     let foreign = sessions.issue(&stranger, Utc::now()).await.unwrap();
+    sqlx::query("INSERT INTO organizations (id, name, locale, timezone, created_at, updated_at) VALUES (1, 'Read UI fixture', 'en', 'UTC', 'now', 'now')").execute(database.pool()).await.unwrap();
+    let reader = user(&database).await;
+    for (actor, role) in [(&reader, "owner"), (&stranger, "admin")] {
+        sqlx::query("INSERT INTO organization_members (organization_id, user_id, role, created_at) VALUES (1, ?, ?, 'now')").bind(actor).bind(role).execute(database.pool()).await.unwrap();
+    }
+    let project = puxiri::projects::ProjectStore::new(database.pool().clone())
+        .create(&reader, "READ", "Synthetic work project", None, Utc::now())
+        .await
+        .unwrap();
+    let archived = puxiri::projects::ProjectStore::new(database.pool().clone())
+        .create(
+            &reader,
+            "OLD",
+            "Synthetic archived project",
+            None,
+            Utc::now(),
+        )
+        .await
+        .unwrap();
+    puxiri::projects::ProjectStore::new(database.pool().clone())
+        .set_archived(&reader, &archived.id, true, Utc::now())
+        .await
+        .unwrap();
+    let private = puxiri::projects::ProjectStore::new(database.pool().clone())
+        .create(
+            &stranger,
+            "HIDE",
+            "Private outsider project",
+            None,
+            Utc::now(),
+        )
+        .await
+        .unwrap();
+    for number in 1..=23 {
+        puxiri::issues::IssueStore::new(database.pool().clone()).create(&reader, &project.id, puxiri::issues::NewIssue {
+            title: &format!("Synthetic work issue {number}"),
+            description: Some("# Private Markdown\n<script>throw new Error('not executable')</script>\n![remote](https://forbidden.example.test/private.png)"),
+            assignee_user_id: None,
+        }, Utc::now()).await.unwrap();
+    }
+    sqlx::query("UPDATE issues SET trashed_at = ? WHERE project_id = ? AND issue_number = 2")
+        .bind(Utc::now().to_rfc3339())
+        .bind(&project.id)
+        .execute(database.pool())
+        .await
+        .unwrap();
+    for kind in ["work-light", "work-dark"] {
+        let issued = sessions.issue(&reader, Utc::now()).await.unwrap();
+        fixtures.push(json!({"kind": kind, "token": issued.token.expose(), "project_id": project.id, "private_project_id": private.id}));
+    }
     let input = json!({"fixtures": fixtures, "artifacts": artifacts});
     let mut stdin = child.0.stdin.take().unwrap();
     serde_json::to_writer(&mut stdin, &input).unwrap();
@@ -225,6 +275,24 @@ async fn session_screen_uses_real_https_browser_cookies_confirmations_and_transa
     .await
     .unwrap();
     assert_eq!(global, 3);
+    let reader_revoked: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sessions WHERE user_id = ? AND revoked_at IS NOT NULL",
+    )
+    .bind(&reader)
+    .fetch_one(database.pool())
+    .await
+    .unwrap();
+    let reader_audits: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM audit_events WHERE actor_user_id = ? AND event_kind = 'auth.session.revoked'").bind(&reader).fetch_one(database.pool()).await.unwrap();
+    assert_eq!((reader_revoked, reader_audits), (2, 2));
+    let issue_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM issues")
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
+    let issue_events: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM issue_events")
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
+    assert_eq!((issue_count, issue_events), (23, 23));
     assert!(
         sessions
             .validate(&foreign.token, Utc::now())

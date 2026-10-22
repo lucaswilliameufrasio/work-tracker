@@ -2,8 +2,12 @@
   import { onMount } from 'svelte';
   import { getReadiness, type Readiness } from './lib/health';
   import SessionsPage from './lib/SessionsPage.svelte';
+  import WorkPage from './lib/WorkPage.svelte';
 
   const sessionsPage = globalThis.location.pathname === '/settings/sessions';
+  const workPage =
+    globalThis.location.pathname === '/projects' ||
+    globalThis.location.pathname.startsWith('/projects/');
 
   let status = $state<Readiness | 'checking' | 'unavailable'>('checking');
   const controller = new AbortController();
@@ -21,7 +25,7 @@
   }
 
   onMount(() => {
-    if (!sessionsPage) {
+    if (!sessionsPage && !workPage) {
       void refresh();
     }
     return () => controller.abort();
@@ -49,6 +53,9 @@
 
   <nav class="account-navigation" aria-label="Conta">
     <a href="/">Instalação</a>
+    <a href="/projects" aria-current={workPage ? 'page' : undefined}
+      >Meus projetos</a
+    >
     <a
       href="/settings/sessions"
       aria-current={sessionsPage ? 'page' : undefined}>Minhas sessões</a
@@ -57,6 +64,8 @@
 
   {#if sessionsPage}
     <SessionsPage />
+  {:else if workPage}
+    <WorkPage />
   {:else}
     <main>
       <h1>Trabalho em movimento.</h1>
@@ -97,8 +106,8 @@
       <aside class="notice" aria-label="Disponibilidade do produto">
         <strong>Versão em desenvolvimento</strong>
         <p>
-          Login, projetos e integrações ainda não estão disponíveis. Não use
-          dados reais nesta versão.
+          Login, edição e integrações ainda não estão disponíveis. Não use dados
+          reais nesta versão.
         </p>
       </aside>
     </main>

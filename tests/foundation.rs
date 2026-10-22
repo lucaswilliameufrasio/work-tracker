@@ -465,7 +465,11 @@ async fn spa_and_built_assets_are_embedded_with_correct_cache_and_security_heade
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(
             response.headers()[header::CACHE_CONTROL],
-            "no-cache",
+            if path.starts_with("/projects/") {
+                "no-store"
+            } else {
+                "no-cache"
+            },
             "{path}"
         );
         assert_eq!(
@@ -480,16 +484,23 @@ async fn spa_and_built_assets_are_embedded_with_correct_cache_and_security_heade
         );
     }
     for method in [Method::GET, Method::HEAD] {
-        let response = request(&router, method.clone(), "/settings/sessions").await;
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
-        if method == Method::HEAD {
-            assert!(
-                to_bytes(response.into_body(), 1024 * 1024)
-                    .await
-                    .unwrap()
-                    .is_empty()
-            );
+        for path in [
+            "/settings/sessions",
+            "/projects",
+            "/projects/019a0000-0000-7000-8000-000000000001/issues",
+            "/projects/019a0000-0000-7000-8000-000000000001/issues/1",
+        ] {
+            let response = request(&router, method.clone(), path).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+            if method == Method::HEAD {
+                assert!(
+                    to_bytes(response.into_body(), 1024 * 1024)
+                        .await
+                        .unwrap()
+                        .is_empty()
+                );
+            }
         }
     }
     let response = request(&router, Method::GET, "/").await;

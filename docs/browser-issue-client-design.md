@@ -9,3 +9,5 @@ Read at most512KiB of response bytes, canceling streams at overflow; error bodie
 Verification uses unit protocol seams plus the real TypeScript client against a loopback HTTP router and migrated file-backed SQLite, including large escaped details, pagination, archived/trash reads and denied/expired sessions. Node's cookie adapter is test-only and does not certify Secure/SameSite/TLS, browser engines or production proxy behavior. Those browser matrices remain open.
 
 The no-emit TypeScript configuration permits explicit `.ts` imports so Node24's built-in strip-only loader can execute the actual client and its transport without a generated duplicate. Avoid parameter properties and other runtime-transform syntax unsupported by that loader. Vite still owns browser bundling; no runtime loader dependency is added.
+
+Follow-up: slice230 adds the [private read navigation](issue-navigation-design.md) using this client; the original slice227 did not include UI. The new view displays Markdown source only and does not complete the board/editing journey.

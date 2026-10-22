@@ -119,7 +119,7 @@ async fn frontend(request: Request) -> Response {
     {
         (
             "index.html",
-            if path == "settings/sessions" {
+            if path == "settings/sessions" || path == "projects" || path.starts_with("projects/") {
                 "no-store"
             } else {
                 "no-cache"
