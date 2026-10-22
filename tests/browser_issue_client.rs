@@ -15,6 +15,71 @@ use tempfile::TempDir;
 use uuid::Uuid;
 
 #[tokio::test]
+async fn typescript_creation_client_commits_and_recovers_lost_response_with_explicit_same_key_replay()
+ {
+    let directory = TempDir::new().unwrap();
+    let database = Arc::new(Database::open(directory.path()).await.unwrap());
+    sqlx::query("INSERT INTO organizations (id, name, locale, timezone, created_at, updated_at) VALUES (1, 'Creation client fixture', 'en', 'UTC', 'now', 'now')").execute(database.pool()).await.unwrap();
+    let owner = Uuid::now_v7().to_string();
+    let stranger = Uuid::now_v7().to_string();
+    for (id, role) in [(&owner, "owner"), (&stranger, "admin")] {
+        sqlx::query("INSERT INTO users (id, display_name, state, created_at, updated_at) VALUES (?, 'Synthetic creation client', 'active', 'now', 'now')").bind(id).execute(database.pool()).await.unwrap();
+        sqlx::query("INSERT INTO organization_members (organization_id, user_id, role, created_at) VALUES (1, ?, ?, 'now')").bind(id).bind(role).execute(database.pool()).await.unwrap();
+    }
+    let project = ProjectStore::new(database.pool().clone())
+        .create(&owner, "API", "Creation client", None, Utc::now())
+        .await
+        .unwrap();
+    sqlx::query("UPDATE projects SET next_issue_number = 9007199254740993 WHERE id = ?")
+        .bind(&project.id)
+        .execute(database.pool())
+        .await
+        .unwrap();
+    let policy = SessionPolicy::initial(TimeDelta::minutes(5)).unwrap();
+    let sessions = SessionStore::new(database.pool().clone(), policy);
+    let own = sessions.issue(&owner, Utc::now()).await.unwrap();
+    let foreign = sessions.issue(&stranger, Utc::now()).await.unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let security = BrowserSessionSecurity::new(
+        &format!("https://{address}"),
+        MasterKeyStore::load_or_create(&directory.path().join("master.key")).unwrap(),
+    )
+    .unwrap();
+    let app = http::router_with_browser_sessions(database.clone(), security, policy);
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let output = tokio::task::spawn_blocking(move || {
+        std::process::Command::new("node")
+            .arg(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("web/scripts/issue-creation-client.integration.mjs"),
+            )
+            .env("PUXIRI_TEST_BASE_URL", format!("http://{address}"))
+            .env("PUXIRI_TEST_PROJECT", project.id)
+            .env("PUXIRI_TEST_ACTOR", owner)
+            .env("PUXIRI_TEST_SESSION", own.token.expose())
+            .env("PUXIRI_TEST_FOREIGN_ACTOR", stranger)
+            .env("PUXIRI_TEST_FOREIGN_SESSION", foreign.token.expose())
+            .output()
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    server.abort();
+    assert!(server.await.unwrap_err().is_cancelled());
+    assert!(
+        output.status.success(),
+        "Node creation fixture failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stdout.is_empty());
+    let counts: (i64, i64, i64, i64, i64) = sqlx::query_as("SELECT (SELECT COUNT(*) FROM issues), (SELECT COUNT(*) FROM issue_events), (SELECT COUNT(*) FROM outbox_events), (SELECT COUNT(*) FROM issue_creation_receipts), next_issue_number FROM projects").fetch_one(database.pool()).await.unwrap();
+    assert_eq!(counts, (2, 2, 2, 2, 9007199254740995));
+}
+
+#[tokio::test]
 async fn typescript_issue_client_reads_real_router_and_sqlite_without_writes_or_private_access() {
     let directory = TempDir::new().unwrap();
     let database = Arc::new(Database::open(directory.path()).await.unwrap());

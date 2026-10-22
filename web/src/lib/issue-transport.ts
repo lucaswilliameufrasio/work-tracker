@@ -56,7 +56,7 @@ export function uuid(value: unknown): string {
   return value;
 }
 
-async function json(
+export async function issueJson(
   response: Response,
   signal: AbortSignal,
   limit: number,
@@ -137,9 +137,16 @@ export async function readIssueJson(
     throw new Error('Issue request could not be completed');
   }
   if (response.status === 200) {
-    return json(response, deadline, 512 * 1024);
+    return issueJson(response, deadline, 512 * 1024);
   }
-  const error = fields(await json(response, deadline, 64 * 1024), [
+  return issueFailure(response, deadline);
+}
+
+export async function issueFailure(
+  response: Response,
+  signal: AbortSignal,
+): Promise<never> {
+  const error = fields(await issueJson(response, signal, 64 * 1024), [
     'code',
     'message',
     'request_id',
