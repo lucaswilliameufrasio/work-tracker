@@ -1,5 +1,12 @@
 import { afterEach, expect, it, vi } from 'vitest';
-import { boardBoundary, getBoardPage, parseBoardPage } from './board';
+import {
+  boardBoundary,
+  boardStatusBoundary,
+  getBoardPage,
+  getBoardStatusPage,
+  parseBoardPage,
+  parseBoardStatusPage,
+} from './board';
 import { loadWork, workRoute } from './issue-navigation';
 
 const id = '019a0000-0000-7000-8000-000000000001';
@@ -183,9 +190,9 @@ it('builds fixed cookie-only GET and does not retry or traverse next pages', asy
 });
 
 it('validates overview and focused column routes with independent cursor grammars', () => {
-  expect(workRoute(`/projects/${id}/board`, `?status_cursor=${other}`)).toEqual(
-    { type: 'board', projectId: id, statusCursor: other },
-  );
+  expect(
+    workRoute(`/projects/${id}/board`, `?status_cursor=${cursor('0', other)}`),
+  ).toEqual({ type: 'board', projectId: id, statusCursor: cursor('0', other) });
   expect(
     workRoute(`/projects/${id}/board/${other}`, `?cursor=${cursor('0')}`),
   ).toEqual({
@@ -203,22 +210,25 @@ it('validates overview and focused column routes with independent cursor grammar
   }
 });
 
-it('composes only visible status candidates and orders that bounded page by numeric position', async () => {
+it('composes only the server-ordered visible statuses in a bounded page', async () => {
   const third = '019a0000-0000-7000-8000-000000000003';
   const fourth = '019a0000-0000-7000-8000-000000000004';
-  const statuses = [id, other, third, fourth].map((selected, index) => ({
-    id: selected,
-    project_id: id,
-    name: `Status ${index}`,
-    category: 'backlog',
-    position: String(3 - index),
-    board_visible: index === 1 || index === 2,
-  }));
+  const statuses = [id, other, third, fourth]
+    .map((selected, index) => ({
+      id: selected,
+      project_id: id,
+      name: `Status ${index}`,
+      category: 'backlog',
+      position: String(3 - index),
+      board_visible: index === 1 || index === 2,
+    }))
+    .filter((status) => status.board_visible)
+    .sort((a, b) => Number(a.position) - Number(b.position));
   const fetcher = vi.fn<typeof fetch>().mockImplementation(async (path) => {
     if (typeof path !== 'string') {
       throw new Error('Expected relative URL');
     }
-    if (path.includes('/statuses?')) {
+    if (path.includes('/board?')) {
       return Response.json({ data: statuses, has_more: false });
     }
     return Response.json({ data: [], total_count: '0', has_more: false });
@@ -235,4 +245,45 @@ it('composes only visible status candidates and orders that bounded page by nume
   ]);
   expect(fetcher).toHaveBeenCalledTimes(3);
   expect(fetcher.mock.calls[0]?.[0]).toContain('page_size=4');
+});
+
+it('validates globally ordered visible metadata, position cursors and the fixed collection GET', async () => {
+  const status = {
+    id,
+    project_id: id,
+    name: 'Column',
+    category: 'backlog',
+    position: '0',
+    board_visible: true,
+  };
+  const next = { ...status, id: other, position: '9223372036854775807' };
+  const response = { data: [status, next], has_more: false };
+  expect(parseBoardStatusPage(response, id, {}).data).toEqual([status, next]);
+  expect(boardStatusBoundary(cursor('0'))).toEqual({ position: '0', id });
+  expect(() => boardStatusBoundary(cursor('-1'))).toThrow();
+  for (const data of [
+    [next, status],
+    [{ ...status, board_visible: false }],
+    [{ ...status, archived_at: time }],
+    [status, status],
+  ]) {
+    expect(() =>
+      parseBoardStatusPage({ data, has_more: false }, id, {}),
+    ).toThrow();
+  }
+  const page = { data: [status], has_more: true, next_cursor: cursor('0') };
+  expect(parseBoardStatusPage(page, id, { page_size: 1 })).toEqual(page);
+  expect(() =>
+    parseBoardStatusPage({ ...page, next_cursor: cursor('1') }, id, {
+      page_size: 1,
+    }),
+  ).toThrow();
+  const fetcher = vi
+    .fn<typeof fetch>()
+    .mockResolvedValue(Response.json(response));
+  vi.stubGlobal('fetch', fetcher);
+  await getBoardStatusPage(id, {}, signal());
+  expect(fetcher.mock.calls[0]?.[0]).toBe(
+    `/api/v1/projects/${id}/board?page_size=4`,
+  );
 });

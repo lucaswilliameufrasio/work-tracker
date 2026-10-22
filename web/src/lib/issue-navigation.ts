@@ -18,11 +18,16 @@ import {
 import {
   getIssueTypeRecord,
   getStatusRecord,
-  getStatusPage,
   type ProjectIssueType,
   type ProjectStatus,
 } from './project-catalogs.ts';
-import { boardBoundary, getBoardPage, type BoardPage } from './board.ts';
+import {
+  boardBoundary,
+  boardStatusBoundary,
+  getBoardPage,
+  getBoardStatusPage,
+  type BoardPage,
+} from './board.ts';
 
 export type WorkRoute =
   | { type: 'board'; projectId: string; statusCursor?: string }
@@ -88,10 +93,13 @@ export function workRoute(path: string, search: string): WorkRoute {
         [...values.keys()].every((key) => key === 'status_cursor')
       ) {
         const cursor = values.get('status_cursor');
+        if (cursor !== undefined) {
+          boardStatusBoundary(cursor);
+        }
         return {
           type: 'board',
           projectId,
-          ...(cursor === undefined ? {} : { statusCursor: uuid(cursor) }),
+          ...(cursor === undefined ? {} : { statusCursor: cursor }),
         };
       }
       if (
@@ -182,21 +190,13 @@ export async function loadWork(
   signal: AbortSignal,
 ): Promise<WorkData> {
   if (route.type === 'board') {
-    const statuses = await getStatusPage(
+    const statuses = await getBoardStatusPage(
       route.projectId,
       { page_size: 4, cursor: route.statusCursor },
       signal,
     );
-    const visible = statuses.data.filter((status) => status.board_visible);
-    visible.sort((a, b) =>
-      BigInt(a.position) < BigInt(b.position)
-        ? -1
-        : BigInt(a.position) > BigInt(b.position)
-          ? 1
-          : a.id.localeCompare(b.id),
-    );
     const columns = await Promise.all(
-      visible.map(async (status) => ({
+      statuses.data.map(async (status) => ({
         status,
         page: await getBoardPage(
           route.projectId,

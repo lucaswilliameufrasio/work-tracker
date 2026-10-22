@@ -1,3 +1,4 @@
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{DateTime, Utc};
 use sqlx::{Row, Sqlite, SqlitePool, Transaction, sqlite::SqliteRow};
 use thiserror::Error;
@@ -49,6 +50,47 @@ pub struct CatalogPage {
     pub next_after_id: Option<String>,
 }
 
+pub struct BoardStatusCursor {
+    position: i64,
+    id: String,
+}
+
+impl BoardStatusCursor {
+    pub fn decode(value: &str) -> Result<Self, CatalogReadError> {
+        if !(51..=75).contains(&value.len()) {
+            return Err(CatalogReadError::InvalidBoardCursor);
+        }
+        let bytes = URL_SAFE_NO_PAD
+            .decode(value)
+            .map_err(|_| CatalogReadError::InvalidBoardCursor)?;
+        if URL_SAFE_NO_PAD.encode(&bytes) != value {
+            return Err(CatalogReadError::InvalidBoardCursor);
+        }
+        let text = std::str::from_utf8(&bytes).map_err(|_| CatalogReadError::InvalidBoardCursor)?;
+        let (position, id) = text
+            .split_once('/')
+            .ok_or(CatalogReadError::InvalidBoardCursor)?;
+        let parsed: i64 = position
+            .parse()
+            .map_err(|_| CatalogReadError::InvalidBoardCursor)?;
+        if parsed < 0 || parsed.to_string() != position || !canonical_uuid(id) {
+            return Err(CatalogReadError::InvalidBoardCursor);
+        }
+        Ok(Self {
+            position: parsed,
+            id: id.to_owned(),
+        })
+    }
+    pub fn encode(&self) -> String {
+        URL_SAFE_NO_PAD.encode(format!("{}/{}", self.position, self.id))
+    }
+}
+
+pub struct BoardStatusPage {
+    pub items: Vec<CatalogRecord>,
+    pub next_cursor: Option<BoardStatusCursor>,
+}
+
 #[derive(Debug, Error)]
 pub enum CatalogReadError {
     #[error("an active authenticated session is required")]
@@ -59,6 +101,8 @@ pub enum CatalogReadError {
     InvalidCursor,
     #[error("catalog record ID must be a canonical UUID")]
     InvalidRecordId,
+    #[error("board status cursor is invalid")]
+    InvalidBoardCursor,
     #[error("page size must be between 1 and 100")]
     InvalidPageSize,
     #[error("catalog storage is corrupt")]
@@ -78,6 +122,47 @@ pub struct SessionProjectCatalogReader {
 }
 
 impl SessionProjectCatalogReader {
+    pub async fn board_statuses(
+        &self,
+        token: &SessionToken,
+        project_id: &str,
+        after: Option<&BoardStatusCursor>,
+        page_size: u16,
+        now: DateTime<Utc>,
+    ) -> Result<BoardStatusPage, CatalogReadError> {
+        if !(1..=100).contains(&page_size) {
+            return Err(CatalogReadError::InvalidPageSize);
+        }
+        let mut transaction = self.pool.begin().await?;
+        let principal = self
+            .sessions
+            .authenticate_in_transaction(&mut transaction, token, now)
+            .await?
+            .ok_or(CatalogReadError::Unauthenticated)?;
+        authorize_read(&mut transaction, principal.user_id(), project_id).await?;
+        let rows = sqlx::query("SELECT id, project_id, name, system_key, archived_at, category, position, board_visible FROM statuses WHERE project_id = ? AND archived_at IS NULL AND board_visible = 1 AND (position, id) > (?, ?) ORDER BY position ASC, id ASC LIMIT ?")
+            .bind(project_id).bind(after.map(|cursor| cursor.position).unwrap_or(0)).bind(after.map(|cursor| cursor.id.as_str()).unwrap_or(""))
+            .bind(i64::from(page_size) + 1).fetch_all(&mut *transaction).await?;
+        let has_more = rows.len() > usize::from(page_size);
+        let mut items = Vec::with_capacity(rows.len().min(usize::from(page_size)));
+        let mut last = None;
+        for row in rows.into_iter().take(usize::from(page_size)) {
+            let selected = record(&row, CatalogKind::Statuses)?;
+            let CatalogFields::Status { position, .. } = selected.fields else {
+                return Err(CatalogReadError::CorruptData);
+            };
+            last = Some(BoardStatusCursor {
+                position,
+                id: selected.id.clone(),
+            });
+            items.push(selected);
+        }
+        transaction.commit().await?;
+        Ok(BoardStatusPage {
+            items,
+            next_cursor: if has_more { last } else { None },
+        })
+    }
     pub async fn get(
         &self,
         token: &SessionToken,

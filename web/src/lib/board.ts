@@ -6,6 +6,8 @@ import {
   uuid,
 } from './issue-transport.ts';
 import { parseIssueSummary, type IssueSummary } from './issues.ts';
+import type { IssuePage } from './issues.ts';
+import { parseStatusRecord, type ProjectStatus } from './project-catalogs.ts';
 
 export type BoardCard = IssueSummary & { rank: string };
 export type BoardPage = {
@@ -149,6 +151,93 @@ export async function getBoardPage(
     ),
     projectId,
     statusId,
+    selected,
+  );
+}
+
+export function boardStatusBoundary(value: string): {
+  position: string;
+  id: string;
+} {
+  const selected = boardBoundary(value);
+  if (BigInt(selected.rank) < 0) {
+    return invalid();
+  }
+  return { position: selected.rank, id: selected.id };
+}
+
+export function parseBoardStatusPage(
+  value: unknown,
+  projectId: string,
+  options: BoardOptions,
+): IssuePage<ProjectStatus> {
+  uuid(projectId);
+  const pageSize = size(options.page_size ?? 4);
+  let previous =
+    options.cursor === undefined
+      ? undefined
+      : boardStatusBoundary(options.cursor);
+  const page = fields(value, ['data', 'has_more', 'next_cursor']);
+  if (
+    !Array.isArray(page.data) ||
+    page.data.length > pageSize ||
+    typeof page.has_more !== 'boolean' ||
+    (page.has_more && page.data.length !== pageSize) ||
+    (!page.has_more && 'next_cursor' in page)
+  ) {
+    return invalid();
+  }
+  const data: ProjectStatus[] = [];
+  const ids = new Set<string>();
+  for (const raw of page.data) {
+    if (!record(raw)) {
+      return invalid();
+    }
+    const status = parseStatusRecord(raw, projectId, uuid(raw.id));
+    if (
+      !status.board_visible ||
+      status.archived_at !== undefined ||
+      ids.has(status.id) ||
+      (previous !== undefined &&
+        (BigInt(status.position) < BigInt(previous.position) ||
+          (status.position === previous.position && status.id <= previous.id)))
+    ) {
+      return invalid();
+    }
+    previous = { position: status.position, id: status.id };
+    ids.add(status.id);
+    data.push(status);
+  }
+  if (page.has_more) {
+    if (typeof page.next_cursor !== 'string' || previous === undefined) {
+      return invalid();
+    }
+    const next = boardStatusBoundary(page.next_cursor);
+    if (next.position !== previous.position || next.id !== previous.id) {
+      return invalid();
+    }
+    return { data, has_more: true, next_cursor: page.next_cursor };
+  }
+  return { data, has_more: false };
+}
+
+export async function getBoardStatusPage(
+  projectId: string,
+  options: BoardOptions,
+  signal: AbortSignal,
+): Promise<IssuePage<ProjectStatus>> {
+  uuid(projectId);
+  const selected = { ...options };
+  const query = new URLSearchParams({
+    page_size: String(size(selected.page_size ?? 4)),
+  });
+  if (selected.cursor !== undefined) {
+    boardStatusBoundary(selected.cursor);
+    query.set('cursor', selected.cursor);
+  }
+  return parseBoardStatusPage(
+    await readIssueJson(`/api/v1/projects/${projectId}/board?${query}`, signal),
+    projectId,
     selected,
   );
 }

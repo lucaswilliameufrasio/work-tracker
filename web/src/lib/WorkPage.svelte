@@ -222,11 +222,11 @@
           >{/if}
       {:else if data.type === 'board'}
         <p class="hint">
-          Colunas desta página do catálogo, ordenadas por posição. Apenas
-          leitura; cards não podem ser movidos.
+          Colunas desta página do board, ordenadas por posição. Apenas leitura;
+          cards não podem ser movidos.
         </p>
         {#if data.columns.length === 0}<p role="status">
-            Nenhuma coluna visível nesta página do catálogo.
+            Nenhuma coluna visível nesta página do board.
           </p>{/if}
         <div class="board-grid">
           {#each data.columns as column (column.status.id)}<BoardColumn

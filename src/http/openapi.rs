@@ -170,6 +170,13 @@ pub fn browser_document() -> Value {
     ];
     let description = "One visible nonarchived status column. Session, explicit project membership, status eligibility, nontrash count and card page share one SQLite snapshot. Missing/foreign/hidden/archived status or inaccessible project returns generic404. Archived project remains readable. Ascending rank/id keyset with one lookahead; count/rank use lossless decimal strings. Read-only rank is not a mutation command. No cross-request frozen snapshot, movement, filter or SSE is implemented.";
     paths.insert("/api/v1/projects/{project_id}/board/{status_id}".into(), json!({"get": operation("readBoardColumn", Some("BoardColumnPage"), board_query.clone(), description), "head": operation("readBoardColumnHead", None, board_query, description)}));
+    let status_query = vec![
+        json!({"name": "project_id", "in": "path", "required": true, "schema": uuid.clone()}),
+        json!({"name": "page_size", "in": "query", "schema": {"type": "integer", "minimum": 1, "maximum": 100, "default": 4}}),
+        json!({"name": "cursor", "in": "query", "schema": {"type": "string", "minLength": 51, "maxLength": 75}, "description": "Canonical Base64URL nonnegative i64 position/UUID boundary without padding. Does not grant access or freeze status order across requests."}),
+    ];
+    let description = "Visible nonarchived board statuses ordered globally by position/id, not UUID catalog order. Session, membership and metadata share a snapshot. Missing/inaccessible project returns generic404; archived projects remain readable. No hidden candidate rows, unbounded traversal or reordering command.";
+    paths.insert("/api/v1/projects/{project_id}/board".into(), json!({"get": operation("listBoardStatuses", Some("BoardStatusPage"), status_query.clone(), description), "head": operation("listBoardStatusesHead", None, status_query, description)}));
     let mut document = json!({
         "openapi": "3.1.0",
         "info": {
@@ -260,6 +267,14 @@ pub fn browser_document() -> Value {
         ],
     );
     document["components"]["schemas"]["StatusPage"] = page("Status");
+    let mut board_status = document["components"]["schemas"]["Status"].clone();
+    board_status["properties"]
+        .as_object_mut()
+        .unwrap()
+        .remove("archived_at");
+    board_status["properties"]["board_visible"] = json!({"type": "boolean", "const": true});
+    document["components"]["schemas"]["BoardStatus"] = board_status;
+    document["components"]["schemas"]["BoardStatusPage"] = page("BoardStatus");
     document["components"]["schemas"]["IssueTypePage"] = page("IssueType");
     document
 }

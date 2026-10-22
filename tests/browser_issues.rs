@@ -1442,3 +1442,157 @@ async fn board_column_rejects_malformed_boundaries_methods_and_corrupt_rows_safe
     )
     .await;
 }
+
+#[tokio::test]
+async fn board_status_pages_are_globally_position_ordered_filtered_and_private() {
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+    use sqlx::Row;
+    let f = Fixture::new().await;
+    let base = format!("/api/v1/projects/{}/board", f.project);
+    sqlx::query("UPDATE statuses SET position = CASE system_key WHEN 'todo' THEN 9223372036854775807 ELSE 0 END WHERE project_id = ?")
+        .bind(&f.project).execute(f.db.pool()).await.unwrap();
+    let selected = sqlx::query("SELECT id, position FROM statuses WHERE project_id = ? AND board_visible = 1 ORDER BY position ASC, id ASC")
+        .bind(&f.project).fetch_all(f.db.pool()).await.unwrap();
+    assert_eq!(selected.len(), 3);
+    let mut cursor = None;
+    for row in &selected {
+        let path = match cursor.as_deref() {
+            Some(cursor) => format!("{base}?page_size=1&cursor={cursor}"),
+            None => format!("{base}?page_size=1"),
+        };
+        let page = json(f.get(&path, Some(&f.token.token)).await, StatusCode::OK).await;
+        assert_eq!(page["data"].as_array().unwrap().len(), 1);
+        assert_eq!(page["data"][0]["id"], row.get::<String, _>("id"));
+        assert_eq!(
+            page["data"][0]["position"],
+            row.get::<i64, _>("position").to_string()
+        );
+        assert_eq!(page["data"][0]["board_visible"], true);
+        cursor = page["next_cursor"].as_str().map(str::to_owned);
+        if let Some(value) = cursor.as_deref() {
+            assert_eq!(
+                puxiri::projects::catalog::BoardStatusCursor::decode(value)
+                    .unwrap()
+                    .encode(),
+                value
+            );
+        }
+    }
+    assert!(cursor.is_none());
+    let ordered = json(f.get(&base, Some(&f.token.token)).await, StatusCode::OK).await;
+    assert_eq!(ordered["data"].as_array().unwrap().len(), 3);
+    assert_eq!(ordered["has_more"], false);
+    let last: String = selected[2].get("id");
+    sqlx::query("UPDATE statuses SET archived_at = ? WHERE id = ?")
+        .bind(Utc::now().to_rfc3339())
+        .bind(&last)
+        .execute(f.db.pool())
+        .await
+        .unwrap();
+    let page = json(f.get(&base, Some(&f.token.token)).await, StatusCode::OK).await;
+    assert_eq!(page["data"].as_array().unwrap().len(), 2);
+    for value in [
+        format!("-1/{last}"),
+        format!("-0/{last}"),
+        format!("01/{last}"),
+        format!("9223372036854775808/{last}"),
+        format!("+1/{last}"),
+    ] {
+        let encoded = URL_SAFE_NO_PAD.encode(value);
+        json(
+            f.get(&format!("{base}?cursor={encoded}"), Some(&f.token.token))
+                .await,
+            StatusCode::UNPROCESSABLE_ENTITY,
+        )
+        .await;
+    }
+    for query in ["?page_size=0", "?page_size=101", "?cursor=bad"] {
+        json(
+            f.get(&format!("{base}{query}"), Some(&f.token.token)).await,
+            StatusCode::UNPROCESSABLE_ENTITY,
+        )
+        .await;
+    }
+    for query in [
+        "?include_archived=true",
+        "?user_id=other",
+        "?cursor=a&cursor=b",
+    ] {
+        json(
+            f.get(&format!("{base}{query}"), Some(&f.token.token)).await,
+            StatusCode::BAD_REQUEST,
+        )
+        .await;
+    }
+    let outsider = user(&f.db, "admin").await;
+    let denied = SessionStore::new(f.db.pool().clone(), policy())
+        .issue(&outsider, Utc::now())
+        .await
+        .unwrap();
+    let private = json(
+        f.get(&base, Some(&denied.token)).await,
+        StatusCode::NOT_FOUND,
+    )
+    .await;
+    let missing = json(
+        f.get(
+            &format!("/api/v1/projects/{}/board", Uuid::now_v7()),
+            Some(&f.token.token),
+        )
+        .await,
+        StatusCode::NOT_FOUND,
+    )
+    .await;
+    for field in ["code", "message", "field_errors", "retryable"] {
+        assert_eq!(private[field], missing[field]);
+    }
+    json(f.get(&base, None).await, StatusCode::UNAUTHORIZED).await;
+    let mut head = request(&base, Some(&f.token.token));
+    *head.method_mut() = Method::HEAD;
+    let response = f.app.clone().oneshot(head).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(
+        response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .is_empty()
+    );
+    json(
+        http::router(f.db.clone())
+            .oneshot(request(&base, Some(&f.token.token)))
+            .await
+            .unwrap(),
+        StatusCode::NOT_FOUND,
+    )
+    .await;
+    let plan = sqlx::query("EXPLAIN QUERY PLAN SELECT id FROM statuses WHERE project_id = ? AND archived_at IS NULL AND board_visible = 1 AND (position, id) > (?, ?) ORDER BY position ASC, id ASC LIMIT ?")
+        .bind(&f.project).bind(0_i64).bind("").bind(101_i64).fetch_all(f.db.pool()).await.unwrap();
+    let details: Vec<String> = plan.iter().map(|row| row.get("detail")).collect();
+    assert!(
+        details
+            .iter()
+            .any(|line| line.contains("statuses_project_order_idx")),
+        "{details:?}"
+    );
+    assert!(!details.iter().any(|line| line.contains("TEMP B-TREE")));
+    ProjectStore::new(f.db.pool().clone())
+        .set_archived(&f.owner, &f.project, true, Utc::now())
+        .await
+        .unwrap();
+    json(f.get(&base, Some(&f.token.token)).await, StatusCode::OK).await;
+    SessionStore::new(f.db.pool().clone(), policy())
+        .revoke(&f.owner, &f.token.id, Utc::now())
+        .await
+        .unwrap();
+    let reader =
+        puxiri::projects::catalog::SessionProjectCatalogReader::new(f.db.pool().clone(), policy());
+    assert!(matches!(
+        reader
+            .board_statuses(&f.token.token, &f.project, None, 4, Utc::now())
+            .await,
+        Err(puxiri::projects::catalog::CatalogReadError::Unauthenticated)
+    ));
+}

@@ -10,7 +10,7 @@ import {
   getStatusPage,
   getIssueTypePage,
 } from '../src/lib/project-catalogs.ts';
-import { getBoardPage } from '../src/lib/board.ts';
+import { getBoardPage, getBoardStatusPage } from '../src/lib/board.ts';
 
 const base = new URL(process.env.PUXIRI_TEST_BASE_URL ?? '');
 assert.equal(base.hostname, '127.0.0.1');
@@ -81,6 +81,12 @@ const firstColumn = await getBoardPage(
   signal(),
 );
 assert.equal(firstColumn.total_count, '3');
+const columnMetadata = await getBoardStatusPage(project, {}, signal());
+assert.equal(columnMetadata.data.length, 3);
+assert.deepEqual(
+  columnMetadata.data.map((status) => status.position),
+  ['1', '2', '3'],
+);
 assert.equal(firstColumn.data[0].issue_number, '1');
 const lastColumn = await getBoardPage(
   project,
@@ -149,6 +155,7 @@ for (const call of [
   () => getStatusPage(project, { include_archived: true }, signal()),
   () => getIssueTypePage(project, { include_archived: true }, signal()),
   () => getBoardPage(project, detail.status_id, {}, signal()),
+  () => getBoardStatusPage(project, {}, signal()),
 ]) {
   await assert.rejects(
     call,
@@ -176,4 +183,8 @@ await assert.rejects(
   () => getBoardPage(project, detail.status_id, {}, signal()),
   (error) => error instanceof IssueRequestError && error.status === 401,
 );
-assert.equal(calls, 25);
+await assert.rejects(
+  () => getBoardStatusPage(project, {}, signal()),
+  (error) => error instanceof IssueRequestError && error.status === 401,
+);
+assert.equal(calls, 28);

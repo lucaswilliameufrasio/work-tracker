@@ -19,12 +19,14 @@ use crate::{
     auth::time::format_timestamp,
     http::error::ApiError,
     projects::catalog::{
-        CatalogFields, CatalogKind, CatalogOptions, CatalogReadError, CatalogRecord, canonical_uuid,
+        BoardStatusCursor, CatalogFields, CatalogKind, CatalogOptions, CatalogReadError,
+        CatalogRecord, canonical_uuid,
     },
 };
 
 pub(super) fn routes() -> Router<Arc<BrowserState>> {
     Router::new()
+        .route("/api/v1/projects/{project_id}/board", get(board_statuses))
         .route("/api/v1/projects/{project_id}/statuses", get(statuses))
         .route(
             "/api/v1/projects/{project_id}/issue-types",
@@ -46,6 +48,59 @@ struct CatalogQuery {
     cursor: Option<String>,
     page_size: Option<u16>,
     include_archived: Option<bool>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BoardQuery {
+    cursor: Option<String>,
+    page_size: Option<u16>,
+}
+
+async fn board_statuses(
+    State(state): State<Arc<BrowserState>>,
+    path: Result<Path<String>, PathRejection>,
+    request: Request,
+) -> Result<Response, ApiError> {
+    let (request, _) = request.into_parts();
+    let token = authenticated_token(&state, &request).await?;
+    let Path(project_id) =
+        path.map_err(|_| ApiError::invalid_field("project_id", "Use a canonical UUID"))?;
+    if !canonical_uuid(&project_id) {
+        return Err(ApiError::invalid_field(
+            "project_id",
+            "Use a canonical UUID",
+        ));
+    }
+    let query = Query::<BoardQuery>::try_from_uri(&request.uri)
+        .map_err(|_| malformed_query())?
+        .0;
+    let cursor = query
+        .cursor
+        .as_deref()
+        .map(BoardStatusCursor::decode)
+        .transpose()
+        .map_err(catalog_error)?;
+    let page = state
+        .catalogs
+        .board_statuses(
+            &token,
+            &project_id,
+            cursor.as_ref(),
+            query.page_size.unwrap_or(4),
+            Utc::now(),
+        )
+        .await
+        .map_err(catalog_error)?;
+    let mut data = Vec::with_capacity(page.items.len());
+    for record in page.items {
+        data.push(CatalogItem::from(record));
+    }
+    Ok(no_store(Page {
+        data,
+        has_more: page.next_cursor.is_some(),
+        next_cursor: page.next_cursor.map(|cursor| cursor.encode()),
+    }))
 }
 
 #[derive(Serialize)]
@@ -226,6 +281,9 @@ fn catalog_error(error: CatalogReadError) -> ApiError {
         }
         CatalogReadError::InvalidRecordId => {
             ApiError::invalid_field("record_id", "Use a canonical UUID")
+        }
+        CatalogReadError::InvalidBoardCursor => {
+            ApiError::invalid_field("cursor", "Use a valid ordered board-status cursor")
         }
         CatalogReadError::InvalidPageSize => {
             ApiError::invalid_field("page_size", "Use a value between 1 and 100")
