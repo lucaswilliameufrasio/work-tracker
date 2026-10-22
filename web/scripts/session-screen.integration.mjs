@@ -9,6 +9,7 @@ import { createInterface } from 'node:readline';
 import { URL } from 'node:url';
 import { chromium, expect } from '@playwright/test';
 import { readWork } from './work-screen.integration.mjs';
+import { createWork } from './issue-creation-screen.integration.mjs';
 
 const backend = new URL(process.env.PUXIRI_TEST_BACKEND ?? '');
 assert.equal(backend.hostname, '127.0.0.1');
@@ -90,11 +91,11 @@ try {
       ignoreHTTPSErrors: true,
       serviceWorkers: 'block',
       viewport:
-        fixture.kind === 'global' || fixture.kind === 'work-dark'
+        fixture.kind === 'global' || fixture.kind.endsWith('-dark')
           ? { width: 375, height: 812 }
           : { width: 1280, height: 900 },
       colorScheme:
-        fixture.kind === 'global' || fixture.kind === 'work-dark'
+        fixture.kind === 'global' || fixture.kind.endsWith('-dark')
           ? 'dark'
           : 'light',
     });
@@ -126,6 +127,12 @@ try {
     assert.equal(sessionCookie.httpOnly, true);
     assert.equal(sessionCookie.sameSite, 'Lax');
     assert.equal(sessionCookie.path, '/');
+    if (fixture.kind.startsWith('create-')) {
+      await createWork(context, origin, fixture, configuration.artifacts);
+      assert.deepEqual(external, []);
+      await context.close();
+      continue;
+    }
     if (fixture.kind.startsWith('work-')) {
       await readWork(context, origin, fixture, configuration.artifacts);
       assert.deepEqual(external, []);

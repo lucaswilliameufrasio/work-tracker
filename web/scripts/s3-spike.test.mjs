@@ -138,8 +138,11 @@ after(async () => {
   for (const origin of [allowedSite, deniedSite]) {
     if (origin) await new Promise((resolve) => origin.server.close(resolve));
   }
-  if (container)
-    await run('docker', ['rm', '-f', container], { timeout: 10000 });
+  if (container) {
+    // Rootless removal can outlive ten seconds on a shared test host. Bound
+    // this exact disposable container cleanup like startup; never hide errors.
+    await run('docker', ['rm', '-f', container], { timeout: 60000 });
+  }
 });
 
 async function http(url, options = {}) {

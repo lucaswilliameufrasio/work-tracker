@@ -125,6 +125,7 @@
     <a href="/projects">Meus projetos</a>
     {#if 'projectId' in route}
       <a href={`/projects/${route.projectId}/board`}>Ver board</a>
+      <a href={`/projects/${route.projectId}/issues/new`}>Criar issue</a>
       {#if route.type === 'board' || route.type === 'column'}<a
           href={listLink(route.projectId)}>Lista de issues</a
         >{/if}
@@ -187,6 +188,9 @@
                   ? ''
                   : ' · Arquivado, somente leitura'}
               </p>
+              {#if project.role !== 'viewer' && project.archived_at === undefined}<a
+                  href={`/projects/${project.id}/issues/new`}>Criar issue</a
+                >{/if}
             </li>
           {/each}
         </ul>

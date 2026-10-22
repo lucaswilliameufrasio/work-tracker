@@ -3,8 +3,12 @@
   import { getReadiness, type Readiness } from './lib/health';
   import SessionsPage from './lib/SessionsPage.svelte';
   import WorkPage from './lib/WorkPage.svelte';
+  import IssueCreationPage from './lib/IssueCreationPage.svelte';
 
   const sessionsPage = globalThis.location.pathname === '/settings/sessions';
+  const creationPage =
+    globalThis.location.pathname.startsWith('/projects/') &&
+    globalThis.location.pathname.endsWith('/issues/new');
   const workPage =
     globalThis.location.pathname === '/projects' ||
     globalThis.location.pathname.startsWith('/projects/');
@@ -64,6 +68,8 @@
 
   {#if sessionsPage}
     <SessionsPage />
+  {:else if creationPage}
+    <IssueCreationPage />
   {:else if workPage}
     <WorkPage />
   {:else}

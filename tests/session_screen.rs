@@ -260,6 +260,18 @@ async fn session_screen_uses_real_https_browser_cookies_confirmations_and_transa
         let issued = sessions.issue(&reader, Utc::now()).await.unwrap();
         fixtures.push(json!({"kind": kind, "token": issued.token.expose(), "project_id": project.id, "private_project_id": private.id}));
     }
+    let mut creation_projects = Vec::new();
+    for (kind, key) in [("create-light", "NEW"), ("create-dark", "DARK")] {
+        let creator = user(&database).await;
+        sqlx::query("INSERT INTO organization_members (organization_id, user_id, role, created_at) VALUES (1, ?, 'admin', 'now')").bind(&creator).execute(database.pool()).await.unwrap();
+        let created = puxiri::projects::ProjectStore::new(database.pool().clone())
+            .create(&creator, key, "Creation UI fixture", None, Utc::now())
+            .await
+            .unwrap();
+        let issued = sessions.issue(&creator, Utc::now()).await.unwrap();
+        fixtures.push(json!({"kind": kind, "token": issued.token.expose(), "project_id": created.id, "private_project_id": private.id}));
+        creation_projects.push(created.id);
+    }
     let input = json!({"fixtures": fixtures, "artifacts": artifacts});
     let mut stdin = child.0.stdin.take().unwrap();
     serde_json::to_writer(&mut stdin, &input).unwrap();
@@ -324,7 +336,12 @@ async fn session_screen_uses_real_https_browser_cookies_confirmations_and_transa
         .fetch_one(database.pool())
         .await
         .unwrap();
-    assert_eq!((issue_count, issue_events), (23, 23));
+    assert_eq!((issue_count, issue_events), (29, 29));
+    for project in creation_projects {
+        let counts: (i64, i64, i64, i64, i64) = sqlx::query_as("SELECT (SELECT COUNT(*) FROM issues WHERE project_id = ?), (SELECT COUNT(*) FROM issue_events WHERE project_id = ?), (SELECT COUNT(*) FROM outbox_events WHERE project_id = ?), (SELECT COUNT(*) FROM issue_creation_receipts WHERE project_id = ?), next_issue_number FROM projects WHERE id = ?")
+            .bind(&project).bind(&project).bind(&project).bind(&project).bind(&project).fetch_one(database.pool()).await.unwrap();
+        assert_eq!(counts, (3, 3, 3, 3, 4));
+    }
     assert!(
         sessions
             .validate(&foreign.token, Utc::now())

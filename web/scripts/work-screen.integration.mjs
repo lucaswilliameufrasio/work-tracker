@@ -24,7 +24,11 @@ export async function readWork(context, origin, fixture, artifacts) {
     .getByRole('link', { name: 'Incluir projetos arquivados', exact: true })
     .click();
   await expect(page.locator('[data-project-id]')).toHaveCount(2);
-  await page.locator(`[data-project-id="${fixture.project_id}"] a`).click();
+  await page
+    .locator(
+      `[data-project-id="${fixture.project_id}"] a[href="/projects/${fixture.project_id}/issues"]`,
+    )
+    .click();
   await expect(page.locator('[data-issue-id]')).toHaveCount(20);
   await page.getByRole('link', { name: 'Ver board', exact: true }).click();
   await expect(page.locator('[data-board-column]')).toHaveCount(3);
