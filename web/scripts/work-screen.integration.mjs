@@ -87,7 +87,17 @@ export async function readWork(context, origin, fixture, artifacts) {
     'https://forbidden.example.test/private.png',
   );
   await expect(page.locator('[data-private-work] img')).toHaveCount(0);
-  await expect(page.locator('.journal li')).toHaveCount(1);
+  await expect(page.locator('.journal li')).toHaveCount(4);
+  for (const label of [
+    'Issue criada',
+    'Título alterado',
+    'Descrição alterada',
+    'Título e descrição alterados',
+  ]) {
+    await expect(
+      page.locator('.journal').getByText(label, { exact: true }),
+    ).toBeVisible();
+  }
   assert.equal(
     await page.evaluate(
       () => document.documentElement.scrollWidth <= globalThis.innerWidth,

@@ -45,6 +45,36 @@ afterEach(() => {
 });
 
 describe('issue DTO boundary', () => {
+  it('decodes exact typed text-change events but never text snapshots or unknown kinds', () => {
+    for (const kind of [
+      'issue.title_updated',
+      'issue.description_updated',
+      'issue.text_updated',
+    ]) {
+      const changed = { ...event, event_kind: kind };
+      expect(
+        parseIssueHistoryPage({ data: [changed], has_more: false }, id, 20)
+          .data[0]?.event_kind,
+      ).toBe(kind);
+      expect(() =>
+        parseIssueHistoryPage(
+          {
+            data: [{ ...changed, previous_title: 'private' }],
+            has_more: false,
+          },
+          id,
+          20,
+        ),
+      ).toThrow();
+    }
+    expect(() =>
+      parseIssueHistoryPage(
+        { data: [{ ...event, event_kind: 'issue.anything' }], has_more: false },
+        id,
+        20,
+      ),
+    ).toThrow();
+  });
   it('preserves full positive i64 precision, optional omission and raw text as data', () => {
     expect(parseIssueDetail(summary, id, summary.issue_number)).toEqual(
       summary,

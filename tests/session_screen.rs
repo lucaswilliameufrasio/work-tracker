@@ -260,6 +260,25 @@ async fn session_screen_uses_real_https_browser_cookies_confirmations_and_transa
         let issued = sessions.issue(&reader, Utc::now()).await.unwrap();
         fixtures.push(json!({"kind": kind, "token": issued.token.expose(), "project_id": project.id, "private_project_id": private.id}));
     }
+    // Read/display fixture only; no production editing command is enabled.
+    let journal_issue: String =
+        sqlx::query_scalar("SELECT id FROM issues WHERE project_id = ? AND issue_number = 23")
+            .bind(&project.id)
+            .fetch_one(database.pool())
+            .await
+            .unwrap();
+    for (index, kind) in [
+        "issue.title_updated",
+        "issue.description_updated",
+        "issue.text_updated",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        sqlx::query("INSERT INTO issue_events (id, project_id, issue_id, actor_user_id, event_kind, occurred_at) VALUES (?, ?, ?, ?, ?, ?)")
+            .bind(Uuid::now_v7().to_string()).bind(&project.id).bind(&journal_issue).bind(&reader).bind(kind)
+            .bind((Utc::now() + TimeDelta::seconds(index as i64 + 1)).to_rfc3339_opts(chrono::SecondsFormat::Nanos, true)).execute(database.pool()).await.unwrap();
+    }
     let mut creation_projects = Vec::new();
     for (kind, key) in [("create-light", "NEW"), ("create-dark", "DARK")] {
         let creator = user(&database).await;
@@ -337,7 +356,7 @@ async fn session_screen_uses_real_https_browser_cookies_confirmations_and_transa
         .fetch_one(database.pool())
         .await
         .unwrap();
-    assert_eq!((issue_count, issue_events), (29, 29));
+    assert_eq!((issue_count, issue_events), (29, 32));
     for project in creation_projects {
         let counts: (i64, i64, i64, i64, i64) = sqlx::query_as("SELECT (SELECT COUNT(*) FROM issues WHERE project_id = ?), (SELECT COUNT(*) FROM issue_events WHERE project_id = ?), (SELECT COUNT(*) FROM outbox_events WHERE project_id = ?), (SELECT COUNT(*) FROM issue_creation_receipts WHERE project_id = ?), next_issue_number FROM projects WHERE id = ?")
             .bind(&project).bind(&project).bind(&project).bind(&project).bind(&project).fetch_one(database.pool()).await.unwrap();

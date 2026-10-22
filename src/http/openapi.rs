@@ -275,7 +275,7 @@ pub fn browser_document() -> Value {
     detail["properties"]["trashed_at"] = timestamp;
     document["components"]["schemas"]["IssueDetail"] = detail;
     document["components"]["schemas"]["IssueHistoryEvent"] = object(
-        json!({"id": uuid.clone(), "project_id": uuid.clone(), "issue_id": uuid.clone(), "actor_user_id": uuid, "event_kind": {"type": "string", "enum": ["issue.created"]}, "occurred_at": {"type": "string", "format": "date-time"}}),
+        json!({"id": uuid.clone(), "project_id": uuid.clone(), "issue_id": uuid.clone(), "actor_user_id": uuid, "event_kind": {"type": "string", "enum": ["issue.created", "issue.title_updated", "issue.description_updated", "issue.text_updated"]}, "occurred_at": {"type": "string", "format": "date-time"}}),
         &[
             "id",
             "project_id",

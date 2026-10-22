@@ -21,6 +21,12 @@
     urgent: 'Urgente',
   };
   const roles = { manager: 'Gerente', member: 'Membro', viewer: 'Leitor' };
+  const eventLabels = {
+    'issue.created': 'Issue criada',
+    'issue.title_updated': 'Título alterado',
+    'issue.description_updated': 'Descrição alterada',
+    'issue.text_updated': 'Título e descrição alterados',
+  };
   const date = (value: string) =>
     `${new Intl.DateTimeFormat('pt-BR', { dateStyle: 'medium', timeStyle: 'short', timeZone: 'UTC' }).format(new Date(value))} UTC`;
 
@@ -303,7 +309,7 @@
               </p>{/if}
             <ul class="journal" aria-label="Histórico da issue">
               {#each data.history.data as event (event.id)}<li>
-                  <strong>Issue criada</strong><time
+                  <strong>{eventLabels[event.event_kind]}</strong><time
                     datetime={event.occurred_at}>{date(event.occurred_at)}</time
                   ><span class="hint"
                     >Referência do autor {event.actor_user_id}</span

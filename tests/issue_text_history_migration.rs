@@ -1,0 +1,169 @@
+use chrono::{TimeDelta, Utc};
+use puxiri::{
+    auth::{
+        master_key::MasterKeyStore,
+        session::{SessionPolicy, SessionStore},
+    },
+    issues::{IssueStore, NewIssue, creation::SessionIssueWriter},
+    projects::ProjectStore,
+};
+use tempfile::TempDir;
+use uuid::Uuid;
+
+type OutboxSnapshot = (String, String, i64, String, String, String, i64, String);
+type ReceiptSnapshot = (
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    i64,
+    String,
+);
+
+#[tokio::test]
+async fn migration_preserves_existing_receipts_and_envelopes_and_supports_repeated_content_free_changes()
+ {
+    let directory = TempDir::new().unwrap();
+    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(
+            sqlx::sqlite::SqliteConnectOptions::new()
+                .filename(directory.path().join("upgrade.sqlite3"))
+                .create_if_missing(true)
+                .foreign_keys(true),
+        )
+        .await
+        .unwrap();
+    let mut paths =
+        std::fs::read_dir(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect::<Vec<_>>();
+    paths.sort();
+    for path in paths {
+        if path.file_name().unwrap() == "0032_repeated_issue_text_history.sql" {
+            break;
+        }
+        // Audited repository migrations, only in this isolated file-backed DB.
+        sqlx::raw_sql(sqlx::AssertSqlSafe(std::fs::read_to_string(path).unwrap()))
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    let actor = Uuid::now_v7().to_string();
+    sqlx::query("INSERT INTO organizations (id, name, locale, timezone, created_at, updated_at) VALUES (1, 'History upgrade', 'en', 'UTC', 'now', 'now')").execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO users (id, display_name, state, created_at, updated_at) VALUES (?, 'Synthetic editor', 'active', 'now', 'now')").bind(&actor).execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO organization_members (organization_id, user_id, role, created_at) VALUES (1, ?, 'owner', 'now')").bind(&actor).execute(&pool).await.unwrap();
+    let project = ProjectStore::new(pool.clone())
+        .create(&actor, "EDIT", "History upgrade", None, Utc::now())
+        .await
+        .unwrap();
+    let policy = SessionPolicy::initial(TimeDelta::minutes(5)).unwrap();
+    let session = SessionStore::new(pool.clone(), policy)
+        .issue(&actor, Utc::now())
+        .await
+        .unwrap();
+    let master = MasterKeyStore::load_or_create(&directory.path().join("master.key")).unwrap();
+    let outcome = SessionIssueWriter::new(pool.clone(), policy, master)
+        .create(
+            &session.token,
+            &project.id,
+            &Uuid::now_v7().to_string(),
+            NewIssue {
+                title: "Current private text",
+                description: Some("Current description"),
+                assignee_user_id: None,
+            },
+            Utc::now(),
+        )
+        .await
+        .unwrap();
+    let issue = &outcome.receipt().issue_id;
+    let store = IssueStore::new(pool.clone());
+    let before = store
+        .get_project_issue(&actor, &project.id, 1)
+        .await
+        .unwrap();
+    let outbox_sql = "SELECT id, event_kind, payload_version, project_id, issue_id, actor_user_id, issue_version, occurred_at FROM outbox_events ORDER BY id";
+    let outbox_before: Vec<OutboxSnapshot> =
+        sqlx::query_as(outbox_sql).fetch_all(&pool).await.unwrap();
+    let receipts_sql = "SELECT actor_user_id, operation, hex(key_digest), hex(request_fingerprint), hex(master_key_id), project_id, issue_id, issue_number, created_at FROM issue_creation_receipts";
+    let receipts_before: Vec<ReceiptSnapshot> =
+        sqlx::query_as(receipts_sql).fetch_all(&pool).await.unwrap();
+    let mut transaction = pool.begin().await.unwrap();
+    sqlx::raw_sql(include_str!(
+        "../migrations/0032_repeated_issue_text_history.sql"
+    ))
+    .execute(&mut *transaction)
+    .await
+    .unwrap();
+    transaction.commit().await.unwrap();
+    assert_eq!(
+        before,
+        store
+            .get_project_issue(&actor, &project.id, 1)
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        outbox_before,
+        sqlx::query_as(outbox_sql).fetch_all(&pool).await.unwrap()
+    );
+    assert_eq!(
+        receipts_before,
+        sqlx::query_as(receipts_sql).fetch_all(&pool).await.unwrap()
+    );
+    for (index, kind) in [
+        "issue.title_updated",
+        "issue.description_updated",
+        "issue.text_updated",
+        "issue.title_updated",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let timestamp = (Utc::now() + TimeDelta::seconds(index as i64 + 1))
+            .to_rfc3339_opts(chrono::SecondsFormat::Nanos, true);
+        sqlx::query("INSERT INTO issue_events (id, project_id, issue_id, actor_user_id, event_kind, occurred_at) VALUES (?, ?, ?, ?, ?, ?)").bind(Uuid::now_v7().to_string()).bind(&project.id).bind(issue).bind(&actor).bind(kind).bind(&timestamp).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO outbox_events (id, event_kind, payload_version, project_id, issue_id, actor_user_id, issue_version, occurred_at) VALUES (?, ?, 1, ?, ?, ?, ?, ?)").bind(Uuid::now_v7().to_string()).bind(kind).bind(&project.id).bind(issue).bind(&actor).bind(index as i64 + 2).bind(&timestamp).execute(&pool).await.unwrap();
+    }
+    assert_eq!(
+        store
+            .get_project_issue(&actor, &project.id, 1)
+            .await
+            .unwrap()
+            .history
+            .len(),
+        5
+    );
+    for (kind, version) in [
+        ("issue.created", 2_i64),
+        ("issue.text_updated", 1),
+        ("unknown", 2),
+    ] {
+        assert!(sqlx::query("INSERT INTO outbox_events (id, event_kind, payload_version, project_id, issue_id, actor_user_id, issue_version, occurred_at) VALUES (?, ?, 1, ?, ?, ?, ?, 'now')").bind(Uuid::now_v7().to_string()).bind(kind).bind(&project.id).bind(issue).bind(&actor).bind(version).execute(&pool).await.is_err());
+    }
+    assert!(sqlx::query("INSERT INTO issue_events (id, project_id, issue_id, actor_user_id, event_kind, occurred_at) VALUES (?, ?, ?, ?, 'issue.created', 'now')").bind(Uuid::now_v7().to_string()).bind(&project.id).bind(issue).bind(&actor).execute(&pool).await.is_err());
+    assert!(
+        sqlx::query("UPDATE outbox_events SET issue_version = issue_version")
+            .execute(&pool)
+            .await
+            .is_err()
+    );
+    assert!(
+        sqlx::query("DELETE FROM issue_creation_receipts")
+            .execute(&pool)
+            .await
+            .is_err()
+    );
+    assert!(
+        sqlx::query("PRAGMA foreign_key_check")
+            .fetch_all(&pool)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}

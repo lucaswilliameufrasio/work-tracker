@@ -27,7 +27,11 @@ export type IssueHistoryEvent = {
   project_id: string;
   issue_id: string;
   actor_user_id: string;
-  event_kind: 'issue.created';
+  event_kind:
+    | 'issue.created'
+    | 'issue.title_updated'
+    | 'issue.description_updated'
+    | 'issue.text_updated';
   occurred_at: string;
 };
 export type IssuePage<T> = {
@@ -290,10 +294,14 @@ export function parseIssueHistoryPage(
     const issue = uuid(event.issue_id);
     const occurred = timestamp(event.occurred_at);
     const boundary = `${occurred}/${id}`;
+    const kind = event.event_kind;
     if (
       uuid(event.project_id) !== projectId ||
       (issueId !== undefined && issue !== issueId) ||
-      event.event_kind !== 'issue.created' ||
+      (kind !== 'issue.created' &&
+        kind !== 'issue.title_updated' &&
+        kind !== 'issue.description_updated' &&
+        kind !== 'issue.text_updated') ||
       boundary <= previous ||
       ids.has(id)
     ) {
@@ -307,7 +315,7 @@ export function parseIssueHistoryPage(
       project_id: projectId,
       issue_id: issue,
       actor_user_id: uuid(event.actor_user_id),
-      event_kind: 'issue.created',
+      event_kind: kind,
       occurred_at: occurred,
     });
   }

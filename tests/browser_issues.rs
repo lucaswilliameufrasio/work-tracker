@@ -33,6 +33,52 @@ mod creation;
 #[path = "browser_issues/capabilities.rs"]
 mod capabilities;
 
+#[tokio::test]
+async fn history_serializes_repeated_typed_text_changes_without_content_snapshots() {
+    let f = Fixture::new().await;
+    let issue = f.create("Current private title").await;
+    let kinds = [
+        "issue.created",
+        "issue.title_updated",
+        "issue.description_updated",
+        "issue.text_updated",
+        "issue.title_updated",
+    ];
+    for (index, kind) in kinds.iter().skip(1).enumerate() {
+        sqlx::query("INSERT INTO issue_events (id, project_id, issue_id, actor_user_id, event_kind, occurred_at) VALUES (?, ?, ?, ?, ?, ?)")
+            .bind(Uuid::now_v7().to_string()).bind(&f.project).bind(&issue).bind(&f.owner).bind(kind)
+            .bind((Utc::now() + TimeDelta::seconds(index as i64 + 1)).to_rfc3339_opts(chrono::SecondsFormat::Nanos, true))
+            .execute(f.db.pool()).await.unwrap();
+    }
+    let mut cursor: Option<String> = None;
+    let mut observed = Vec::new();
+    loop {
+        let suffix = cursor
+            .as_ref()
+            .map(|cursor| format!("&cursor={cursor}"))
+            .unwrap_or_default();
+        let page = json(
+            f.get(
+                &format!("{}/1/history?page_size=2{suffix}", f.path("")),
+                Some(&f.token.token),
+            )
+            .await,
+            StatusCode::OK,
+        )
+        .await;
+        for event in page["data"].as_array().unwrap() {
+            assert_eq!(event.as_object().unwrap().len(), 6);
+            observed.push(event["event_kind"].as_str().unwrap().to_owned());
+            assert!(!event.to_string().contains("private title"));
+        }
+        if page["has_more"] == false {
+            break;
+        }
+        cursor = Some(page["next_cursor"].as_str().unwrap().to_owned());
+    }
+    assert_eq!(observed, kinds);
+}
+
 fn policy() -> SessionPolicy {
     SessionPolicy::initial(TimeDelta::minutes(5)).unwrap()
 }

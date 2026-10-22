@@ -167,6 +167,9 @@ async fn history(
             actor_user_id: event.actor_user_id,
             event_kind: match event.kind {
                 IssueEventKind::Created => "issue.created",
+                IssueEventKind::TitleUpdated => "issue.title_updated",
+                IssueEventKind::DescriptionUpdated => "issue.description_updated",
+                IssueEventKind::TextUpdated => "issue.text_updated",
             },
             occurred_at: format_timestamp(event.occurred_at),
         });

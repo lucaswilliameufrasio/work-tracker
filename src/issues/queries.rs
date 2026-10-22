@@ -59,6 +59,9 @@ pub struct IssueListPage {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IssueEventKind {
     Created,
+    TitleUpdated,
+    DescriptionUpdated,
+    TextUpdated,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -411,6 +414,9 @@ fn issue_record_from_row(row: &SqliteRow) -> Result<IssueRecord, IssueReadError>
 fn issue_event_from_row(row: &SqliteRow) -> Result<IssueEvent, IssueReadError> {
     let kind = match row.try_get::<String, _>("event_kind")?.as_str() {
         "issue.created" => IssueEventKind::Created,
+        "issue.title_updated" => IssueEventKind::TitleUpdated,
+        "issue.description_updated" => IssueEventKind::DescriptionUpdated,
+        "issue.text_updated" => IssueEventKind::TextUpdated,
         _ => return Err(IssueReadError::CorruptData),
     };
 
