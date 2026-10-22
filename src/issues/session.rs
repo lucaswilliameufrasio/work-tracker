@@ -36,6 +36,31 @@ pub struct SessionIssueReader {
 }
 
 impl SessionIssueReader {
+    pub async fn read_board_column(
+        &self,
+        token: &SessionToken,
+        project_id: &str,
+        status_id: &str,
+        options: super::BoardOptions<'_>,
+        now: DateTime<Utc>,
+    ) -> Result<super::BoardColumnPage, SessionIssueReadError> {
+        let mut transaction = self.pool.begin().await?;
+        let principal = self
+            .sessions
+            .authenticate_in_transaction(&mut transaction, token, now)
+            .await?
+            .ok_or(SessionIssueReadError::Unauthenticated)?;
+        let page = IssueStore::board_in_transaction(
+            &mut transaction,
+            principal.user_id(),
+            project_id,
+            status_id,
+            options,
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(page)
+    }
     pub async fn get_project_issue(
         &self,
         token: &SessionToken,
@@ -209,6 +234,20 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(old_detail.title, "Before");
+        let board = IssueStore::board_in_transaction(
+            &mut snapshot,
+            principal.user_id(),
+            &project.id,
+            &issue.status_id,
+            super::super::BoardOptions {
+                after: None,
+                page_size: 20,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(board.total_count, 1);
+        assert_eq!(board.items[0].title, "Before");
         let old_history = IssueStore::history_in_transaction(
             &mut snapshot,
             principal.user_id(),
@@ -222,6 +261,21 @@ mod tests {
         assert_eq!(old_history.items.len(), 1);
         snapshot.commit().await.unwrap();
         let reader = SessionIssueReader::new(db.pool().clone(), policy);
+        assert!(matches!(
+            reader
+                .read_board_column(
+                    &issued.token,
+                    &project.id,
+                    &issue.status_id,
+                    super::super::BoardOptions {
+                        after: None,
+                        page_size: 20
+                    },
+                    now
+                )
+                .await,
+            Err(SessionIssueReadError::Unauthenticated)
+        ));
         assert!(matches!(
             reader
                 .get_project_issue(&issued.token, &project.id, issue.issue_number, now)

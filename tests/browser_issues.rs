@@ -446,6 +446,27 @@ async fn exact_maximum_page_is_bounded_and_next_page_can_include_new_issues() {
     assert_eq!(page["data"][0]["issue_number"], "101");
     assert_eq!(page["data"][1]["issue_number"], "102");
     assert_eq!(page["has_more"], false);
+    let status: String =
+        sqlx::query_scalar("SELECT status_id FROM issues WHERE project_id = ? LIMIT 1")
+            .bind(&f.project)
+            .fetch_one(f.db.pool())
+            .await
+            .unwrap();
+    let board = json(
+        f.get(
+            &format!(
+                "/api/v1/projects/{}/board/{status}?page_size=100",
+                f.project
+            ),
+            Some(&f.token.token),
+        )
+        .await,
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(board["data"].as_array().unwrap().len(), 100);
+    assert_eq!(board["total_count"], "102");
+    assert_eq!(board["has_more"], true);
 }
 
 #[tokio::test]
@@ -1116,4 +1137,308 @@ async fn catalog_record_reads_resolve_archived_references_but_never_foreign_or_p
             Err(CatalogReadError::Unauthenticated)
         ));
     }
+}
+
+#[tokio::test]
+async fn board_column_pages_use_signed_rank_and_uuid_order_with_current_counts_and_no_trash() {
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+    use sqlx::Row;
+    let f = Fixture::new().await;
+    let trash = f.create("Do not count trash").await;
+    sqlx::query("UPDATE issues SET trashed_at = ? WHERE id = ?")
+        .bind(Utc::now().to_rfc3339())
+        .bind(&trash)
+        .execute(f.db.pool())
+        .await
+        .unwrap();
+    let mut expected = Vec::new();
+    let mut status = String::new();
+    for (title, rank) in [
+        ("Minimum", i64::MIN),
+        ("Tie A", 0),
+        ("Tie B", 0),
+        ("Maximum", i64::MAX),
+    ] {
+        let id = f.create(title).await;
+        sqlx::query("UPDATE issues SET rank = ? WHERE id = ?")
+            .bind(rank)
+            .bind(&id)
+            .execute(f.db.pool())
+            .await
+            .unwrap();
+        status = sqlx::query_scalar("SELECT status_id FROM issues WHERE id = ?")
+            .bind(&id)
+            .fetch_one(f.db.pool())
+            .await
+            .unwrap();
+        expected.push((rank, id));
+    }
+    expected.sort();
+    let path = format!("/api/v1/projects/{}/board/{status}", f.project);
+    let first = json(
+        f.get(&format!("{path}?page_size=2"), Some(&f.token.token))
+            .await,
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(first["total_count"], "4");
+    assert_eq!(first["data"][0]["id"], expected[0].1);
+    assert_eq!(first["data"][0]["rank"], i64::MIN.to_string());
+    assert_eq!(first["data"][1]["id"], expected[1].1);
+    assert!(first["data"][0].get("description").is_none());
+    let cursor = first["next_cursor"].as_str().unwrap();
+    assert_eq!(
+        puxiri::issues::BoardCursor::decode(cursor)
+            .unwrap()
+            .encode(),
+        cursor
+    );
+    let last = json(
+        f.get(
+            &format!("{path}?page_size=2&cursor={cursor}"),
+            Some(&f.token.token),
+        )
+        .await,
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(last["data"][0]["id"], expected[2].1);
+    assert_eq!(last["data"][1]["id"], expected[3].1);
+    assert_eq!(last["data"][1]["rank"], i64::MAX.to_string());
+    assert_eq!(last["total_count"], "4");
+    assert_eq!(last["has_more"], false);
+    assert!(last.get("next_cursor").is_none());
+    let boundary =
+        URL_SAFE_NO_PAD.encode("9223372036854775807/ffffffff-ffff-ffff-ffff-ffffffffffff");
+    let empty = json(
+        f.get(&format!("{path}?cursor={boundary}"), Some(&f.token.token))
+            .await,
+        StatusCode::OK,
+    )
+    .await;
+    assert!(empty["data"].as_array().unwrap().is_empty());
+    assert_eq!(empty["total_count"], "4");
+    let plan = sqlx::query("EXPLAIN QUERY PLAN SELECT id FROM issues WHERE project_id = ? AND status_id = ? AND trashed_at IS NULL AND (rank, id) > (?, ?) ORDER BY rank ASC, id ASC LIMIT ?")
+        .bind(&f.project).bind(&status).bind(i64::MIN).bind("").bind(101_i64).fetch_all(f.db.pool()).await.unwrap();
+    let detail: Vec<String> = plan.iter().map(|row| row.get("detail")).collect();
+    assert!(
+        detail
+            .iter()
+            .any(|line| line.contains("issues_project_status_rank_idx")),
+        "{detail:?}"
+    );
+    assert!(!detail.iter().any(|line| line.contains("TEMP B-TREE")));
+    ProjectStore::new(f.db.pool().clone())
+        .set_archived(&f.owner, &f.project, true, Utc::now())
+        .await
+        .unwrap();
+    json(f.get(&path, Some(&f.token.token)).await, StatusCode::OK).await;
+}
+
+#[tokio::test]
+async fn board_column_authorization_and_eligibility_do_not_reveal_foreign_hidden_or_archived_statuses()
+ {
+    let f = Fixture::new().await;
+    f.create("Private board title").await;
+    let status: String =
+        sqlx::query_scalar("SELECT id FROM statuses WHERE project_id = ? AND system_key = 'todo'")
+            .bind(&f.project)
+            .fetch_one(f.db.pool())
+            .await
+            .unwrap();
+    let path = format!("/api/v1/projects/{}/board/{status}", f.project);
+    let outsider = user(&f.db, "admin").await;
+    let guest = user(&f.db, "guest").await;
+    member(&f.db, &f.project, &guest, "viewer").await;
+    let sessions = SessionStore::new(f.db.pool().clone(), policy());
+    let denied = sessions.issue(&outsider, Utc::now()).await.unwrap();
+    let viewer = sessions.issue(&guest, Utc::now()).await.unwrap();
+    let absent = json(
+        f.get(
+            &format!("/api/v1/projects/{}/board/{}", f.project, Uuid::now_v7()),
+            Some(&f.token.token),
+        )
+        .await,
+        StatusCode::NOT_FOUND,
+    )
+    .await;
+    let private = json(
+        f.get(&path, Some(&denied.token)).await,
+        StatusCode::NOT_FOUND,
+    )
+    .await;
+    for field in ["code", "message", "field_errors", "retryable"] {
+        assert_eq!(absent[field], private[field]);
+    }
+    json(f.get(&path, Some(&viewer.token)).await, StatusCode::OK).await;
+    for key in ["backlog", "canceled"] {
+        let hidden: String =
+            sqlx::query_scalar("SELECT id FROM statuses WHERE project_id = ? AND system_key = ?")
+                .bind(&f.project)
+                .bind(key)
+                .fetch_one(f.db.pool())
+                .await
+                .unwrap();
+        json(
+            f.get(
+                &format!("/api/v1/projects/{}/board/{hidden}", f.project),
+                Some(&f.token.token),
+            )
+            .await,
+            StatusCode::NOT_FOUND,
+        )
+        .await;
+    }
+    let other = ProjectStore::new(f.db.pool().clone())
+        .create(&f.owner, "OTHER", "Other board", None, Utc::now())
+        .await
+        .unwrap();
+    json(
+        f.get(
+            &format!("/api/v1/projects/{}/board/{status}", other.id),
+            Some(&f.token.token),
+        )
+        .await,
+        StatusCode::NOT_FOUND,
+    )
+    .await;
+    sqlx::query("UPDATE statuses SET archived_at = ? WHERE id = ?")
+        .bind(Utc::now().to_rfc3339())
+        .bind(&status)
+        .execute(f.db.pool())
+        .await
+        .unwrap();
+    json(
+        f.get(&path, Some(&f.token.token)).await,
+        StatusCode::NOT_FOUND,
+    )
+    .await;
+    sqlx::query("DELETE FROM project_members WHERE project_id = ? AND user_id = ?")
+        .bind(&f.project)
+        .bind(&guest)
+        .execute(f.db.pool())
+        .await
+        .unwrap();
+    json(
+        f.get(&path, Some(&viewer.token)).await,
+        StatusCode::NOT_FOUND,
+    )
+    .await;
+    json(f.get(&path, None).await, StatusCode::UNAUTHORIZED).await;
+}
+
+#[tokio::test]
+async fn board_column_rejects_malformed_boundaries_methods_and_corrupt_rows_safely() {
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+    let f = Fixture::new().await;
+    let issue = f.create("Board corruption fixture").await;
+    let status: String = sqlx::query_scalar("SELECT status_id FROM issues WHERE id = ?")
+        .bind(&issue)
+        .fetch_one(f.db.pool())
+        .await
+        .unwrap();
+    let path = format!("/api/v1/projects/{}/board/{status}", f.project);
+    for raw in [
+        format!("+1/{issue}"),
+        format!("01/{issue}"),
+        format!("-0/{issue}"),
+        format!("9223372036854775808/{issue}"),
+        format!("-9223372036854775809/{issue}"),
+        "0/bad".to_owned(),
+    ] {
+        let encoded = URL_SAFE_NO_PAD.encode(raw);
+        json(
+            f.get(&format!("{path}?cursor={encoded}"), Some(&f.token.token))
+                .await,
+            StatusCode::UNPROCESSABLE_ENTITY,
+        )
+        .await;
+    }
+    for query in ["?cursor=bad", "?page_size=0", "?page_size=101"] {
+        json(
+            f.get(&format!("{path}{query}"), Some(&f.token.token)).await,
+            StatusCode::UNPROCESSABLE_ENTITY,
+        )
+        .await;
+    }
+    for query in [
+        "?rank=1",
+        "?actor_user_id=other",
+        "?page_size=1&page_size=2",
+    ] {
+        json(
+            f.get(&format!("{path}{query}"), Some(&f.token.token)).await,
+            StatusCode::BAD_REQUEST,
+        )
+        .await;
+    }
+    json(
+        f.get(
+            &format!("/api/v1/projects/{}/board/bad", f.project),
+            Some(&f.token.token),
+        )
+        .await,
+        StatusCode::UNPROCESSABLE_ENTITY,
+    )
+    .await;
+    let mut head = request(&path, Some(&f.token.token));
+    *head.method_mut() = Method::HEAD;
+    let response = f.app.clone().oneshot(head).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(
+        response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .is_empty()
+    );
+    let mut post = request(&path, Some(&f.token.token));
+    *post.method_mut() = Method::POST;
+    json(
+        f.app.clone().oneshot(post).await.unwrap(),
+        StatusCode::METHOD_NOT_ALLOWED,
+    )
+    .await;
+    json(
+        http::router(f.db.clone())
+            .oneshot(request(&path, Some(&f.token.token)))
+            .await
+            .unwrap(),
+        StatusCode::NOT_FOUND,
+    )
+    .await;
+    sqlx::query("UPDATE issues SET due_date = '2026-02-31' WHERE id = ?")
+        .bind(&issue)
+        .execute(f.db.pool())
+        .await
+        .unwrap();
+    let error = json(
+        f.get(&path, Some(&f.token.token)).await,
+        StatusCode::INTERNAL_SERVER_ERROR,
+    )
+    .await;
+    assert!(!error.to_string().contains("2026-02-31"));
+    let reader = SessionIssueReader::new(f.db.pool().clone(), policy());
+    let options = puxiri::issues::BoardOptions {
+        after: None,
+        page_size: 20,
+    };
+    SessionStore::new(f.db.pool().clone(), policy())
+        .revoke(&f.owner, &f.token.id, Utc::now())
+        .await
+        .unwrap();
+    assert!(matches!(
+        reader
+            .read_board_column(&f.token.token, &f.project, &status, options, Utc::now())
+            .await,
+        Err(SessionIssueReadError::Unauthenticated)
+    ));
+    f.db.pool().close().await;
+    json(
+        f.get(&path, Some(&f.token.token)).await,
+        StatusCode::SERVICE_UNAVAILABLE,
+    )
+    .await;
 }

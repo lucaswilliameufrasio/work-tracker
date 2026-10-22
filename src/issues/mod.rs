@@ -12,7 +12,9 @@ const INITIAL_RANK_STRIDE: i64 = 1_024;
 const MAX_DESCRIPTION_BYTES: usize = 65_536;
 const MAX_TITLE_CHARS: usize = 240;
 
+mod board;
 mod queries;
+pub use board::{BoardColumnPage, BoardCursor, BoardOptions};
 pub mod session;
 pub use queries::{
     IssueDetails, IssueEvent, IssueEventKind, IssueHistoryCursor, IssueHistoryPage, IssueListPage,

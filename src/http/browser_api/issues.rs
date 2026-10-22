@@ -29,8 +29,10 @@ pub(super) fn routes() -> Router<Arc<BrowserState>> {
     Router::new()
         .route("/api/v1/projects/{project_id}/issues", get(list))
         .merge(detail::routes())
+        .merge(board::routes())
 }
 
+mod board;
 mod detail;
 
 #[derive(Default, Deserialize)]
@@ -207,6 +209,9 @@ fn read_error(error: SessionIssueReadError) -> ApiError {
         }
         SessionIssueReadError::Issue(IssueReadError::InvalidHistoryCursor) => {
             ApiError::invalid_field("cursor", "Use a valid issue-history cursor")
+        }
+        SessionIssueReadError::Issue(IssueReadError::InvalidBoardCursor) => {
+            ApiError::invalid_field("cursor", "Use a valid board cursor")
         }
         _ => ApiError::new(
             StatusCode::INTERNAL_SERVER_ERROR,

@@ -162,6 +162,14 @@ pub fn browser_document() -> Value {
         let description = "One catalog record, including archived references, in the same authenticated explicit-membership snapshot. Missing/foreign project or record returns generic404. No query options, edits or catalog traversal. Name size is not capped by the existing storage schema.";
         paths.insert(path.into(), json!({"get": operation(id, Some(schema), query.clone(), description), "head": operation(&format!("{id}Head"), None, query, description)}));
     }
+    let board_query = vec![
+        json!({"name": "project_id", "in": "path", "required": true, "schema": uuid.clone()}),
+        json!({"name": "status_id", "in": "path", "required": true, "schema": uuid.clone()}),
+        json!({"name": "page_size", "in": "query", "schema": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20}}),
+        json!({"name": "cursor", "in": "query", "schema": {"type": "string", "minLength": 51, "maxLength": 76}, "description": "Exclusive canonical Base64URL rank/UUID boundary. Rank is canonical signed i64 decimal; no padding. Boundary need not survive and grants no access."}),
+    ];
+    let description = "One visible nonarchived status column. Session, explicit project membership, status eligibility, nontrash count and card page share one SQLite snapshot. Missing/foreign/hidden/archived status or inaccessible project returns generic404. Archived project remains readable. Ascending rank/id keyset with one lookahead; count/rank use lossless decimal strings. Read-only rank is not a mutation command. No cross-request frozen snapshot, movement, filter or SSE is implemented.";
+    paths.insert("/api/v1/projects/{project_id}/board/{status_id}".into(), json!({"get": operation("readBoardColumn", Some("BoardColumnPage"), board_query.clone(), description), "head": operation("readBoardColumnHead", None, board_query, description)}));
     let mut document = json!({
         "openapi": "3.1.0",
         "info": {
@@ -196,6 +204,17 @@ pub fn browser_document() -> Value {
         }
     });
     let mut detail = document["components"]["schemas"]["Issue"].clone();
+    let mut card = detail.clone();
+    card["properties"]["rank"] = json!({"type": "string", "pattern": "^(0|-?[1-9][0-9]{0,18})$", "maxLength": 20, "description": "Read-only canonical signed i64 decimal, from -9223372036854775808 through 9223372036854775807."});
+    card["required"].as_array_mut().unwrap().push(json!("rank"));
+    document["components"]["schemas"]["BoardCard"] = card;
+    let mut column = page("BoardCard");
+    column["properties"]["total_count"] = json!({"type": "string", "pattern": "^(0|[1-9][0-9]{0,18})$", "maxLength": 19, "description": "All nontrashed issues in this selected column, as a nonnegative i64 decimal string."});
+    column["required"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!("total_count"));
+    document["components"]["schemas"]["BoardColumnPage"] = column;
     detail["properties"]["description"] = json!({"type": "string", "maxLength": 65536, "description": "Optional Markdown data, capped at 65536 UTF-8 bytes by the domain; never HTML-rendered by this endpoint."});
     detail["properties"]["completed_at"] = timestamp.clone();
     detail["properties"]["trashed_at"] = timestamp;

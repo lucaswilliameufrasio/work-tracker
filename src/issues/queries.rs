@@ -19,6 +19,8 @@ pub enum IssueReadError {
     InvalidCursor,
     #[error("issue history cursor is invalid")]
     InvalidHistoryCursor,
+    #[error("board cursor is invalid")]
+    InvalidBoardCursor,
     #[error("issue-list page size must be between 1 and 100")]
     InvalidPageSize,
     #[error("persisted issue or history data is invalid")]
@@ -321,7 +323,7 @@ fn validate_list_options(cursor: Option<i64>, page_size: u16) -> Result<(), Issu
     Ok(())
 }
 
-async fn authorize_project_read(
+pub(super) async fn authorize_project_read(
     transaction: &mut Transaction<'_, Sqlite>,
     actor_user_id: &str,
     project_id: &str,
@@ -344,7 +346,7 @@ async fn authorize_project_read(
     Ok(())
 }
 
-fn issue_summary_from_row(row: &SqliteRow) -> Result<IssueSummary, IssueReadError> {
+pub(super) fn issue_summary_from_row(row: &SqliteRow) -> Result<IssueSummary, IssueReadError> {
     let issue_number: i64 = row.try_get("issue_number")?;
     let project_key: String = row.try_get("project_key")?;
     let project_id: String = row.try_get("project_id")?;
