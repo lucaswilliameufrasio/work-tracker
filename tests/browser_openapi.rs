@@ -56,6 +56,16 @@ fn generated_contract_has_unique_operations_resolved_refs_and_only_implemented_r
         ("/api/v1/projects/{project_id}/statuses", "head"),
         ("/api/v1/projects/{project_id}/issue-types", "get"),
         ("/api/v1/projects/{project_id}/issue-types", "head"),
+        ("/api/v1/projects/{project_id}/statuses/{record_id}", "get"),
+        ("/api/v1/projects/{project_id}/statuses/{record_id}", "head"),
+        (
+            "/api/v1/projects/{project_id}/issue-types/{record_id}",
+            "get",
+        ),
+        (
+            "/api/v1/projects/{project_id}/issue-types/{record_id}",
+            "head",
+        ),
         ("/api/v1/projects/{project_id}/issues/{issue_number}", "get"),
         (
             "/api/v1/projects/{project_id}/issues/{issue_number}",

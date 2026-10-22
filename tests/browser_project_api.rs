@@ -185,6 +185,14 @@ async fn every_documented_browser_operation_matches_real_success_and_auth_error_
                 .replace("{session_id}", &issued.id)
                 .replace("{project_id}", &project.id);
             let uri = uri.replace("{issue_number}", &contract_issue.issue_number.to_string());
+            let uri = uri.replace(
+                "{record_id}",
+                if path.contains("/statuses/") {
+                    &contract_issue.status_id
+                } else {
+                    &contract_issue.issue_type_id
+                },
+            );
             let token = csrf(&app, &issued.token).await;
             let mut req = if method == "delete" {
                 revoke_request(&uri, &issued.token, &token)

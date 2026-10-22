@@ -19,7 +19,7 @@ use crate::{
     auth::time::format_timestamp,
     http::error::ApiError,
     projects::catalog::{
-        CatalogFields, CatalogKind, CatalogOptions, CatalogReadError, canonical_uuid,
+        CatalogFields, CatalogKind, CatalogOptions, CatalogReadError, CatalogRecord, canonical_uuid,
     },
 };
 
@@ -29,6 +29,14 @@ pub(super) fn routes() -> Router<Arc<BrowserState>> {
         .route(
             "/api/v1/projects/{project_id}/issue-types",
             get(issue_types),
+        )
+        .route(
+            "/api/v1/projects/{project_id}/statuses/{record_id}",
+            get(status),
+        )
+        .route(
+            "/api/v1/projects/{project_id}/issue-types/{record_id}",
+            get(issue_type),
         )
 }
 
@@ -85,6 +93,49 @@ async fn issue_types(
     list(state, path, request, CatalogKind::IssueTypes).await
 }
 
+async fn status(
+    State(state): State<Arc<BrowserState>>,
+    path: Result<Path<(String, String)>, PathRejection>,
+    request: Request,
+) -> Result<Response, ApiError> {
+    detail(state, path, request, CatalogKind::Statuses).await
+}
+
+async fn issue_type(
+    State(state): State<Arc<BrowserState>>,
+    path: Result<Path<(String, String)>, PathRejection>,
+    request: Request,
+) -> Result<Response, ApiError> {
+    detail(state, path, request, CatalogKind::IssueTypes).await
+}
+
+async fn detail(
+    state: Arc<BrowserState>,
+    path: Result<Path<(String, String)>, PathRejection>,
+    request: Request,
+    kind: CatalogKind,
+) -> Result<Response, ApiError> {
+    let (request, _) = request.into_parts();
+    let token = authenticated_token(&state, &request).await?;
+    let Path((project_id, record_id)) =
+        path.map_err(|_| ApiError::invalid_field("path", "Use canonical UUID selectors"))?;
+    if !canonical_uuid(&project_id) {
+        return Err(ApiError::invalid_field(
+            "project_id",
+            "Use a canonical UUID",
+        ));
+    }
+    if request.uri.query().is_some() {
+        return Err(malformed_query());
+    }
+    let record = state
+        .catalogs
+        .get(&token, &project_id, kind, &record_id, Utc::now())
+        .await
+        .map_err(catalog_error)?;
+    Ok(no_store(CatalogItem::from(record)))
+}
+
 async fn list(
     state: Arc<BrowserState>,
     path: Result<Path<String>, PathRejection>,
@@ -121,6 +172,17 @@ async fn list(
         .map_err(catalog_error)?;
     let mut data = Vec::with_capacity(page.items.len());
     for record in page.items {
+        data.push(CatalogItem::from(record));
+    }
+    Ok(no_store(Page {
+        data,
+        has_more: page.next_after_id.is_some(),
+        next_cursor: page.next_after_id,
+    }))
+}
+
+impl From<CatalogRecord> for CatalogItem {
+    fn from(record: CatalogRecord) -> Self {
         let fields = match record.fields {
             CatalogFields::Status {
                 category,
@@ -139,20 +201,15 @@ async fn list(
                 color_key,
             },
         };
-        data.push(CatalogItem {
+        Self {
             id: record.id,
             project_id: record.project_id,
             name: record.name,
             system_key: record.system_key,
             archived_at: record.archived_at.map(format_timestamp),
             fields,
-        });
+        }
     }
-    Ok(no_store(Page {
-        data,
-        has_more: page.next_after_id.is_some(),
-        next_cursor: page.next_after_id,
-    }))
 }
 
 fn catalog_error(error: CatalogReadError) -> ApiError {
@@ -166,6 +223,9 @@ fn catalog_error(error: CatalogReadError) -> ApiError {
         ),
         CatalogReadError::InvalidCursor => {
             ApiError::invalid_field("cursor", "Use a canonical UUID")
+        }
+        CatalogReadError::InvalidRecordId => {
+            ApiError::invalid_field("record_id", "Use a canonical UUID")
         }
         CatalogReadError::InvalidPageSize => {
             ApiError::invalid_field("page_size", "Use a value between 1 and 100")

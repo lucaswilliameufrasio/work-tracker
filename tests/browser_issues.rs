@@ -955,3 +955,165 @@ async fn catalog_routes_reject_invalid_inputs_methods_and_corruption_with_closed
         assert!(!error.to_string().contains("PRIVATE"));
     }
 }
+
+#[tokio::test]
+async fn catalog_record_reads_resolve_archived_references_but_never_foreign_or_private_ids() {
+    let f = Fixture::new().await;
+    let foreign = ProjectStore::new(f.db.pool().clone())
+        .create(&f.owner, "OTHER", "Other catalog", None, Utc::now())
+        .await
+        .unwrap();
+    let outsider = user(&f.db, "admin").await;
+    let denied = SessionStore::new(f.db.pool().clone(), policy())
+        .issue(&outsider, Utc::now())
+        .await
+        .unwrap();
+    for endpoint in ["statuses", "issue-types"] {
+        let base = format!("/api/v1/projects/{}/{endpoint}", f.project);
+        let catalog = json(f.get(&base, Some(&f.token.token)).await, StatusCode::OK).await;
+        let id = catalog["data"][0]["id"].as_str().unwrap();
+        let path = format!("{base}/{id}");
+        let record = json(f.get(&path, Some(&f.token.token)).await, StatusCode::OK).await;
+        assert_eq!(record, catalog["data"][0]);
+        let query = if endpoint == "statuses" {
+            "UPDATE statuses SET archived_at = ? WHERE id = ?"
+        } else {
+            "UPDATE issue_types SET archived_at = ? WHERE id = ?"
+        };
+        sqlx::query(query)
+            .bind(Utc::now().to_rfc3339())
+            .bind(id)
+            .execute(f.db.pool())
+            .await
+            .unwrap();
+        assert!(
+            json(f.get(&path, Some(&f.token.token)).await, StatusCode::OK).await["archived_at"]
+                .is_string()
+        );
+        let unavailable = json(
+            f.get(&path, Some(&denied.token)).await,
+            StatusCode::NOT_FOUND,
+        )
+        .await;
+        let foreign_record = json(
+            f.get(
+                &format!("/api/v1/projects/{}/{endpoint}/{id}", foreign.id),
+                Some(&f.token.token),
+            )
+            .await,
+            StatusCode::NOT_FOUND,
+        )
+        .await;
+        let missing = json(
+            f.get(&format!("{base}/{}", Uuid::now_v7()), Some(&f.token.token))
+                .await,
+            StatusCode::NOT_FOUND,
+        )
+        .await;
+        for field in ["code", "message", "field_errors", "retryable"] {
+            assert_eq!(unavailable[field], missing[field]);
+            assert_eq!(foreign_record[field], missing[field]);
+        }
+        json(f.get(&path, None).await, StatusCode::UNAUTHORIZED).await;
+        json(
+            f.get(&format!("{base}/bad"), Some(&f.token.token)).await,
+            StatusCode::UNPROCESSABLE_ENTITY,
+        )
+        .await;
+        json(
+            f.get(
+                &format!("{path}?include_archived=true"),
+                Some(&f.token.token),
+            )
+            .await,
+            StatusCode::BAD_REQUEST,
+        )
+        .await;
+        let mut head = request(&path, Some(&f.token.token));
+        *head.method_mut() = Method::HEAD;
+        let response = f.app.clone().oneshot(head).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(
+            response
+                .into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes()
+                .is_empty()
+        );
+        let mut post = request(&path, Some(&f.token.token));
+        *post.method_mut() = Method::POST;
+        json(
+            f.app.clone().oneshot(post).await.unwrap(),
+            StatusCode::METHOD_NOT_ALLOWED,
+        )
+        .await;
+        json(
+            http::router(f.db.clone())
+                .oneshot(request(&path, Some(&f.token.token)))
+                .await
+                .unwrap(),
+            StatusCode::NOT_FOUND,
+        )
+        .await;
+        sqlx::query(query)
+            .bind("PRIVATE corrupt time")
+            .bind(id)
+            .execute(f.db.pool())
+            .await
+            .unwrap();
+        let error = json(
+            f.get(&path, Some(&f.token.token)).await,
+            StatusCode::INTERNAL_SERVER_ERROR,
+        )
+        .await;
+        assert!(!error.to_string().contains("PRIVATE"));
+    }
+    use puxiri::projects::catalog::{CatalogKind, CatalogReadError, SessionProjectCatalogReader};
+    let reader = SessionProjectCatalogReader::new(f.db.pool().clone(), policy());
+    let selected = Uuid::now_v7().to_string();
+    SessionStore::new(f.db.pool().clone(), policy())
+        .revoke(&f.owner, &f.token.id, Utc::now())
+        .await
+        .unwrap();
+    for kind in [CatalogKind::Statuses, CatalogKind::IssueTypes] {
+        assert!(matches!(
+            reader
+                .get(&f.token.token, &f.project, kind, &selected, Utc::now())
+                .await,
+            Err(CatalogReadError::Unauthenticated)
+        ));
+    }
+    let fresh = SessionStore::new(f.db.pool().clone(), policy())
+        .issue(&f.owner, Utc::now())
+        .await
+        .unwrap();
+    for kind in [CatalogKind::Statuses, CatalogKind::IssueTypes] {
+        assert!(matches!(
+            reader
+                .get(
+                    &fresh.token,
+                    &f.project,
+                    kind,
+                    &selected,
+                    Utc::now() + TimeDelta::days(8)
+                )
+                .await,
+            Err(CatalogReadError::Unauthenticated)
+        ));
+    }
+    sqlx::query("UPDATE users SET state = 'banned' WHERE id = ?")
+        .bind(&f.owner)
+        .execute(f.db.pool())
+        .await
+        .unwrap();
+    for kind in [CatalogKind::Statuses, CatalogKind::IssueTypes] {
+        assert!(matches!(
+            reader
+                .get(&fresh.token, &f.project, kind, &selected, Utc::now())
+                .await,
+            Err(CatalogReadError::Unauthenticated)
+        ));
+    }
+}

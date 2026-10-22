@@ -6,6 +6,13 @@ import { expect } from '@playwright/test';
 export async function readWork(context, origin, fixture, artifacts) {
   const page = await context.newPage();
   const errors = [];
+  const metadataRequests = [];
+  page.on('request', (request) => {
+    const path = new URL(request.url()).pathname;
+    if (path.includes('/statuses') || path.includes('/issue-types')) {
+      metadataRequests.push(path);
+    }
+  });
   page.on('pageerror', (error) => errors.push(error.message));
   const response = await page.goto(`${origin}/projects`);
   assert.equal(response.headers()['cache-control'], 'no-store');
@@ -34,10 +41,14 @@ export async function readWork(context, origin, fixture, artifacts) {
   await expect(
     page.getByRole('heading', { name: 'Synthetic work issue 23', exact: true }),
   ).toBeVisible();
-  await expect(page.locator('dd').filter({ hasText: /^To do$/ })).toHaveCount(
-    1,
-  );
-  await expect(page.locator('dd').filter({ hasText: /^Task$/ })).toHaveCount(1);
+  await expect(
+    page
+      .locator('dd')
+      .filter({ hasText: /^Referenced status beyond page100$/ }),
+  ).toHaveCount(1);
+  await expect(
+    page.locator('dd').filter({ hasText: /^Referenced type beyond page100$/ }),
+  ).toHaveCount(1);
   await expect(page.locator('pre')).toContainText('<script>throw new Error');
   await expect(page.locator('pre')).toContainText(
     'https://forbidden.example.test/private.png',
@@ -106,5 +117,11 @@ export async function readWork(context, origin, fixture, artifacts) {
     0,
   );
   assert.deepEqual(errors, []);
+  assert.ok(metadataRequests.length > 0);
+  assert.ok(
+    metadataRequests.every((path) =>
+      /\/(statuses|issue-types)\/[0-9a-f-]{36}$/.test(path),
+    ),
+  );
   await page.close();
 }

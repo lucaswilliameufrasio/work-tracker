@@ -16,8 +16,8 @@ import {
   type IssueSummary,
 } from './issues.ts';
 import {
-  getIssueTypePage,
-  getStatusPage,
+  getIssueTypeRecord,
+  getStatusRecord,
   type ProjectIssueType,
   type ProjectStatus,
 } from './project-catalogs.ts';
@@ -131,8 +131,8 @@ export type WorkData =
       type: 'detail';
       issue: IssueDetail;
       history: IssuePage<IssueHistoryEvent>;
-      statuses: IssuePage<ProjectStatus>;
-      types: IssuePage<ProjectIssueType>;
+      status: ProjectStatus;
+      issueType: ProjectIssueType;
     };
 
 export async function loadWork(
@@ -158,31 +158,23 @@ export async function loadWork(
   if (route.type === 'invalid') {
     return invalid();
   }
-  const [issue, history, statuses, types] = await Promise.all([
-    getIssueDetail(route.projectId, route.number, signal),
+  const issue = await getIssueDetail(route.projectId, route.number, signal);
+  const [history, status, issueType] = await Promise.all([
     getIssueHistoryPage(
       route.projectId,
       route.number,
       { cursor: route.historyCursor, page_size: 20 },
       signal,
     ),
-    getStatusPage(
-      route.projectId,
-      { page_size: 100, include_archived: true },
-      signal,
-    ),
-    getIssueTypePage(
-      route.projectId,
-      { page_size: 100, include_archived: true },
-      signal,
-    ),
+    getStatusRecord(route.projectId, issue.status_id, signal),
+    getIssueTypeRecord(route.projectId, issue.issue_type_id, signal),
   ]);
   for (const event of history.data) {
     if (event.issue_id !== issue.id) {
       return invalid();
     }
   }
-  return { type: 'detail', issue, history, statuses, types };
+  return { type: 'detail', issue, history, status, issueType };
 }
 
 export type WorkState =

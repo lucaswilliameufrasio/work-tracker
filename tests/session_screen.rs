@@ -224,6 +224,38 @@ async fn session_screen_uses_real_https_browser_cookies_confirmations_and_transa
         .execute(database.pool())
         .await
         .unwrap();
+    let mut reference_status = String::new();
+    let mut reference_type = String::new();
+    for index in 0..101 {
+        reference_status = Uuid::now_v7().to_string();
+        reference_type = Uuid::now_v7().to_string();
+        sqlx::query("INSERT INTO statuses (id, project_id, name, category, position, board_visible, archived_at, created_at, updated_at) VALUES (?, ?, ?, 'backlog', ?, 0, ?, 'now', 'now')")
+            .bind(&reference_status).bind(&project.id).bind(if index == 100 { "Referenced status beyond page100".to_owned() } else { format!("Custom status {index}") })
+            .bind(i64::from(index) + 10).bind(Utc::now().to_rfc3339()).execute(database.pool()).await.unwrap();
+        sqlx::query("INSERT INTO issue_types (id, project_id, name, archived_at, created_at, updated_at) VALUES (?, ?, ?, ?, 'now', 'now')")
+            .bind(&reference_type).bind(&project.id).bind(if index == 100 { "Referenced type beyond page100".to_owned() } else { format!("Custom type {index}") })
+            .bind(Utc::now().to_rfc3339()).execute(database.pool()).await.unwrap();
+    }
+    sqlx::query("UPDATE issues SET status_id = ?, issue_type_id = ? WHERE project_id = ? AND issue_number = 23")
+        .bind(&reference_status).bind(&reference_type).bind(&project.id).execute(database.pool()).await.unwrap();
+    for (query, reference) in [
+        (
+            "SELECT COUNT(*) FROM statuses WHERE project_id = ? AND id < ?",
+            &reference_status,
+        ),
+        (
+            "SELECT COUNT(*) FROM issue_types WHERE project_id = ? AND id < ?",
+            &reference_type,
+        ),
+    ] {
+        let preceding: i64 = sqlx::query_scalar(query)
+            .bind(&project.id)
+            .bind(reference)
+            .fetch_one(database.pool())
+            .await
+            .unwrap();
+        assert!(preceding >= 100);
+    }
     for kind in ["work-light", "work-dark"] {
         let issued = sessions.issue(&reader, Utc::now()).await.unwrap();
         fixtures.push(json!({"kind": kind, "token": issued.token.expose(), "project_id": project.id, "private_project_id": private.id}));

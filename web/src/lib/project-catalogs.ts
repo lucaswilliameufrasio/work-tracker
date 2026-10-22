@@ -235,3 +235,53 @@ export async function getIssueTypePage(
     selected,
   );
 }
+
+export function parseStatusRecord(
+  value: unknown,
+  projectId: string,
+  recordId: string,
+): ProjectStatus {
+  const result = status(value, uuid(projectId), true);
+  if (result.id !== uuid(recordId)) {
+    return invalid();
+  }
+  return result;
+}
+
+export function parseIssueTypeRecord(
+  value: unknown,
+  projectId: string,
+  recordId: string,
+): ProjectIssueType {
+  const result = issueType(value, uuid(projectId), true);
+  if (result.id !== uuid(recordId)) {
+    return invalid();
+  }
+  return result;
+}
+
+export async function getStatusRecord(
+  projectId: string,
+  recordId: string,
+  signal: AbortSignal,
+): Promise<ProjectStatus> {
+  const path = `/api/v1/projects/${uuid(projectId)}/statuses/${uuid(recordId)}`;
+  return parseStatusRecord(
+    await readIssueJson(path, signal),
+    projectId,
+    recordId,
+  );
+}
+
+export async function getIssueTypeRecord(
+  projectId: string,
+  recordId: string,
+  signal: AbortSignal,
+): Promise<ProjectIssueType> {
+  const path = `/api/v1/projects/${uuid(projectId)}/issue-types/${uuid(recordId)}`;
+  return parseIssueTypeRecord(
+    await readIssueJson(path, signal),
+    projectId,
+    recordId,
+  );
+}

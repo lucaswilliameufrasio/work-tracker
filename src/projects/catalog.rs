@@ -57,6 +57,8 @@ pub enum CatalogReadError {
     Unavailable,
     #[error("catalog cursor must be a canonical UUID")]
     InvalidCursor,
+    #[error("catalog record ID must be a canonical UUID")]
+    InvalidRecordId,
     #[error("page size must be between 1 and 100")]
     InvalidPageSize,
     #[error("catalog storage is corrupt")]
@@ -76,6 +78,42 @@ pub struct SessionProjectCatalogReader {
 }
 
 impl SessionProjectCatalogReader {
+    pub async fn get(
+        &self,
+        token: &SessionToken,
+        project_id: &str,
+        kind: CatalogKind,
+        record_id: &str,
+        now: DateTime<Utc>,
+    ) -> Result<CatalogRecord, CatalogReadError> {
+        if !canonical_uuid(record_id) {
+            return Err(CatalogReadError::InvalidRecordId);
+        }
+        let mut transaction = self.pool.begin().await?;
+        let principal = self
+            .sessions
+            .authenticate_in_transaction(&mut transaction, token, now)
+            .await?
+            .ok_or(CatalogReadError::Unauthenticated)?;
+        authorize_read(&mut transaction, principal.user_id(), project_id).await?;
+        let query = match kind {
+            CatalogKind::Statuses => {
+                "SELECT id, project_id, name, system_key, archived_at, category, position, board_visible FROM statuses WHERE project_id = ? AND id = ?"
+            }
+            CatalogKind::IssueTypes => {
+                "SELECT id, project_id, name, system_key, archived_at, icon_key, color_key FROM issue_types WHERE project_id = ? AND id = ?"
+            }
+        };
+        let row = sqlx::query(query)
+            .bind(project_id)
+            .bind(record_id)
+            .fetch_optional(&mut *transaction)
+            .await?
+            .ok_or(CatalogReadError::Unavailable)?;
+        let result = record(&row, kind)?;
+        transaction.commit().await?;
+        Ok(result)
+    }
     pub fn new(pool: SqlitePool, policy: SessionPolicy) -> Self {
         Self {
             sessions: SessionStore::new(pool.clone(), policy),
@@ -129,17 +167,7 @@ async fn list_in_transaction(
     options: CatalogOptions<'_>,
 ) -> Result<CatalogPage, CatalogReadError> {
     validate_options(options)?;
-    let context = AccessStore::load_project_context_in_transaction(
-        transaction,
-        actor_user_id,
-        project_id,
-        false,
-    )
-    .await?
-    .ok_or(CatalogReadError::Unavailable)?;
-    if authorize(&context, AccessCapability::ReadProjectContent).is_err() {
-        return Err(CatalogReadError::Unavailable);
-    }
+    authorize_read(transaction, actor_user_id, project_id).await?;
     let query = match kind {
         CatalogKind::Statuses => {
             "SELECT id, project_id, name, system_key, archived_at, category, position, board_visible FROM statuses WHERE project_id = ? AND id > ? AND (? OR archived_at IS NULL) ORDER BY id ASC LIMIT ?"
@@ -169,6 +197,25 @@ async fn list_in_transaction(
         items,
         next_after_id,
     })
+}
+
+async fn authorize_read(
+    transaction: &mut Transaction<'_, Sqlite>,
+    actor_user_id: &str,
+    project_id: &str,
+) -> Result<(), CatalogReadError> {
+    let context = AccessStore::load_project_context_in_transaction(
+        transaction,
+        actor_user_id,
+        project_id,
+        false,
+    )
+    .await?
+    .ok_or(CatalogReadError::Unavailable)?;
+    if authorize(&context, AccessCapability::ReadProjectContent).is_err() {
+        return Err(CatalogReadError::Unavailable);
+    }
+    Ok(())
 }
 
 fn record(row: &SqliteRow, kind: CatalogKind) -> Result<CatalogRecord, CatalogReadError> {

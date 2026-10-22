@@ -215,8 +215,18 @@ it('composite detail rejects a journal from a different issue even in the same p
         has_more: false,
       });
     }
-    if (path.includes('/statuses?') || path.includes('/issue-types?')) {
-      return Response.json({ data: [], has_more: false });
+    if (path.includes('/statuses/')) {
+      return Response.json({
+        id,
+        project_id: id,
+        name: 'Status',
+        category: 'active',
+        position: '0',
+        board_visible: true,
+      });
+    }
+    if (path.includes('/issue-types/')) {
+      return Response.json({ id, project_id: id, name: 'Type' });
     }
     return Response.json({
       id,

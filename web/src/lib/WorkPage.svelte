@@ -213,12 +213,6 @@
           >{/if}
       {:else}
         {@const issue = data.issue}
-        {@const status = data.statuses.data.find(
-          (item) => item.id === issue.status_id,
-        )}
-        {@const type = data.types.data.find(
-          (item) => item.id === issue.issue_type_id,
-        )}
         <article data-issue-detail={issue.id}>
           <p class="key">{issue.issue_key}</p>
           <h2 class="issue-title">{issue.title}</h2>
@@ -233,15 +227,13 @@
             <div>
               <dt>Status</dt>
               <dd>
-                {status?.name ??
-                  `Nome não carregado; referência ${issue.status_id}`}
+                {data.status.name}
               </dd>
             </div>
             <div>
               <dt>Tipo</dt>
               <dd>
-                {type?.name ??
-                  `Nome não carregado; referência ${issue.issue_type_id}`}
+                {data.issueType.name}
               </dd>
             </div>
             {#if issue.due_date !== undefined}<div>
@@ -260,9 +252,6 @@
               </dd>
             </div>
           </dl>
-          {#if data.statuses.has_more || data.types.has_more}<p class="hint">
-              Catálogos parciais: alguns nomes podem não estar carregados.
-            </p>{/if}
           <section aria-labelledby="description-title">
             <h3 id="description-title">Descrição · fonte Markdown</h3>
             <p class="hint">

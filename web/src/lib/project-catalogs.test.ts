@@ -1,5 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  getStatusRecord,
+  getIssueTypeRecord,
+  parseStatusRecord,
+  parseIssueTypeRecord,
   getIssueTypePage,
   getStatusPage,
   parseIssueTypePage,
@@ -21,6 +25,30 @@ const signal = () => new AbortController().signal;
 afterEach(() => vi.unstubAllGlobals());
 
 describe('project catalog DTOs', () => {
+  it('binds direct record responses to both requested IDs, including archived records', async () => {
+    const archivedStatus = { ...status, archived_at: archived };
+    expect(parseStatusRecord(archivedStatus, id, id)).toEqual(archivedStatus);
+    expect(
+      parseIssueTypeRecord({ ...common, archived_at: archived }, id, id)
+        .archived_at,
+    ).toBe(archived);
+    expect(() => parseStatusRecord(status, other, id)).toThrow();
+    expect(() => parseStatusRecord(status, id, other)).toThrow();
+    expect(() => parseIssueTypeRecord(common, id, other)).toThrow();
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(Response.json(status))
+      .mockResolvedValueOnce(Response.json(common));
+    vi.stubGlobal('fetch', fetcher);
+    await getStatusRecord(id, id, signal());
+    await getIssueTypeRecord(id, id, signal());
+    expect(fetcher.mock.calls.map(([path]) => path)).toEqual([
+      `/api/v1/projects/${id}/statuses/${id}`,
+      `/api/v1/projects/${id}/issue-types/${id}`,
+    ]);
+    await expect(getStatusRecord(id, 'bad', signal())).rejects.toThrow();
+    expect(fetcher).toHaveBeenCalledTimes(2);
+  });
   it('preserves optional omission, opaque tokens and nonnegative i64 display positions', () => {
     expect(parseStatusPage(page(status), id, {})).toEqual(page(status));
     const maximum = {

@@ -143,6 +143,25 @@ pub fn browser_document() -> Value {
         let description = "Explicit project membership and session identity revalidated with catalog data in one snapshot. Missing/inaccessible project returns generic404. Archived projects readable; archived catalog records excluded by default. UUID keyset traversal is not display order or a frozen cross-request snapshot. No editor or board query is enabled.";
         paths.insert(path.into(), json!({"get": operation(id, Some(schema), catalog_query.clone(), description), "head": operation(&format!("{id}Head"), None, catalog_query.clone(), description)}));
     }
+    for (path, id, schema) in [
+        (
+            "/api/v1/projects/{project_id}/statuses/{record_id}",
+            "getProjectStatus",
+            "Status",
+        ),
+        (
+            "/api/v1/projects/{project_id}/issue-types/{record_id}",
+            "getProjectIssueType",
+            "IssueType",
+        ),
+    ] {
+        let query = vec![
+            json!({"name": "project_id", "in": "path", "required": true, "schema": uuid.clone()}),
+            json!({"name": "record_id", "in": "path", "required": true, "schema": uuid.clone()}),
+        ];
+        let description = "One catalog record, including archived references, in the same authenticated explicit-membership snapshot. Missing/foreign project or record returns generic404. No query options, edits or catalog traversal. Name size is not capped by the existing storage schema.";
+        paths.insert(path.into(), json!({"get": operation(id, Some(schema), query.clone(), description), "head": operation(&format!("{id}Head"), None, query, description)}));
+    }
     let mut document = json!({
         "openapi": "3.1.0",
         "info": {
@@ -298,6 +317,7 @@ fn operation(id: &str, schema: Option<&str>, parameters: Vec<Value>, description
         parameter["name"] == "page_size"
             || parameter["name"] == "session_id"
             || parameter["name"] == "issue_number"
+            || parameter["name"] == "record_id"
     }) {
         responses.insert(
             "422".into(),
