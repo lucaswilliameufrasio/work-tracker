@@ -6,6 +6,10 @@ import {
   getIssuePage,
   IssueRequestError,
 } from '../src/lib/issues.ts';
+import {
+  getStatusPage,
+  getIssueTypePage,
+} from '../src/lib/project-catalogs.ts';
 
 const base = new URL(process.env.PUXIRI_TEST_BASE_URL ?? '');
 assert.equal(base.hostname, '127.0.0.1');
@@ -18,7 +22,11 @@ const nativeFetch = globalThis.fetch;
 let calls = 0;
 globalThis.fetch = async (path, options) => {
   assert.equal(typeof path, 'string');
-  assert.ok(path.startsWith(`/api/v1/projects/${project}/issues`));
+  assert.ok(
+    new RegExp(
+      `^/api/v1/projects/${project}/(issues|statuses|issue-types)(/|\\?|$)`,
+    ).test(path),
+  );
   assert.equal(options.method, 'GET');
   assert.equal(options.credentials, 'same-origin');
   assert.equal(options.mode, 'same-origin');
@@ -65,6 +73,43 @@ assert.equal(history.data.length, 1);
 assert.equal(history.data[0].issue_id, detail.id);
 assert.equal(history.data[0].event_kind, 'issue.created');
 const event = history.data[0];
+const visibleStatuses = await getStatusPage(
+  project,
+  { page_size: 2 },
+  signal(),
+);
+assert.equal(visibleStatuses.data.length, 2);
+assert.equal(visibleStatuses.has_more, true);
+const remainingStatuses = await getStatusPage(
+  project,
+  { page_size: 2, cursor: visibleStatuses.next_cursor },
+  signal(),
+);
+assert.equal(remainingStatuses.data.length, 2);
+assert.equal(remainingStatuses.has_more, false);
+const allStatuses = await getStatusPage(
+  project,
+  { include_archived: true },
+  signal(),
+);
+assert.equal(allStatuses.data.length, 5);
+const backlog = allStatuses.data.find(
+  (status) => status.system_key === 'backlog',
+);
+assert.equal(backlog.position, '9223372036854775807');
+assert.equal(typeof backlog.archived_at, 'string');
+assert.ok(allStatuses.data.some((status) => status.id === detail.status_id));
+const activeTypes = await getIssueTypePage(project, {}, signal());
+assert.equal(activeTypes.data.length, 0);
+const allTypes = await getIssueTypePage(
+  project,
+  { include_archived: true },
+  signal(),
+);
+assert.equal(allTypes.data.length, 1);
+assert.equal(allTypes.data[0].id, detail.issue_type_id);
+assert.equal(allTypes.data[0].icon_key, 'opaque_icon');
+assert.equal(allTypes.data[0].color_key, 'opaque-color');
 const cursor = Buffer.from(`${event.occurred_at}/${event.id}`).toString(
   'base64url',
 );
@@ -80,6 +125,8 @@ for (const call of [
   () => getIssuePage(project, {}, signal()),
   () => getIssueDetail(project, '1', signal()),
   () => getIssueHistoryPage(project, '1', {}, signal()),
+  () => getStatusPage(project, { include_archived: true }, signal()),
+  () => getIssueTypePage(project, { include_archived: true }, signal()),
 ]) {
   await assert.rejects(
     call,
@@ -95,4 +142,12 @@ await assert.rejects(
   () => getIssuePage(project, {}, signal()),
   (error) => error instanceof IssueRequestError && error.status === 401,
 );
-assert.equal(calls, 11);
+await assert.rejects(
+  () => getStatusPage(project, {}, signal()),
+  (error) => error instanceof IssueRequestError && error.status === 401,
+);
+await assert.rejects(
+  () => getIssueTypePage(project, {}, signal()),
+  (error) => error instanceof IssueRequestError && error.status === 401,
+);
+assert.equal(calls, 20);

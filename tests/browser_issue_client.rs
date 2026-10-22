@@ -79,6 +79,10 @@ async fn typescript_issue_client_reads_real_router_and_sqlite_without_writes_or_
         .set_archived(&owner, &project.id, true, Utc::now())
         .await
         .unwrap();
+    sqlx::query("UPDATE statuses SET archived_at = ?, position = 9223372036854775807 WHERE project_id = ? AND system_key = 'backlog'")
+        .bind(Utc::now().to_rfc3339()).bind(&project.id).execute(database.pool()).await.unwrap();
+    sqlx::query("UPDATE issue_types SET archived_at = ?, icon_key = 'opaque_icon', color_key = 'opaque-color' WHERE project_id = ?")
+        .bind(Utc::now().to_rfc3339()).bind(&project.id).execute(database.pool()).await.unwrap();
     let policy = SessionPolicy::initial(TimeDelta::minutes(5)).unwrap();
     let sessions = SessionStore::new(database.pool().clone(), policy);
     let own = sessions.issue(&owner, Utc::now()).await.unwrap();

@@ -109,7 +109,8 @@ async function json(
   }
 }
 
-// Private to the issue client; callers cannot supply an absolute URL or method.
+// Internal transport for issue/catalog read clients, whose public methods build
+// fixed relative paths and do not accept an arbitrary URL or HTTP method.
 export async function readIssueJson(
   path: string,
   signal: AbortSignal,
