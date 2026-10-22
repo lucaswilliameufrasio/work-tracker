@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { createIssue } from '../src/lib/issue-creation.ts';
 import { IssueRequestError } from '../src/lib/issue-transport.ts';
 import { getIssueDetail } from '../src/lib/issues.ts';
+import { replaceIssueText } from '../src/lib/issue-text.ts';
 
 const base = new URL(process.env.PUXIRI_TEST_BASE_URL ?? '');
 assert.equal(base.hostname, '127.0.0.1');
@@ -15,6 +16,7 @@ let cookie = process.env.PUXIRI_TEST_SESSION;
 assert.ok(cookie);
 let loseResponse = false;
 let posts = 0;
+let puts = 0;
 const nativeFetch = globalThis.fetch;
 globalThis.fetch = async (path, options) => {
   assert.equal(typeof path, 'string');
@@ -34,6 +36,13 @@ globalThis.fetch = async (path, options) => {
     assert.equal(path, `/api/v1/projects/${project}/issues`);
     headers.set('origin', `https://${base.host}`);
     posts += 1;
+  } else if (options.method === 'PUT') {
+    assert.ok(
+      path.startsWith(`/api/v1/projects/${project}/issues/`) &&
+        path.endsWith('/text'),
+    );
+    headers.set('origin', `https://${base.host}`);
+    puts += 1;
   } else {
     assert.equal(options.method, 'GET');
   }
@@ -41,9 +50,9 @@ globalThis.fetch = async (path, options) => {
     ...options,
     headers,
   });
-  if (options.method === 'POST' && loseResponse) {
+  if (['POST', 'PUT'].includes(options.method) && loseResponse) {
     loseResponse = false;
-    assert.equal(response.status, 201);
+    assert.equal(response.status, options.method === 'POST' ? 201 : 200);
     await response.arrayBuffer();
     throw new Error('Synthetic response loss after commit');
   }
@@ -108,3 +117,76 @@ await assert.rejects(
   createIssue(project, foreignActor, key, input, signal()),
   (error) => error instanceof IssueRequestError && error.status === 404,
 );
+cookie = process.env.PUXIRI_TEST_SESSION;
+const target = {
+  id: first.receipt.id,
+  issue_number: first.receipt.issue_number,
+};
+const editKey = randomUUID();
+const edit = { title: ' Edited ', expected_version: '1' };
+const edited = await replaceIssueText(
+  project,
+  target,
+  actor,
+  editKey,
+  edit,
+  signal(),
+);
+assert.equal(edited.replayed, false);
+assert.equal(edited.receipt.result_version, '2');
+assert.equal(edited.receipt.changed, true);
+const editReplay = await replaceIssueText(
+  project,
+  target,
+  actor,
+  editKey,
+  edit,
+  signal(),
+);
+assert.equal(editReplay.replayed, true);
+assert.deepEqual(editReplay.receipt, edited.receipt);
+const noop = await replaceIssueText(
+  project,
+  target,
+  actor,
+  randomUUID(),
+  { title: 'Edited', expected_version: '2' },
+  signal(),
+);
+assert.equal(noop.receipt.changed, false);
+assert.equal(noop.receipt.result_version, '2');
+const priorPuts = puts;
+await assert.rejects(
+  replaceIssueText(project, target, actor, randomUUID(), edit, signal()),
+  (error) =>
+    error instanceof IssueRequestError &&
+    error.status === 409 &&
+    error.code === 'issue_version_conflict',
+);
+assert.equal(puts, priorPuts + 1);
+const textKey = randomUUID();
+const textInput = {
+  title: 'Latest edit',
+  description: 'Current only',
+  expected_version: '2',
+};
+loseResponse = true;
+await assert.rejects(
+  replaceIssueText(project, target, actor, textKey, textInput, signal()),
+  /result could not be confirmed/,
+);
+assert.equal(puts, priorPuts + 2);
+const recovered = await replaceIssueText(
+  project,
+  target,
+  actor,
+  textKey,
+  textInput,
+  signal(),
+);
+assert.equal(recovered.replayed, true);
+assert.equal(recovered.receipt.result_version, '3');
+const latest = await getIssueDetail(project, target.issue_number, signal());
+assert.equal(latest.title, 'Latest edit');
+assert.equal(latest.description, 'Current only');
+assert.equal(latest.version, '3');

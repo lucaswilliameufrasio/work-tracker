@@ -15,7 +15,7 @@ use tempfile::TempDir;
 use uuid::Uuid;
 
 #[tokio::test]
-async fn typescript_creation_client_commits_and_recovers_lost_response_with_explicit_same_key_replay()
+async fn typescript_mutation_clients_commit_and_recover_lost_responses_with_explicit_same_key_replay()
  {
     let directory = TempDir::new().unwrap();
     let database = Arc::new(Database::open(directory.path()).await.unwrap());
@@ -76,7 +76,12 @@ async fn typescript_creation_client_commits_and_recovers_lost_response_with_expl
     );
     assert!(output.stdout.is_empty());
     let counts: (i64, i64, i64, i64, i64) = sqlx::query_as("SELECT (SELECT COUNT(*) FROM issues), (SELECT COUNT(*) FROM issue_events), (SELECT COUNT(*) FROM outbox_events), (SELECT COUNT(*) FROM issue_creation_receipts), next_issue_number FROM projects").fetch_one(database.pool()).await.unwrap();
-    assert_eq!(counts, (2, 2, 2, 2, 9007199254740995));
+    assert_eq!(counts, (2, 4, 4, 2, 9007199254740995));
+    let text_receipts: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM issue_text_receipts")
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
+    assert_eq!(text_receipts, 3);
 }
 
 #[tokio::test]
