@@ -124,6 +124,10 @@ impl BrowserSessionSecurity {
         &self.origin
     }
 
+    pub(super) fn master_key(&self) -> MasterKey {
+        self.master_key.clone()
+    }
+
     /// Validates browser transport/CSRF only. Callers must still authenticate the
     /// returned bearer against current persistence and authorize the operation.
     pub fn authenticate_request(

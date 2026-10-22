@@ -27,12 +27,16 @@ use super::{
 
 pub(super) fn routes() -> Router<Arc<BrowserState>> {
     Router::new()
-        .route("/api/v1/projects/{project_id}/issues", get(list))
+        .route(
+            "/api/v1/projects/{project_id}/issues",
+            get(list).post(create::create),
+        )
         .merge(detail::routes())
         .merge(board::routes())
 }
 
 mod board;
+mod create;
 mod detail;
 
 #[derive(Default, Deserialize)]

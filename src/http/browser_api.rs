@@ -39,6 +39,7 @@ struct BrowserState {
     projects: SessionProjectReader,
     issues: crate::issues::session::SessionIssueReader,
     catalogs: crate::projects::catalog::SessionProjectCatalogReader,
+    writer: crate::issues::creation::SessionIssueWriter,
 }
 
 mod catalogs;
@@ -49,7 +50,16 @@ pub(super) fn routes(
     security: BrowserSessionSecurity,
     policy: SessionPolicy,
 ) -> Router {
+    let budget = Arc::new(super::browser_budget::BrowserBudget::with_security(
+        security.clone(),
+    ));
+    let writer = crate::issues::creation::SessionIssueWriter::new(
+        database.pool().clone(),
+        policy,
+        security.master_key(),
+    );
     let state = Arc::new(BrowserState {
+        writer,
         security,
         sessions: SessionStore::new(database.pool().clone(), policy),
         projects: SessionProjectReader::new(database.pool().clone(), policy),
@@ -74,7 +84,7 @@ pub(super) fn routes(
         .method_not_allowed_fallback(method_not_allowed)
         .with_state(state)
         .layer(middleware::from_fn_with_state(
-            Arc::new(super::browser_budget::BrowserBudget::default()),
+            budget,
             super::browser_budget::admit,
         ))
 }
@@ -409,7 +419,13 @@ async fn method_not_allowed(request: Request) -> Response {
     response.headers_mut().insert(
         header::ALLOW,
         HeaderValue::from_static(
-            if request.uri().path().starts_with("/api/v1/auth/sessions/") {
+            if request
+                .extensions()
+                .get::<axum::extract::MatchedPath>()
+                .is_some_and(|path| path.as_str() == "/api/v1/projects/{project_id}/issues")
+            {
+                "GET, HEAD, POST"
+            } else if request.uri().path().starts_with("/api/v1/auth/sessions/") {
                 "DELETE"
             } else if matches!(
                 request.uri().path(),
@@ -455,7 +471,7 @@ fn malformed_query() -> ApiError {
     )
 }
 
-fn transport_error(error: BrowserSessionError) -> ApiError {
+pub(super) fn transport_error(error: BrowserSessionError) -> ApiError {
     match error {
         BrowserSessionError::InvalidSessionCookie | BrowserSessionError::AmbiguousCredentials => {
             unauthenticated()

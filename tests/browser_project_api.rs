@@ -195,15 +195,28 @@ async fn every_documented_browser_operation_matches_real_success_and_auth_error_
                 },
             );
             let token = csrf(&app, &issued.token).await;
-            let mut req = if method == "delete" {
+            let mut req = if method == "delete" || method == "post" {
                 revoke_request(&uri, &issued.token, &token)
             } else {
                 request(&uri, Some(&issued.token))
             };
             *req.method_mut() = Method::from_bytes(method.to_ascii_uppercase().as_bytes()).unwrap();
+            if method == "post" {
+                req.headers_mut().insert(
+                    header::CONTENT_TYPE,
+                    HeaderValue::from_static("application/json"),
+                );
+                req.headers_mut().insert(
+                    "idempotency-key",
+                    HeaderValue::from_str(&Uuid::now_v7().to_string()).unwrap(),
+                );
+                *req.body_mut() = Body::from(r#"{"title":"Contract creation"}"#);
+            }
             let response = app.clone().oneshot(req).await.unwrap();
             let status = if method == "delete" {
                 StatusCode::NO_CONTENT
+            } else if method == "post" {
+                StatusCode::CREATED
             } else {
                 StatusCode::OK
             };
@@ -223,13 +236,13 @@ async fn every_documented_browser_operation_matches_real_success_and_auth_error_
                 let body = json(response, status).await;
                 assert_contract_shape(
                     &document,
-                    &operation["responses"]["200"]["content"]["application/json"]["schema"],
+                    &operation["responses"][status.as_str()]["content"]["application/json"]["schema"],
                     &body,
                 );
             }
             let mut req = request(&uri, None);
             *req.method_mut() = Method::from_bytes(method.to_ascii_uppercase().as_bytes()).unwrap();
-            if method == "delete" {
+            if method == "delete" || method == "post" {
                 req.headers_mut().insert(
                     header::ORIGIN,
                     HeaderValue::from_static("https://tracker.example.test"),

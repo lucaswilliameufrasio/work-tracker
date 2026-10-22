@@ -27,6 +27,9 @@ use tempfile::TempDir;
 use tower::ServiceExt;
 use uuid::Uuid;
 
+#[path = "browser_issues/creation.rs"]
+mod creation;
+
 fn policy() -> SessionPolicy {
     SessionPolicy::initial(TimeDelta::minutes(5)).unwrap()
 }
@@ -323,11 +326,11 @@ async fn issue_api_rejects_invalid_selectors_methods_and_transport_without_refle
         StatusCode::PAYLOAD_TOO_LARGE,
     )
     .await;
-    for method in [Method::POST, Method::DELETE, Method::PATCH] {
+    for method in [Method::DELETE, Method::PATCH] {
         let mut req = request(&f.path(""), Some(&f.token.token));
         *req.method_mut() = method;
         let response = f.app.clone().oneshot(req).await.unwrap();
-        assert_eq!(response.headers()[header::ALLOW], "GET, HEAD");
+        assert_eq!(response.headers()[header::ALLOW], "GET, HEAD, POST");
         json(response, StatusCode::METHOD_NOT_ALLOWED).await;
     }
     let mut head = request(&f.path(""), Some(&f.token.token));

@@ -56,6 +56,7 @@ fn generated_contract_has_unique_operations_resolved_refs_and_only_implemented_r
         ("/api/v1/projects/{project_id}/board/{status_id}", "head"),
         ("/api/v1/projects/{project_id}/issues", "get"),
         ("/api/v1/projects/{project_id}/issues", "head"),
+        ("/api/v1/projects/{project_id}/issues", "post"),
         ("/api/v1/projects/{project_id}/statuses", "get"),
         ("/api/v1/projects/{project_id}/statuses", "head"),
         ("/api/v1/projects/{project_id}/issue-types", "get"),
@@ -92,7 +93,14 @@ fn generated_contract_has_unique_operations_resolved_refs_and_only_implemented_r
         for (method, operation) in operations.as_object().unwrap() {
             actual.insert((path.as_str(), method.as_str()));
             assert!(operation_ids.insert(operation["operationId"].as_str().unwrap()));
-            assert!(operation.get("requestBody").is_none());
+            assert_eq!(operation.get("requestBody").is_some(), method == "post");
+            if method == "post" {
+                assert!(operation["responses"].get("201").is_some());
+                assert!(operation["responses"].get("200").is_none());
+                for status in ["409", "415", "422", "503"] {
+                    assert!(operation["responses"].get(status).is_some());
+                }
+            }
             assert!(
                 operation["responses"].get("429").is_none(),
                 "rate budgets are not implemented"

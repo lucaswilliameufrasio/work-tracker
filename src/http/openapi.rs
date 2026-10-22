@@ -177,12 +177,54 @@ pub fn browser_document() -> Value {
     ];
     let description = "Visible nonarchived board statuses ordered globally by position/id, not UUID catalog order. Session, membership and metadata share a snapshot. Missing/inaccessible project returns generic404; archived projects remain readable. No hidden candidate rows, unbounded traversal or reordering command.";
     paths.insert("/api/v1/projects/{project_id}/board".into(), json!({"get": operation("listBoardStatuses", Some("BoardStatusPage"), status_query.clone(), description), "head": operation("listBoardStatusesHead", None, status_query, description)}));
+    let mut create = operation(
+        "createProjectIssue",
+        Some("IssueCreationReceipt"),
+        vec![
+            json!({"name": "project_id", "in": "path", "required": true, "schema": uuid.clone()}),
+            json!({"name": "Origin", "in": "header", "required": true, "schema": {"type": "string"}}),
+            json!({"name": "x-csrf-token", "in": "header", "required": true, "schema": {"type": "string", "minLength": 43, "maxLength": 43}}),
+            json!({"name": "Idempotency-Key", "in": "header", "required": true, "schema": uuid.clone()}),
+        ],
+        "Create with current explicit mutation membership in the same transaction as issue/history/outbox/receipt. Exact replay returns201 with stable references, never historical text. Preserve request/key after an uncertain response; no automatic retry or new-key recreation. No query options, explicit null, unknown or duplicate fields. No publication/worker or login enabled.",
+    );
+    create["requestBody"] = json!({"required": true, "description": "Uncompressed JSON, at most524288 bytes, collected within one second before handler/transaction. Optional fields must be omitted, not null. Description limit65536 UTF-8 bytes; title is trimmed and must contain1–240 characters.", "content": {"application/json": {"schema": object(json!({"title": {"type": "string"}, "description": {"type": "string"}, "assignee_user_id": uuid.clone()}), &["title"])}}});
+    create["responses"].as_object_mut().unwrap().remove("200");
+    create["responses"]["201"] = json!({"description": "Committed creation or exact replay; no Set-Cookie or text snapshot.", "headers": {
+        "Cache-Control": {"schema": {"type": "string", "const": "no-store"}},
+        "Location": {"schema": {"type": "string"}, "description": "Relative issue detail API URL."},
+        "Idempotency-Replayed": {"schema": {"type": "string", "enum": ["true", "false"]}}
+    }, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/IssueCreationReceipt"}}}});
+    for (status, description) in [
+        (
+            "409",
+            "idempotency_conflict/issue_schema_unavailable/issue_capacity_exhausted; retryable=false",
+        ),
+        (
+            "415",
+            "unsupported_media_type: uncompressed application/json with optional UTF-8 charset required",
+        ),
+        ("422", "invalid_params: invalid field or canonical UUID key"),
+        (
+            "413",
+            "payload_too_large: creation JSON exceeds524288 bytes",
+        ),
+        (
+            "503",
+            "storage_unavailable/service_busy retryable=true; idempotency_unavailable retryable=false, never recreate with a new key",
+        ),
+    ] {
+        create["responses"][status] = error_response(description, true);
+    }
+    paths
+        .get_mut("/api/v1/projects/{project_id}/issues")
+        .unwrap()["post"] = create;
     let mut document = json!({
         "openapi": "3.1.0",
         "info": {
             "title": "Puxiri opt-in browser API — partial development contract",
             "version": env!("CARGO_PKG_VERSION"),
-            "description": "Disabled (404) unless --browser-origin/PUXIRI_BROWSER_ORIGIN is configured. Listener does not terminate TLS; use an explicitly configured HTTPS origin. Cookie-only authentication; no Authorization fallback. Host must match; Origin and Fetch Metadata are checked when supplied, and mutations require exact Origin plus CSRF. Unknown/duplicate query fields are rejected. Every operation has no-store responses; HEAD has no body, including errors. Browser admission: eight in-flight requests per router instance, no admission queue; path+query <=2048 bytes, headers <=64 entries/16384 aggregate name+value bytes, no payload bytes. Empty unknown-length bodies must finish within one second before any handler/transaction starts. There is no whole-handler timeout or per-client requests-per-second limit. No login/signup/setup/session issuance, API tokens or OAuth are provided by this contract. Do not store bearer tokens in localStorage. This document is generated locally, not served as an endpoint or a production readiness claim."
+            "description": "Disabled (404) unless --browser-origin/PUXIRI_BROWSER_ORIGIN is configured. Listener does not terminate TLS; use an explicitly configured HTTPS origin. Cookie-only authentication; no Authorization fallback. Host must match; Origin and Fetch Metadata are checked when supplied, and mutations require exact Origin plus CSRF. Unknown/duplicate query fields are rejected. Every operation has no-store responses; HEAD has no body, including errors. Browser admission: eight in-flight requests per router instance, no admission queue; path+query <=2048 bytes, headers <=64 entries/16384 aggregate name+value bytes. Only POST issue creation accepts JSON body bytes (<=524288); all other operations require an empty body. Bodies must finish within one second before any handler/transaction starts. There is no whole-handler timeout or per-client requests-per-second limit. No login/signup/setup/session issuance, API tokens or OAuth are provided by this contract. Do not store bearer tokens in localStorage. This document is generated locally, not served as an endpoint or a production readiness claim."
         },
         "security": [{"browserSession": []}],
         "paths": paths,
@@ -206,6 +248,7 @@ pub fn browser_document() -> Value {
                     "created_at": timestamp.clone(), "updated_at": timestamp.clone()
                 }), &["id", "project_id", "issue_number", "issue_key", "issue_type_id", "status_id", "title", "creator_user_id", "priority", "version", "created_at", "updated_at"]),
                 "IssuePage": page("Issue"),
+                "IssueCreationReceipt": object(json!({"id": uuid.clone(), "project_id": uuid.clone(), "issue_number": decimal_i64(), "issue_key": {"type": "string"}, "created_version": {"type": "string", "enum": ["1"]}}), &["id", "project_id", "issue_number", "issue_key", "created_version"]),
                 "Error": object(json!({"code": {"type": "string"}, "message": {"type": "string"}, "request_id": {"type": "string", "format": "uuid"}, "field_errors": {"type": "object", "additionalProperties": {"type": "string"}}, "retryable": {"type": "boolean"}}), &["code", "message", "request_id", "field_errors", "retryable"])
             }
         }

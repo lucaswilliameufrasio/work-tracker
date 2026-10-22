@@ -14,17 +14,29 @@ use super::error::ApiError;
 const MAX_URI_BYTES: usize = 2 * 1024;
 const MAX_HEADER_BYTES: usize = 16 * 1024;
 const MAX_HEADER_ENTRIES: usize = 64;
+const MAX_CREATION_BODY: usize = 512 * 1024;
 
 pub(super) struct BrowserBudget {
     slots: Semaphore,
-    empty_body_deadline: Duration,
+    body_deadline: Duration,
+    security: Option<super::browser_session::BrowserSessionSecurity>,
 }
 
 impl Default for BrowserBudget {
     fn default() -> Self {
         Self {
             slots: Semaphore::new(8),
-            empty_body_deadline: Duration::from_secs(1),
+            body_deadline: Duration::from_secs(1),
+            security: None,
+        }
+    }
+}
+
+impl BrowserBudget {
+    pub(super) fn with_security(security: super::browser_session::BrowserSessionSecurity) -> Self {
+        Self {
+            security: Some(security),
+            ..Self::default()
         }
     }
 }
@@ -70,21 +82,55 @@ async fn admit_request(budget: &BrowserBudget, request: Request, next: Next) -> 
             );
         }
     }
-    if let Err(error) = empty_content_length(&parts.headers) {
-        return match error {
-            FramingError::Malformed => rejection(
-                StatusCode::BAD_REQUEST,
-                "malformed_request",
-                "Request framing is invalid",
+    let creation = parts.method == axum::http::Method::POST
+        && parts
+            .extensions
+            .get::<axum::extract::MatchedPath>()
+            .is_some_and(|path| path.as_str() == "/api/v1/projects/{project_id}/issues")
+        && budget.security.is_some();
+    let limit = if creation { MAX_CREATION_BODY } else { 0 };
+    let declared = match content_length(&parts.headers, limit) {
+        Err(error) => {
+            return match error {
+                FramingError::Malformed => rejection(
+                    StatusCode::BAD_REQUEST,
+                    "malformed_request",
+                    "Request framing is invalid",
+                    false,
+                ),
+                FramingError::NonEmpty => rejection(
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "payload_too_large",
+                    "Request body is not supported",
+                    false,
+                ),
+            };
+        }
+        Ok(declared) => declared,
+    };
+    if creation {
+        let Some(security) = &budget.security else {
+            return rejection(
+                StatusCode::FORBIDDEN,
+                "request_origin_denied",
+                "Request origin denied",
                 false,
-            ),
-            FramingError::NonEmpty => rejection(
-                StatusCode::PAYLOAD_TOO_LARGE,
-                "payload_too_large",
-                "Request body is not supported",
-                false,
-            ),
+            );
         };
+        if let Err(error) = security.authenticate_request(&parts.method, &parts.uri, &parts.headers)
+        {
+            return super::browser_api::transport_error(error).into_response();
+        }
+        if !json_content_type(&parts.headers)
+            || parts.headers.contains_key(header::CONTENT_ENCODING)
+        {
+            return rejection(
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                "unsupported_media_type",
+                "Use an uncompressed application/json request",
+                false,
+            );
+        }
     }
     let Ok(_permit) = budget.slots.try_acquire() else {
         let mut response = rejection(
@@ -98,7 +144,7 @@ async fn admit_request(budget: &BrowserBudget, request: Request, next: Next) -> 
             .insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
         return response;
     };
-    match tokio::time::timeout(budget.empty_body_deadline, to_bytes(body, 0)).await {
+    match tokio::time::timeout(budget.body_deadline, to_bytes(body, limit)).await {
         Err(_) => rejection(
             StatusCode::REQUEST_TIMEOUT,
             "request_timeout",
@@ -125,7 +171,18 @@ async fn admit_request(budget: &BrowserBudget, request: Request, next: Next) -> 
                 )
             }
         }
-        Ok(Ok(_)) => next.run(Request::from_parts(parts, Body::empty())).await,
+        Ok(Ok(bytes)) => {
+            if declared.is_some_and(|declared| declared != bytes.len() as u64) {
+                return rejection(
+                    StatusCode::BAD_REQUEST,
+                    "malformed_request",
+                    "Request framing is invalid",
+                    false,
+                );
+            }
+            next.run(Request::from_parts(parts, Body::from(bytes)))
+                .await
+        }
     }
 }
 
@@ -134,10 +191,19 @@ enum FramingError {
     NonEmpty,
 }
 
-fn empty_content_length(headers: &HeaderMap) -> Result<(), FramingError> {
+fn content_length(headers: &HeaderMap, limit: usize) -> Result<Option<u64>, FramingError> {
+    let mut transfers = headers.get_all(header::TRANSFER_ENCODING).iter();
+    if let Some(transfer) = transfers.next()
+        && (transfers.next().is_some()
+            || !transfer
+                .to_str()
+                .is_ok_and(|value| value.trim().eq_ignore_ascii_case("chunked")))
+    {
+        return Err(FramingError::Malformed);
+    }
     let mut lengths = headers.get_all(header::CONTENT_LENGTH).iter();
     let Some(length) = lengths.next() else {
-        return Ok(());
+        return Ok(None);
     };
     let parsed = length
         .to_str()
@@ -150,10 +216,39 @@ fn empty_content_length(headers: &HeaderMap) -> Result<(), FramingError> {
     {
         return Err(FramingError::Malformed);
     }
-    if parsed != Some(0) {
+    if parsed.is_some_and(|length| length > limit as u64) {
         return Err(FramingError::NonEmpty);
     }
-    Ok(())
+    Ok(parsed)
+}
+
+fn json_content_type(headers: &HeaderMap) -> bool {
+    let mut values = headers.get_all(header::CONTENT_TYPE).iter();
+    let Some(value) = values.next() else {
+        return false;
+    };
+    if values.next().is_some() {
+        return false;
+    }
+    let Ok(value) = value.to_str() else {
+        return false;
+    };
+    let mut parts = value.split(';');
+    if !parts
+        .next()
+        .is_some_and(|value| value.trim().eq_ignore_ascii_case("application/json"))
+    {
+        return false;
+    }
+    if let Some(parameter) = parts.next() {
+        let parameter = parameter.trim();
+        if !parameter.eq_ignore_ascii_case("charset=utf-8")
+            && !parameter.eq_ignore_ascii_case("charset=\"utf-8\"")
+        {
+            return false;
+        }
+    }
+    parts.next().is_none()
 }
 
 fn rejection(
