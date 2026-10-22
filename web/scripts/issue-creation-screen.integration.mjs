@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { expect } from '@playwright/test';
+import { editWork } from './issue-text-screen.integration.mjs';
 
 export async function createWork(context, origin, fixture, artifacts) {
   const page = await context.newPage();
@@ -172,6 +173,7 @@ export async function createWork(context, origin, fixture, artifacts) {
   ).toBeVisible();
   await expect(page.locator('[data-issue-create-form]')).toHaveCount(0);
   assert.equal(posts, 5);
+  await editWork(page, origin, fixture, artifacts);
   assert.deepEqual(errors, []);
   await page.close();
 }

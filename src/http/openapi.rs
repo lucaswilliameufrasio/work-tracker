@@ -282,7 +282,7 @@ pub fn browser_document() -> Value {
                 }), &["id", "project_id", "issue_number", "issue_key", "issue_type_id", "status_id", "title", "creator_user_id", "priority", "version", "created_at", "updated_at"]),
                 "IssuePage": page("Issue"),
                 "IssueTextReceipt": object(json!({"id": uuid.clone(), "project_id": uuid.clone(), "issue_number": decimal_i64(), "issue_key": {"type": "string"}, "result_version": decimal_i64(), "changed": {"type": "boolean"}}), &["id", "project_id", "issue_number", "issue_key", "result_version", "changed"]),
-                "ProjectCapabilities": object(json!({"project_id": uuid.clone(), "can_create_issues": {"type": "boolean"}}), &["project_id", "can_create_issues"]),
+                "ProjectCapabilities": object(json!({"project_id": uuid.clone(), "can_create_issues": {"type": "boolean"}, "can_replace_issue_text": {"type": "boolean"}}), &["project_id", "can_create_issues", "can_replace_issue_text"]),
                 "IssueCreationReceipt": object(json!({"id": uuid.clone(), "project_id": uuid.clone(), "issue_number": decimal_i64(), "issue_key": {"type": "string"}, "created_version": {"type": "string", "enum": ["1"]}}), &["id", "project_id", "issue_number", "issue_key", "created_version"]),
                 "Error": object(json!({"code": {"type": "string"}, "message": {"type": "string"}, "request_id": {"type": "string", "format": "uuid"}, "field_errors": {"type": "object", "additionalProperties": {"type": "string"}}, "retryable": {"type": "boolean"}}), &["code", "message", "request_id", "field_errors", "retryable"])
             }

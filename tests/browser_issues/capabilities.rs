@@ -16,7 +16,7 @@ async fn capabilities_use_current_membership_archive_and_manager_context_without
     .await;
     assert_eq!(
         initial,
-        serde_json::json!({ "project_id": f.project, "can_create_issues": true })
+        serde_json::json!({ "project_id": f.project, "can_create_issues": true, "can_replace_issue_text": true })
     );
     let member_id = user(&f.db, "member").await;
     member(&f.db, &f.project, &member_id, "member").await;
@@ -37,6 +37,12 @@ async fn capabilities_use_current_membership_archive_and_manager_context_without
         .execute(f.db.pool())
         .await
         .unwrap();
+    let viewer = json(
+        f.get(&path(&f.project), Some(&session.token)).await,
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(viewer["can_replace_issue_text"], false);
     let csrf = json(
         f.get("/api/v1/auth/session", Some(&session.token)).await,
         StatusCode::OK,
@@ -84,6 +90,12 @@ async fn capabilities_use_current_membership_archive_and_manager_context_without
         .set_archived(&f.owner, &f.project, true, Utc::now())
         .await
         .unwrap();
+    let archived = json(
+        f.get(&path(&f.project), Some(&f.token.token)).await,
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(archived["can_replace_issue_text"], false);
     assert_eq!(
         json(
             f.get(&path(&f.project), Some(&f.token.token)).await,

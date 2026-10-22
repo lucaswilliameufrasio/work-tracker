@@ -4,11 +4,15 @@
   import SessionsPage from './lib/SessionsPage.svelte';
   import WorkPage from './lib/WorkPage.svelte';
   import IssueCreationPage from './lib/IssueCreationPage.svelte';
+  import IssueTextPage from './lib/IssueTextPage.svelte';
 
   const sessionsPage = globalThis.location.pathname === '/settings/sessions';
   const creationPage =
     globalThis.location.pathname.startsWith('/projects/') &&
     globalThis.location.pathname.endsWith('/issues/new');
+  const editorPage =
+    globalThis.location.pathname.startsWith('/projects/') &&
+    globalThis.location.pathname.endsWith('/edit');
   const workPage =
     globalThis.location.pathname === '/projects' ||
     globalThis.location.pathname.startsWith('/projects/');
@@ -70,6 +74,8 @@
     <SessionsPage />
   {:else if creationPage}
     <IssueCreationPage />
+  {:else if editorPage}
+    <IssueTextPage />
   {:else if workPage}
     <WorkPage />
   {:else}

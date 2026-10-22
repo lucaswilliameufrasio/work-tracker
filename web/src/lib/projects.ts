@@ -9,25 +9,41 @@ export type AccessibleProject = {
   archived_at?: string;
 };
 
+export type ProjectCapabilities = {
+  project_id: string;
+  can_create_issues: boolean;
+  can_replace_issue_text: boolean;
+};
+
 export function parseProjectCapabilities(
   value: unknown,
   projectId: string,
-): { project_id: string; can_create_issues: boolean } {
-  const item = fields(value, ['project_id', 'can_create_issues']);
+): ProjectCapabilities {
+  const item = fields(value, [
+    'project_id',
+    'can_create_issues',
+    'can_replace_issue_text',
+  ]);
   const project = uuid(item.project_id);
   if (
     project !== uuid(projectId) ||
-    typeof item.can_create_issues !== 'boolean'
+    typeof item.can_create_issues !== 'boolean' ||
+    (item.can_replace_issue_text !== undefined &&
+      typeof item.can_replace_issue_text !== 'boolean')
   ) {
     return invalid();
   }
-  return { project_id: project, can_create_issues: item.can_create_issues };
+  return {
+    project_id: project,
+    can_create_issues: item.can_create_issues,
+    can_replace_issue_text: item.can_replace_issue_text === true,
+  };
 }
 
 export async function getProjectCapabilities(
   projectId: string,
   signal: AbortSignal,
-): Promise<{ project_id: string; can_create_issues: boolean }> {
+): Promise<ProjectCapabilities> {
   uuid(projectId);
   return parseProjectCapabilities(
     await readIssueJson(`/api/v1/projects/${projectId}/capabilities`, signal),

@@ -24,6 +24,13 @@ export type IssueTextReceipt = {
 };
 export type IssueTextResult = { receipt: IssueTextReceipt; replayed: boolean };
 
+export class IssueEditIdentityChanged extends Error {
+  constructor() {
+    super('Issue edit identity changed');
+    this.name = 'IssueEditIdentityChanged';
+  }
+}
+
 function decimal(value: unknown): string {
   if (
     typeof value !== 'string' ||
@@ -113,7 +120,7 @@ export async function replaceIssueText(
   const session = await getCurrentSession(deadline);
   deadline.throwIfAborted();
   if (session.user_id !== expectedActorId) {
-    throw new Error('Issue edit identity changed');
+    throw new IssueEditIdentityChanged();
   }
   let response: Response;
   try {

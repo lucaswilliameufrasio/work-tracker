@@ -103,6 +103,7 @@ pub(super) fn routes(
 struct ProjectCapabilities {
     project_id: String,
     can_create_issues: bool,
+    can_replace_issue_text: bool,
 }
 
 async fn project_capabilities(
@@ -146,6 +147,7 @@ async fn project_capabilities(
         Json(ProjectCapabilities {
             project_id,
             can_create_issues,
+            can_replace_issue_text: can_create_issues,
         }),
     )
         .into_response())

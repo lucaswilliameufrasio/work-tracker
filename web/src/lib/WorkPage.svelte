@@ -257,6 +257,10 @@
       {:else}
         {@const issue = data.issue}
         <article data-issue-detail={issue.id}>
+          {#if issue.trashed_at === undefined}<a
+              href={`/projects/${issue.project_id}/issues/${issue.issue_number}/edit`}
+              >Editar texto</a
+            >{/if}
           <p class="key">{issue.issue_key}</p>
           <h2 class="issue-title">{issue.title}</h2>
           {#if issue.trashed_at !== undefined}<p role="status">
