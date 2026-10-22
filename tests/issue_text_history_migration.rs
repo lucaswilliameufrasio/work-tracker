@@ -116,6 +116,34 @@ async fn migration_preserves_existing_receipts_and_envelopes_and_supports_repeat
         receipts_before,
         sqlx::query_as(receipts_sql).fetch_all(&pool).await.unwrap()
     );
+    let mut transaction = pool.begin().await.unwrap();
+    sqlx::raw_sql(include_str!("../migrations/0033_issue_text_receipts.sql"))
+        .execute(&mut *transaction)
+        .await
+        .unwrap();
+    transaction.commit().await.unwrap();
+    assert_eq!(
+        before,
+        store
+            .get_project_issue(&actor, &project.id, 1)
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        outbox_before,
+        sqlx::query_as(outbox_sql).fetch_all(&pool).await.unwrap()
+    );
+    assert_eq!(
+        receipts_before,
+        sqlx::query_as(receipts_sql).fetch_all(&pool).await.unwrap()
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM issue_text_receipts")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        0
+    );
     for (index, kind) in [
         "issue.title_updated",
         "issue.description_updated",

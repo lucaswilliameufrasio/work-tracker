@@ -17,6 +17,7 @@ mod queries;
 pub use board::{BoardColumnPage, BoardCursor, BoardOptions};
 pub mod creation;
 pub mod session;
+pub mod text;
 pub use queries::{
     IssueDetails, IssueEvent, IssueEventKind, IssueHistoryCursor, IssueHistoryPage, IssueListPage,
     IssueReadError, IssueSummary,
