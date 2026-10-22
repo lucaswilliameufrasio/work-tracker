@@ -290,7 +290,7 @@ async fn session_screen_uses_real_https_browser_cookies_confirmations_and_transa
         let issued = sessions.issue(&creator, Utc::now()).await.unwrap();
         sqlx::query("INSERT INTO project_members (project_id, organization_id, user_id, role, created_at) VALUES (?, 1, ?, 'viewer', 'now')").bind(&archived.id).bind(&creator).execute(database.pool()).await.unwrap();
         fixtures.push(json!({"kind": kind, "token": issued.token.expose(), "project_id": created.id, "private_project_id": private.id, "read_only_project_id": archived.id}));
-        creation_projects.push(created.id);
+        creation_projects.push((created.id, creator, issued.id));
     }
     let input = json!({"fixtures": fixtures, "artifacts": artifacts});
     let mut stdin = child.0.stdin.take().unwrap();
@@ -357,12 +357,22 @@ async fn session_screen_uses_real_https_browser_cookies_confirmations_and_transa
         .await
         .unwrap();
     assert_eq!((issue_count, issue_events), (29, 38));
-    for project in creation_projects {
+    for (project, creator, session_id) in creation_projects {
         let counts: (i64, i64, i64, i64, i64) = sqlx::query_as("SELECT (SELECT COUNT(*) FROM issues WHERE project_id = ?), (SELECT COUNT(*) FROM issue_events WHERE project_id = ?), (SELECT COUNT(*) FROM outbox_events WHERE project_id = ?), (SELECT COUNT(*) FROM issue_creation_receipts WHERE project_id = ?), next_issue_number FROM projects WHERE id = ?")
             .bind(&project).bind(&project).bind(&project).bind(&project).bind(&project).fetch_one(database.pool()).await.unwrap();
         assert_eq!(counts, (3, 6, 6, 3, 4));
         let edits: (i64, String, i64) = sqlx::query_as("SELECT version, title, (SELECT COUNT(*) FROM issue_text_receipts WHERE project_id = ?) FROM issues WHERE project_id = ? AND issue_number = 1").bind(&project).bind(&project).fetch_one(database.pool()).await.unwrap();
         assert_eq!(edits, (4, "Recovered edit".to_owned(), 3));
+        let revoked: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sessions WHERE id = ? AND user_id = ? AND revoked_at IS NOT NULL",
+        )
+        .bind(&session_id)
+        .bind(&creator)
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
+        let audits: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM audit_events WHERE actor_user_id = ? AND event_kind = 'auth.session.revoked'").bind(&creator).fetch_one(database.pool()).await.unwrap();
+        assert_eq!((revoked, audits), (1, 1));
     }
     assert!(
         sessions

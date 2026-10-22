@@ -62,6 +62,72 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+it('blocks duplicate saves while the first command remains pending', async () => {
+  const f = fixture();
+  let finish: ((value: IssueTextResult) => void) | undefined;
+  f.send.mockImplementation(
+    () =>
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+  );
+  await f.screen.start();
+  f.screen.change(draft);
+  const pending = f.screen.save();
+  await f.screen.save();
+  await f.screen.retry();
+  expect(f.send).toHaveBeenCalledTimes(1);
+  expect(f.makeKey).toHaveBeenCalledTimes(1);
+  finish?.(result);
+  await pending;
+  expect(f.screen.state.type).toBe('saved');
+  f.screen.dispose();
+});
+
+it('refuses identity changes during the editor read and never restores a trashed issue', async () => {
+  const session = {
+    user_id: id,
+    session_id: other,
+    csrf_token: 'A'.repeat(43),
+  };
+  for (const mode of ['identity', 'trash']) {
+    let sessions = 0;
+    const fetcher = vi.fn<typeof fetch>().mockImplementation(async (path) => {
+      let value: unknown;
+      if (path === '/api/v1/auth/session') {
+        sessions += 1;
+        value = { ...session, user_id: sessions > 1 ? other : id };
+      } else if (String(path).endsWith('/capabilities')) {
+        value = {
+          project_id: id,
+          can_create_issues: true,
+          can_replace_issue_text: true,
+        };
+      } else {
+        value = mode === 'trash' ? { ...issue, trashed_at: time } : issue;
+      }
+      return new Response(JSON.stringify(value), {
+        headers: { 'content-type': 'application/json' },
+      });
+    });
+    vi.stubGlobal('fetch', fetcher);
+    const f = fixture();
+    const screen = new IssueTextScreen(route, () => undefined, {
+      load: loadEditor,
+      send: f.send,
+      key: f.makeKey,
+    });
+    await screen.start();
+    expect(screen.state.type).toBe(
+      mode === 'identity' ? 'unavailable' : 'read-only',
+    );
+    await screen.save();
+    expect(f.send).not.toHaveBeenCalled();
+    screen.dispose();
+    f.screen.dispose();
+  }
+});
+
 it('parses only canonical editor routes without query-carried drafts', () => {
   expect(
     editorRoute(`/projects/${id}/issues/9007199254740993/edit`, ''),

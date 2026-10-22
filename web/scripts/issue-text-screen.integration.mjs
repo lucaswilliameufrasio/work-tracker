@@ -136,4 +136,36 @@ export async function editWork(page, origin, fixture, artifacts) {
     await expect(page.locator('[data-issue-text-form]')).toHaveCount(0);
   }
   assert.equal(puts, 4);
+  await page.goto(`${origin}/projects/${fixture.project_id}/issues/1/edit`);
+  await expect(page.locator('[data-issue-text-form]')).toBeVisible();
+  await page
+    .getByLabel('Título', { exact: false })
+    .fill('Draft removed after real revocation');
+  const active = await page.request.get(`${origin}/api/v1/auth/session`);
+  const current = await active.json();
+  const revoked = await page.request.delete(`${origin}/api/v1/auth/session`, {
+    headers: { Origin: origin, 'x-csrf-token': current.csrf_token },
+  });
+  assert.equal(revoked.status(), 204);
+  assert.equal(
+    await page.evaluate(() => {
+      globalThis.dispatchEvent(new globalThis.Event('blur'));
+      return document.querySelectorAll('[data-private-editor]').length;
+    }),
+    0,
+  );
+  await page.evaluate(() =>
+    globalThis.dispatchEvent(new globalThis.Event('focus')),
+  );
+  await expect(
+    page.getByRole('heading', {
+      name: 'Sessão encerrada ou expirada',
+      exact: true,
+    }),
+  ).toBeVisible();
+  await expect(page.locator('[data-issue-text-form]')).toHaveCount(0);
+  await expect(page.locator('body')).not.toContainText(
+    'Draft removed after real revocation',
+  );
+  assert.equal(puts, 4);
 }
