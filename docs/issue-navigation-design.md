@@ -11,3 +11,5 @@ Visual plan: keep the existing Puxiri Inter type and tokens (light background #f
 Verification includes workflow/route/parser tests and actual Chromium HTTPS with synthetic migrated SQLite data, desktop light/mobile dark, bounded pagination, detail/back, hostile Markdown displayed as text/no external requests, empty/unavailable/signed-out states, synchronous concealment and revoked-session refresh. Existing session screen remains unchanged. This read journey does not complete board/filter/search/mutations/idempotency/outbox/live updates, login/setup, backup or release gates.
 
 Follow-up slice231 supersedes the first100 catalog strategy above with [one-record resolution](project-catalog-detail-design.md): read issue first, then journal and its two exact referenced records concurrently. Archived references beyond the first100 entries resolve without traversal or unloaded-name fallback. The per-request snapshot and whole-view deadline limitations remain.
+
+Follow-up slice233 adds the [bounded read-only board views](board-read-screen-design.md) under the same private workflow/lifecycle; board writing/filtering/live updates remain unavailable.

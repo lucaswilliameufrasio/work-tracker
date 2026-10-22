@@ -159,6 +159,13 @@ function summary(
   return result;
 }
 
+export function parseIssueSummary(
+  value: unknown,
+  projectId: string,
+): IssueSummary {
+  return summary(fields(value, summaryFields), projectId);
+}
+
 export function parseIssueDetail(
   value: unknown,
   projectId: string,

@@ -10,7 +10,7 @@ export async function readWork(context, origin, fixture, artifacts) {
   page.on('request', (request) => {
     const path = new URL(request.url()).pathname;
     if (path.includes('/statuses') || path.includes('/issue-types')) {
-      metadataRequests.push(path);
+      metadataRequests.push(request.url());
     }
   });
   page.on('pageerror', (error) => errors.push(error.message));
@@ -25,6 +25,35 @@ export async function readWork(context, origin, fixture, artifacts) {
     .click();
   await expect(page.locator('[data-project-id]')).toHaveCount(2);
   await page.locator(`[data-project-id="${fixture.project_id}"] a`).click();
+  await expect(page.locator('[data-issue-id]')).toHaveCount(20);
+  await page.getByRole('link', { name: 'Ver board', exact: true }).click();
+  await expect(page.locator('[data-board-column]')).toHaveCount(3);
+  await expect(page.locator('[data-board-card]')).toHaveCount(20);
+  await expect(
+    page.getByText('21 issues fora da lixeira', { exact: true }),
+  ).toHaveCount(1);
+  assert.equal(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= globalThis.innerWidth,
+    ),
+    true,
+  );
+  await page.screenshot({
+    path: join(artifacts, `${fixture.kind}-board.png`),
+    fullPage: true,
+  });
+  await page
+    .getByRole('link', { name: 'Continuar nesta coluna', exact: true })
+    .click();
+  await expect(page.locator('[data-board-column]')).toHaveCount(1);
+  await expect(page.locator('[data-board-card]')).toHaveCount(1);
+  await expect(
+    page.getByRole('link', {
+      name: 'READ-22 Synthetic work issue 22',
+      exact: true,
+    }),
+  ).toBeVisible();
+  await page.goto(`${origin}/projects/${fixture.project_id}/issues`);
   await expect(page.locator('[data-issue-id]')).toHaveCount(20);
   await expect(
     page.getByText('Synthetic work issue 2', { exact: true }),
@@ -83,6 +112,8 @@ export async function readWork(context, origin, fixture, artifacts) {
   ).toBeVisible();
   await page.goto(`${origin}/projects/${fixture.project_id}/issues/23`);
   await expect(page.locator('[data-issue-detail]')).toHaveCount(1);
+  await page.getByRole('link', { name: 'Ver board', exact: true }).click();
+  await expect(page.locator('[data-board-column]')).toHaveCount(3);
   const remaining = await page.evaluate(() => {
     globalThis.dispatchEvent(
       new globalThis.PageTransitionEvent('pagehide', { persisted: true }),
@@ -119,9 +150,15 @@ export async function readWork(context, origin, fixture, artifacts) {
   assert.deepEqual(errors, []);
   assert.ok(metadataRequests.length > 0);
   assert.ok(
-    metadataRequests.every((path) =>
-      /\/(statuses|issue-types)\/[0-9a-f-]{36}$/.test(path),
-    ),
+    metadataRequests.every((address) => {
+      const url = new URL(address);
+      return (
+        /\/(statuses|issue-types)\/[0-9a-f-]{36}$/.test(url.pathname) ||
+        (url.pathname.endsWith('/statuses') &&
+          url.searchParams.get('page_size') === '4' &&
+          url.searchParams.get('include_archived') === 'false')
+      );
+    }),
   );
   await page.close();
 }

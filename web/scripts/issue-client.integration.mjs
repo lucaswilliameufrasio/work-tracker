@@ -10,6 +10,7 @@ import {
   getStatusPage,
   getIssueTypePage,
 } from '../src/lib/project-catalogs.ts';
+import { getBoardPage } from '../src/lib/board.ts';
 
 const base = new URL(process.env.PUXIRI_TEST_BASE_URL ?? '');
 assert.equal(base.hostname, '127.0.0.1');
@@ -24,7 +25,7 @@ globalThis.fetch = async (path, options) => {
   assert.equal(typeof path, 'string');
   assert.ok(
     new RegExp(
-      `^/api/v1/projects/${project}/(issues|statuses|issue-types)(/|\\?|$)`,
+      `^/api/v1/projects/${project}/(issues|statuses|issue-types|board)(/|\\?|$)`,
     ).test(path),
   );
   assert.equal(options.method, 'GET');
@@ -73,6 +74,22 @@ assert.equal(history.data.length, 1);
 assert.equal(history.data[0].issue_id, detail.id);
 assert.equal(history.data[0].event_kind, 'issue.created');
 const event = history.data[0];
+const firstColumn = await getBoardPage(
+  project,
+  detail.status_id,
+  { page_size: 1 },
+  signal(),
+);
+assert.equal(firstColumn.total_count, '3');
+assert.equal(firstColumn.data[0].issue_number, '1');
+const lastColumn = await getBoardPage(
+  project,
+  detail.status_id,
+  { cursor: firstColumn.next_cursor },
+  signal(),
+);
+assert.equal(lastColumn.data.length, 2);
+assert.equal(lastColumn.data[1].issue_number, '9007199254740993');
 const visibleStatuses = await getStatusPage(
   project,
   { page_size: 2 },
@@ -98,6 +115,10 @@ const backlog = allStatuses.data.find(
 );
 assert.equal(backlog.position, '9223372036854775807');
 assert.equal(typeof backlog.archived_at, 'string');
+await assert.rejects(
+  () => getBoardPage(project, backlog.id, {}, signal()),
+  (error) => error instanceof IssueRequestError && error.status === 404,
+);
 assert.ok(allStatuses.data.some((status) => status.id === detail.status_id));
 const activeTypes = await getIssueTypePage(project, {}, signal());
 assert.equal(activeTypes.data.length, 0);
@@ -127,6 +148,7 @@ for (const call of [
   () => getIssueHistoryPage(project, '1', {}, signal()),
   () => getStatusPage(project, { include_archived: true }, signal()),
   () => getIssueTypePage(project, { include_archived: true }, signal()),
+  () => getBoardPage(project, detail.status_id, {}, signal()),
 ]) {
   await assert.rejects(
     call,
@@ -150,4 +172,8 @@ await assert.rejects(
   () => getIssueTypePage(project, {}, signal()),
   (error) => error instanceof IssueRequestError && error.status === 401,
 );
-assert.equal(calls, 20);
+await assert.rejects(
+  () => getBoardPage(project, detail.status_id, {}, signal()),
+  (error) => error instanceof IssueRequestError && error.status === 401,
+);
+assert.equal(calls, 25);

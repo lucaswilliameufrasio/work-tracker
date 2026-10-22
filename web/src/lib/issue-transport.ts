@@ -40,6 +40,10 @@ export function fields(
   return result;
 }
 
+export function record(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
 export function uuid(value: unknown): string {
   if (
     typeof value !== 'string' ||

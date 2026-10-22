@@ -18,11 +18,15 @@ import {
 import {
   getIssueTypeRecord,
   getStatusRecord,
+  getStatusPage,
   type ProjectIssueType,
   type ProjectStatus,
 } from './project-catalogs.ts';
+import { boardBoundary, getBoardPage, type BoardPage } from './board.ts';
 
 export type WorkRoute =
+  | { type: 'board'; projectId: string; statusCursor?: string }
+  | { type: 'column'; projectId: string; statusId: string; cursor?: string }
   | { type: 'projects'; cursor?: string; includeArchived: boolean }
   | { type: 'issues'; projectId: string; cursor?: string }
   | {
@@ -74,10 +78,42 @@ export function workRoute(path: string, search: string): WorkRoute {
       };
     }
     const parts = path.split('/');
-    if (parts.length < 4 || parts[1] !== 'projects' || parts[3] !== 'issues') {
+    if (parts.length < 4 || parts[1] !== 'projects') {
       return { type: 'invalid' };
     }
     const projectId = uuid(parts[2]);
+    if (parts[3] === 'board') {
+      if (
+        parts.length === 4 &&
+        [...values.keys()].every((key) => key === 'status_cursor')
+      ) {
+        const cursor = values.get('status_cursor');
+        return {
+          type: 'board',
+          projectId,
+          ...(cursor === undefined ? {} : { statusCursor: uuid(cursor) }),
+        };
+      }
+      if (
+        parts.length === 5 &&
+        [...values.keys()].every((key) => key === 'cursor')
+      ) {
+        const cursor = values.get('cursor');
+        if (cursor !== undefined) {
+          boardBoundary(cursor);
+        }
+        return {
+          type: 'column',
+          projectId,
+          statusId: uuid(parts[4]),
+          ...(cursor === undefined ? {} : { cursor }),
+        };
+      }
+      return { type: 'invalid' };
+    }
+    if (parts[3] !== 'issues') {
+      return { type: 'invalid' };
+    }
     if (parts.length === 4) {
       if ([...values.keys()].some((key) => key !== 'cursor')) {
         return { type: 'invalid' };
@@ -125,6 +161,12 @@ export function workRoute(path: string, search: string): WorkRoute {
 }
 
 export type WorkData =
+  | {
+      type: 'board';
+      columns: { status: ProjectStatus; page: BoardPage }[];
+      nextStatusCursor?: string;
+    }
+  | { type: 'column'; status: ProjectStatus; page: BoardPage }
   | { type: 'projects'; page: IssuePage<AccessibleProject> }
   | { type: 'issues'; page: IssuePage<IssueSummary> }
   | {
@@ -139,6 +181,51 @@ export async function loadWork(
   route: WorkRoute,
   signal: AbortSignal,
 ): Promise<WorkData> {
+  if (route.type === 'board') {
+    const statuses = await getStatusPage(
+      route.projectId,
+      { page_size: 4, cursor: route.statusCursor },
+      signal,
+    );
+    const visible = statuses.data.filter((status) => status.board_visible);
+    visible.sort((a, b) =>
+      BigInt(a.position) < BigInt(b.position)
+        ? -1
+        : BigInt(a.position) > BigInt(b.position)
+          ? 1
+          : a.id.localeCompare(b.id),
+    );
+    const columns = await Promise.all(
+      visible.map(async (status) => ({
+        status,
+        page: await getBoardPage(
+          route.projectId,
+          status.id,
+          { page_size: 20 },
+          signal,
+        ),
+      })),
+    );
+    return {
+      type: 'board',
+      columns,
+      ...(statuses.next_cursor === undefined
+        ? {}
+        : { nextStatusCursor: statuses.next_cursor }),
+    };
+  }
+  if (route.type === 'column') {
+    const [status, page] = await Promise.all([
+      getStatusRecord(route.projectId, route.statusId, signal),
+      getBoardPage(
+        route.projectId,
+        route.statusId,
+        { cursor: route.cursor, page_size: 20 },
+        signal,
+      ),
+    ]);
+    return { type: 'column', status, page };
+  }
   if (route.type === 'projects') {
     return {
       type: 'projects',

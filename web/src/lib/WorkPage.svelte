@@ -1,6 +1,7 @@
 <script lang="ts">
   import { flushSync, onMount, tick } from 'svelte';
   import { SvelteURLSearchParams } from 'svelte/reactivity';
+  import BoardColumn from './BoardColumn.svelte';
   import { WorkScreen, workRoute, type WorkState } from './issue-navigation';
 
   const route = workRoute(
@@ -108,18 +109,26 @@
 
 <main class="work">
   <h1 tabindex="-1" bind:this={heading}>
-    {route.type === 'projects'
-      ? 'Meus projetos'
-      : route.type === 'detail'
-        ? 'Leitura da issue'
-        : 'Issues do projeto'}
+    {route.type === 'board' || route.type === 'column'
+      ? 'Board do projeto'
+      : route.type === 'projects'
+        ? 'Meus projetos'
+        : route.type === 'detail'
+          ? 'Leitura da issue'
+          : 'Issues do projeto'}
   </h1>
   <p class="intro">
-    Consulta em desenvolvimento. Edição, board e busca ainda não estão
-    disponíveis.
+    Leitura em desenvolvimento. Edição, filtros e atualização ao vivo ainda não
+    estão disponíveis.
   </p>
   <nav class="work-links" aria-label="Navegação do trabalho">
     <a href="/projects">Meus projetos</a>
+    {#if 'projectId' in route}
+      <a href={`/projects/${route.projectId}/board`}>Ver board</a>
+      {#if route.type === 'board' || route.type === 'column'}<a
+          href={listLink(route.projectId)}>Lista de issues</a
+        >{/if}
+    {/if}
     {#if route.type === 'detail'}<a href={listLink(route.projectId, route.from)}
         >Voltar à lista de issues</a
       >{/if}
@@ -211,6 +220,30 @@
             href={listLink(route.projectId, data.page.next_cursor)}
             >Próxima página de issues</a
           >{/if}
+      {:else if data.type === 'board'}
+        <p class="hint">
+          Colunas desta página do catálogo, ordenadas por posição. Apenas
+          leitura; cards não podem ser movidos.
+        </p>
+        {#if data.columns.length === 0}<p role="status">
+            Nenhuma coluna visível nesta página do catálogo.
+          </p>{/if}
+        <div class="board-grid">
+          {#each data.columns as column (column.status.id)}<BoardColumn
+              status={column.status}
+              page={column.page}
+            />{/each}
+        </div>
+        {#if data.nextStatusCursor !== undefined && route.type === 'board'}<a
+            class="next-page"
+            href={`/projects/${route.projectId}/board?status_cursor=${data.nextStatusCursor}`}
+            >Próxima página de colunas</a
+          >{/if}
+      {:else if data.type === 'column'}
+        <p class="hint">
+          Página de uma coluna. A contagem inclui cards ainda não carregados.
+        </p>
+        <BoardColumn status={data.status} page={data.page} />
       {:else}
         {@const issue = data.issue}
         <article data-issue-detail={issue.id}>
@@ -290,6 +323,11 @@
 </main>
 
 <style>
+  .board-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 210px), 1fr));
+    gap: 24px;
+  }
   .work {
     max-width: 800px;
     margin-top: 48px;
