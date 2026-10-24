@@ -6,7 +6,7 @@ use axum::{
     response::Response,
     routing::get,
 };
-use chrono::Utc;
+use chrono::{NaiveDate, Utc};
 use serde::Deserialize;
 
 use super::{
@@ -27,6 +27,7 @@ pub(super) fn routes() -> Router<Arc<BrowserState>> {
 struct SearchQuery {
     q: Option<String>,
     priority: Option<String>,
+    due_date: Option<String>,
     cursor: Option<String>,
     page_size: Option<u16>,
 }
@@ -50,7 +51,8 @@ async fn search(
         .map_err(|_| malformed_query())?
         .0;
     let priority = query.priority.as_deref().map(parse_priority).transpose()?;
-    if query.q.is_none() && priority.is_none() {
+    let due_date = query.due_date.as_deref().map(parse_due_date).transpose()?;
+    if query.q.is_none() && priority.is_none() && due_date.is_none() {
         return Err(ApiError::invalid_field(
             "q",
             "Provide a search query or at least one structured filter",
@@ -70,6 +72,7 @@ async fn search(
             IssueSearchOptions {
                 query: query.q.as_deref(),
                 priority,
+                due_date,
                 after: cursor.as_ref(),
                 page_size: query.page_size.unwrap_or(50),
             },
@@ -100,4 +103,16 @@ fn parse_priority(value: &str) -> Result<IssuePriority, ApiError> {
             "Use none, low, medium, high, or urgent",
         )),
     }
+}
+
+fn parse_due_date(value: &str) -> Result<NaiveDate, ApiError> {
+    if value.len() != 10 {
+        return Err(ApiError::invalid_field(
+            "due_date",
+            "Use a valid calendar date in YYYY-MM-DD format",
+        ));
+    }
+    crate::issues::deadlines::parse_date(value).ok_or_else(|| {
+        ApiError::invalid_field("due_date", "Use a valid calendar date in YYYY-MM-DD format")
+    })
 }

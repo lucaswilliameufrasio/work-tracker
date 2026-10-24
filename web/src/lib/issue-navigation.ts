@@ -14,6 +14,7 @@ import {
   parseIssueHistoryPage,
   IssueRequestError,
   validateIssueSearchCursor,
+  validateIssueSearchDueDate,
   validateIssueSearchPriority,
   validateIssueSearchText,
   type IssueDetail,
@@ -46,6 +47,7 @@ export type WorkRoute =
       projectId: string;
       query?: string;
       priority?: IssuePriority;
+      dueDate?: string;
       cursor?: string;
     }
   | {
@@ -56,6 +58,7 @@ export type WorkRoute =
       from?: string;
       fromSearchQuery?: string;
       fromSearchPriority?: IssuePriority;
+      fromSearchDueDate?: string;
       fromSearchCursor?: string;
     }
   | { type: 'invalid' };
@@ -142,7 +145,7 @@ export function workRoute(path: string, search: string): WorkRoute {
     if (parts.length === 4) {
       if (
         [...values.keys()].some(
-          (key) => !['cursor', 'q', 'priority'].includes(key),
+          (key) => !['cursor', 'q', 'priority', 'due_date'].includes(key),
         )
       ) {
         return { type: 'invalid' };
@@ -150,11 +153,20 @@ export function workRoute(path: string, search: string): WorkRoute {
       const cursor = values.get('cursor');
       const search = values.get('q');
       const searchPriority = values.get('priority');
+      const searchDueDate = values.get('due_date');
       const parsedPriority =
         searchPriority === undefined
           ? undefined
           : validateIssueSearchPriority(searchPriority);
-      if (search !== undefined || searchPriority !== undefined) {
+      const parsedDueDate =
+        searchDueDate === undefined
+          ? undefined
+          : validateIssueSearchDueDate(searchDueDate);
+      if (
+        search !== undefined ||
+        searchPriority !== undefined ||
+        searchDueDate !== undefined
+      ) {
         if (search !== undefined) {
           validateIssueSearchText(search);
         }
@@ -166,6 +178,7 @@ export function workRoute(path: string, search: string): WorkRoute {
           projectId,
           ...(search === undefined ? {} : { query: search }),
           ...(parsedPriority === undefined ? {} : { priority: parsedPriority }),
+          ...(parsedDueDate === undefined ? {} : { dueDate: parsedDueDate }),
           ...(cursor === undefined ? {} : { cursor }),
         };
       }
@@ -192,6 +205,7 @@ export function workRoute(path: string, search: string): WorkRoute {
             'from_q',
             'from_cursor',
             'from_priority',
+            'from_due_date',
           ].includes(key),
       )
     ) {
@@ -213,9 +227,12 @@ export function workRoute(path: string, search: string): WorkRoute {
     const from = values.get('from');
     const fromSearchQuery = values.get('from_q');
     const fromSearchPriority = values.get('from_priority');
+    const fromSearchDueDate = values.get('from_due_date');
     const fromSearchCursor = values.get('from_cursor');
     const hasSearchContext =
-      fromSearchQuery !== undefined || fromSearchPriority !== undefined;
+      fromSearchQuery !== undefined ||
+      fromSearchPriority !== undefined ||
+      fromSearchDueDate !== undefined;
     if (
       (from !== undefined && hasSearchContext) ||
       (fromSearchCursor !== undefined && !hasSearchContext)
@@ -227,6 +244,9 @@ export function workRoute(path: string, search: string): WorkRoute {
     }
     if (fromSearchPriority !== undefined) {
       validateIssueSearchPriority(fromSearchPriority);
+    }
+    if (fromSearchDueDate !== undefined) {
+      validateIssueSearchDueDate(fromSearchDueDate);
     }
     if (fromSearchCursor !== undefined) {
       validateIssueSearchCursor(fromSearchCursor);
@@ -243,6 +263,9 @@ export function workRoute(path: string, search: string): WorkRoute {
         : {
             fromSearchPriority: validateIssueSearchPriority(fromSearchPriority),
           }),
+      ...(fromSearchDueDate === undefined
+        ? {}
+        : { fromSearchDueDate: validateIssueSearchDueDate(fromSearchDueDate) }),
       ...(fromSearchCursor === undefined ? {} : { fromSearchCursor }),
     };
   } catch {
@@ -267,6 +290,7 @@ export type WorkData =
       projectId: string;
       query?: string;
       priority?: IssuePriority;
+      dueDate?: string;
       page: IssuePage<IssueSummary>;
     }
   | {
@@ -354,8 +378,10 @@ export async function loadWork(
         { cursor: route.cursor, page_size: 20 },
         signal,
         route.priority,
+        route.dueDate,
       ),
       ...(route.priority === undefined ? {} : { priority: route.priority }),
+      ...(route.dueDate === undefined ? {} : { dueDate: route.dueDate }),
     };
   }
   if (route.type === 'invalid') {

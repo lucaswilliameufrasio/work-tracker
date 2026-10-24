@@ -1,5 +1,5 @@
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
 use sqlx::{QueryBuilder, Sqlite, Transaction};
 
 use super::{
@@ -60,6 +60,7 @@ impl IssueSearchCursor {
 pub struct IssueSearchOptions<'a> {
     pub query: Option<&'a str>,
     pub priority: Option<IssuePriority>,
+    pub due_date: Option<NaiveDate>,
     pub after: Option<&'a IssueSearchCursor>,
     pub page_size: u16,
 }
@@ -85,6 +86,7 @@ impl IssueStore {
             IssueSearchOptions {
                 query: Some(query),
                 priority: None,
+                due_date: None,
                 after,
                 page_size,
             },
@@ -121,7 +123,7 @@ impl IssueStore {
         if !(1..=MAX_PAGE_SIZE).contains(&options.page_size) {
             return Err(IssueReadError::InvalidPageSize);
         }
-        let terms = search_terms(options.query, options.priority)?;
+        let terms = search_terms(options.query, options.priority, options.due_date)?;
         authorize_project_read(transaction, actor_user_id, project_id).await?;
         let local_today = organization_local_today(transaction, now).await?;
 
@@ -185,6 +187,11 @@ impl IssueStore {
                 .push(" AND issues.priority = ")
                 .push_bind(priority_name(priority));
         }
+        if let Some(due_date) = options.due_date {
+            statement
+                .push(" AND issues.due_date = ")
+                .push_bind(due_date.format("%Y-%m-%d").to_string());
+        }
         statement
             .push(" AND (issues.issue_number, issues.id) > (")
             .push_bind(options.after.map(|cursor| cursor.issue_number).unwrap_or(0))
@@ -219,9 +226,10 @@ impl IssueStore {
 fn search_terms(
     query: Option<&str>,
     priority: Option<IssuePriority>,
+    due_date: Option<NaiveDate>,
 ) -> Result<Option<Vec<&str>>, IssueReadError> {
     let Some(query) = query else {
-        if priority.is_none() {
+        if priority.is_none() && due_date.is_none() {
             return Err(IssueReadError::InvalidSearchQuery);
         }
         return Ok(None);

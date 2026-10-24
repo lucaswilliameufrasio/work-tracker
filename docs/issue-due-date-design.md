@@ -23,7 +23,7 @@ The existing issue detail presents a labeled native date input and explicit save
 
 ## Migration and boundaries
 
-Migration 0036 extends validated structured history to date-or-null values and adds an immutable due-date receipt table while preserving existing events, outbox envelopes, and priority receipts. The existing outbox envelope remains content-free. This slice does not add an outbox consumer, overdue automation, assignment editing, timezone settings UI, search/filtering, or recurrence scheduling.
+Migration 0036 extends validated structured history to date-or-null values and adds an immutable due-date receipt table while preserving existing events, outbox envelopes, and priority receipts. The existing outbox envelope remains content-free. Slice255 adds exact-date matching in project issue search; it does not add date ranges, overdue/missing-date filters, an outbox consumer, overdue automation, assignment editing, timezone settings UI, or recurrence scheduling.
 
 ## Verification plan
 

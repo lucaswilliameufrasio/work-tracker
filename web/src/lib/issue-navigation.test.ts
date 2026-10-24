@@ -45,6 +45,11 @@ it('strictly routes project, issue, detail, history and return boundaries withou
     projectId: id,
     priority: 'urgent',
   });
+  expect(workRoute(`/projects/${id}/issues`, '?due_date=2026-10-30')).toEqual({
+    type: 'search',
+    projectId: id,
+    dueDate: '2026-10-30',
+  });
   expect(
     workRoute(
       `/projects/${id}/issues/1`,
@@ -55,6 +60,18 @@ it('strictly routes project, issue, detail, history and return boundaries withou
     projectId: id,
     number: '1',
     fromSearchQuery: 'literal terms',
+    fromSearchCursor: searchCursor,
+  });
+  expect(
+    workRoute(
+      `/projects/${id}/issues/1`,
+      `?from_due_date=2026-10-30&from_cursor=${searchCursor}`,
+    ),
+  ).toEqual({
+    type: 'detail',
+    projectId: id,
+    number: '1',
+    fromSearchDueDate: '2026-10-30',
     fromSearchCursor: searchCursor,
   });
   expect(
@@ -91,6 +108,9 @@ it('strictly routes project, issue, detail, history and return boundaries withou
     [`/projects/${id}/issues`, '?q=%20'],
     [`/projects/${id}/issues`, '?q=one%0Atwo'],
     [`/projects/${id}/issues`, '?priority=invalid'],
+    [`/projects/${id}/issues`, '?due_date='],
+    [`/projects/${id}/issues`, '?due_date=2026-02-30'],
+    [`/projects/${id}/issues/1`, '?from_due_date=2026-02-30'],
     [`/projects/${id}/issues`, '?q=one&cursor=bad'],
     [`/projects/${id}/issues/1`, '?history_cursor=bad'],
     [`/projects/${id}/issues/1`, '?from_cursor=bad'],
@@ -142,6 +162,28 @@ it('loads a priority-only project search without adding an empty text query', as
   expect(fetcher).toHaveBeenCalledTimes(1);
   expect(String(fetcher.mock.calls[0]?.[0])).toContain(
     `/api/v1/projects/${id}/issues/search?priority=urgent&page_size=20`,
+  );
+});
+
+it('loads an exact due-date-only project search without adding empty criteria', async () => {
+  const fetcher = vi
+    .fn<typeof fetch>()
+    .mockResolvedValue(Response.json({ data: [], has_more: false }));
+  vi.stubGlobal('fetch', fetcher);
+  await expect(
+    loadWork(
+      { type: 'search', projectId: id, dueDate: '2026-10-30' },
+      new AbortController().signal,
+    ),
+  ).resolves.toEqual({
+    type: 'search',
+    projectId: id,
+    dueDate: '2026-10-30',
+    page: { data: [], has_more: false },
+  });
+  expect(fetcher).toHaveBeenCalledTimes(1);
+  expect(String(fetcher.mock.calls[0]?.[0])).toContain(
+    `/api/v1/projects/${id}/issues/search?due_date=2026-10-30&page_size=20`,
   );
 });
 

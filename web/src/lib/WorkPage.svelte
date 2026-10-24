@@ -30,7 +30,11 @@
     type IssueDueDateInput,
     type IssueDueDateTarget,
   } from './issue-due-date.ts';
-  import { validateIssueSearchText, type IssuePriority } from './issues.ts';
+  import {
+    validateIssueSearchDueDate,
+    validateIssueSearchText,
+    type IssuePriority,
+  } from './issues.ts';
 
   const route = workRoute(
     globalThis.location.pathname,
@@ -94,6 +98,9 @@
   let searchDraft = $state(route.type === 'search' ? (route.query ?? '') : '');
   let selectedSearchPriority = $state<IssuePriority | ''>(
     route.type === 'search' ? (route.priority ?? '') : '',
+  );
+  let selectedSearchDueDate = $state(
+    route.type === 'search' ? (route.dueDate ?? '') : '',
   );
   let selectedPriority = $state<IssuePriority>('none');
   let selectedDueDate = $state('');
@@ -162,6 +169,7 @@
     project: string,
     query: string | undefined,
     priority: IssuePriority | undefined,
+    dueDate: string | undefined,
     cursor?: string,
   ): string {
     const params = new SvelteURLSearchParams();
@@ -171,6 +179,10 @@
     }
     if (priority !== undefined) {
       params.set('priority', priority);
+    }
+    if (dueDate !== undefined) {
+      validateIssueSearchDueDate(dueDate);
+      params.set('due_date', dueDate);
     }
     if (cursor !== undefined) {
       params.set('cursor', cursor);
@@ -196,14 +208,17 @@
         ? {
             query: route.query,
             priority: route.priority,
+            dueDate: route.dueDate,
             cursor: route.cursor,
           }
         : route.type === 'detail' &&
             (route.fromSearchQuery !== undefined ||
-              route.fromSearchPriority !== undefined)
+              route.fromSearchPriority !== undefined ||
+              route.fromSearchDueDate !== undefined)
           ? {
               query: route.fromSearchQuery,
               priority: route.fromSearchPriority,
+              dueDate: route.fromSearchDueDate,
               cursor: route.fromSearchCursor,
             }
           : undefined;
@@ -219,6 +234,9 @@
       }
       if (fromSearch.priority !== undefined) {
         query.set('from_priority', fromSearch.priority);
+      }
+      if (fromSearch.dueDate !== undefined) {
+        query.set('from_due_date', fromSearch.dueDate);
       }
       if (fromSearch.cursor !== undefined) {
         query.set('from_cursor', fromSearch.cursor);
@@ -635,8 +653,9 @@
   </h1>
   <p class="intro">
     Leitura em desenvolvimento. Busque por termos no título/descrição ou por
-    chave exata; a prioridade também pode ser filtrada. Outros filtros
-    estruturados e atualização ao vivo ainda não estão disponíveis.
+    chave exata; prioridade e data de prazo exata também podem ser filtradas.
+    Datas não representam intervalos, atrasos ou issues sem prazo. Outros
+    filtros estruturados e atualização ao vivo ainda não estão disponíveis.
   </p>
   <nav class="work-links" aria-label="Navegação do trabalho">
     <a href="/projects">Meus projetos</a>
@@ -649,16 +668,19 @@
     {/if}
     {#if route.type === 'detail'}<a
         href={route.fromSearchQuery === undefined &&
-        route.fromSearchPriority === undefined
+        route.fromSearchPriority === undefined &&
+        route.fromSearchDueDate === undefined
           ? listLink(route.projectId, route.from)
           : searchLink(
               route.projectId,
               route.fromSearchQuery,
               route.fromSearchPriority,
+              route.fromSearchDueDate,
               route.fromSearchCursor,
             )}
         >{route.fromSearchQuery === undefined &&
-        route.fromSearchPriority === undefined
+        route.fromSearchPriority === undefined &&
+        route.fromSearchDueDate === undefined
           ? 'Voltar à lista de issues'
           : 'Voltar aos resultados da busca'}</a
       >{/if}
@@ -757,14 +779,23 @@
             <option value="high">Alta</option>
             <option value="urgent">Urgente</option>
           </select>
+          <label for="issue-search-due-date"
+            >Filtrar por data de prazo exata</label
+          >
+          <input
+            id="issue-search-due-date"
+            type="date"
+            name={selectedSearchDueDate === '' ? undefined : 'due_date'}
+            bind:value={selectedSearchDueDate}
+          />
           {#if data.type === 'search'}<a href={listLink(data.projectId)}
-              >Limpar busca e filtro</a
+              >Limpar busca e filtros</a
             >{/if}
         </form>
         {#if data.page.data.length === 0}
           <p role="status">
             {data.type === 'search'
-              ? 'Nenhuma issue corresponde aos critérios. Ajuste o texto ou a prioridade.'
+              ? 'Nenhuma issue corresponde aos critérios. Ajuste o texto ou os filtros.'
               : 'Nenhuma issue fora da lixeira nesta página.'}
           </p>
         {/if}
@@ -793,6 +824,7 @@
                 data.projectId,
                 data.query,
                 data.priority,
+                data.dueDate,
                 data.page.next_cursor,
               )}>Próxima página de resultados</a
             >{:else if route.type === 'issues'}<a

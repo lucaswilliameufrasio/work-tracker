@@ -129,6 +129,10 @@ export function validateIssueSearchPriority(value: unknown): IssuePriority {
   return priority(value);
 }
 
+export function validateIssueSearchDueDate(value: unknown): string {
+  return date(value);
+}
+
 function text(value: unknown): string {
   if (typeof value !== 'string') {
     return invalid();
@@ -358,6 +362,7 @@ export function parseIssueSearchPage(
   pageSize: number,
   after?: string,
   priorityFilter?: IssuePriority,
+  dueDateFilter?: string,
 ): IssuePage<IssueSummary> {
   uuid(projectId);
   if (query !== undefined) {
@@ -366,7 +371,14 @@ export function parseIssueSearchPage(
   if (priorityFilter !== undefined) {
     priority(priorityFilter);
   }
-  if (query === undefined && priorityFilter === undefined) {
+  if (dueDateFilter !== undefined) {
+    date(dueDateFilter);
+  }
+  if (
+    query === undefined &&
+    priorityFilter === undefined &&
+    dueDateFilter === undefined
+  ) {
     return invalid();
   }
   const item = page(value, pageSize);
@@ -379,6 +391,9 @@ export function parseIssueSearchPage(
   for (const raw of item.data) {
     const issue = summary(fields(raw, summaryFields), projectId);
     if (priorityFilter !== undefined && issue.priority !== priorityFilter) {
+      return invalid();
+    }
+    if (dueDateFilter !== undefined && issue.due_date !== dueDateFilter) {
       return invalid();
     }
     const boundary = {
@@ -562,12 +577,19 @@ export async function getIssueSearchPage(
   options: PageOptions,
   signal: AbortSignal,
   priorityFilter?: IssuePriority,
+  dueDateFilter?: string,
 ): Promise<IssuePage<IssueSummary>> {
   uuid(projectId);
   const search = queryText === undefined ? undefined : searchText(queryText);
   const selectedPriority =
     priorityFilter === undefined ? undefined : priority(priorityFilter);
-  if (search === undefined && selectedPriority === undefined) {
+  const selectedDueDate =
+    dueDateFilter === undefined ? undefined : date(dueDateFilter);
+  if (
+    search === undefined &&
+    selectedPriority === undefined &&
+    selectedDueDate === undefined
+  ) {
     return invalid();
   }
   const pageSize = size(options.page_size);
@@ -577,6 +599,9 @@ export async function getIssueSearchPage(
   }
   if (selectedPriority !== undefined) {
     encoded.set('priority', selectedPriority);
+  }
+  if (selectedDueDate !== undefined) {
+    encoded.set('due_date', selectedDueDate);
   }
   encoded.set('page_size', String(pageSize));
   if (options.cursor !== undefined) {
@@ -591,6 +616,7 @@ export async function getIssueSearchPage(
     pageSize,
     options.cursor,
     selectedPriority,
+    selectedDueDate,
   );
 }
 

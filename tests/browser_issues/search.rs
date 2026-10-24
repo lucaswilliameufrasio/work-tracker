@@ -228,6 +228,96 @@ async fn project_search_filters_priority_alone_and_in_combination_with_text_or_k
 }
 
 #[tokio::test]
+async fn project_search_filters_an_exact_due_date_and_preserves_keyset_pages() {
+    let f = Fixture::new().await;
+    let first = f.create("Shared urgent deadline").await;
+    let second = f.create("Other urgent deadline").await;
+    let later = f.create("Shared later deadline").await;
+    let no_date = f.create("Shared without deadline").await;
+    let trashed = f.create("Trashed deadline").await;
+    for (id, due_date, priority) in [
+        (&first, "2026-10-30", "urgent"),
+        (&second, "2026-10-30", "urgent"),
+        (&later, "2026-10-31", "urgent"),
+        (&trashed, "2026-10-30", "urgent"),
+    ] {
+        sqlx::query("UPDATE issues SET due_date = ?, priority = ? WHERE id = ?")
+            .bind(due_date)
+            .bind(priority)
+            .bind(id)
+            .execute(f.db.pool())
+            .await
+            .unwrap();
+    }
+    sqlx::query("UPDATE issues SET trashed_at = ? WHERE id = ?")
+        .bind(Utc::now().to_rfc3339())
+        .bind(&trashed)
+        .execute(f.db.pool())
+        .await
+        .unwrap();
+
+    let path = format!("/api/v1/projects/{}/issues/search", f.project);
+    let first_page = json(
+        f.get(
+            &format!("{path}?due_date=2026-10-30&page_size=1"),
+            Some(&f.token.token),
+        )
+        .await,
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(first_page["data"][0]["id"], first);
+    assert_eq!(first_page["data"][0]["due_date"], "2026-10-30");
+    assert_eq!(first_page["has_more"], true);
+    let cursor = first_page["next_cursor"].as_str().unwrap();
+    let second_page = json(
+        f.get(
+            &format!("{path}?due_date=2026-10-30&cursor={cursor}"),
+            Some(&f.token.token),
+        )
+        .await,
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(second_page["data"][0]["id"], second);
+    assert_eq!(second_page["has_more"], false);
+    assert_ne!(first_page["data"][0]["id"], no_date.as_str());
+    assert_ne!(second_page["data"][0]["id"], no_date.as_str());
+
+    let combined = json(
+        f.get(
+            &format!("{path}?q=Shared&priority=urgent&due_date=2026-10-30"),
+            Some(&f.token.token),
+        )
+        .await,
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(combined["data"].as_array().unwrap().len(), 1);
+    assert_eq!(combined["data"][0]["id"], first);
+    let exact_key = json(
+        f.get(
+            &format!("{path}?q=DEV-3&priority=urgent&due_date=2026-10-31"),
+            Some(&f.token.token),
+        )
+        .await,
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(exact_key["data"][0]["id"], later);
+    let mismatch = json(
+        f.get(
+            &format!("{path}?q=DEV-3&priority=urgent&due_date=2026-10-30"),
+            Some(&f.token.token),
+        )
+        .await,
+        StatusCode::OK,
+    )
+    .await;
+    assert!(mismatch["data"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn project_search_revalidates_session_and_membership_and_hides_private_existence() {
     let f = Fixture::new().await;
     f.create("Private searchable issue").await;
@@ -311,6 +401,14 @@ async fn project_search_rejects_invalid_queries_cursors_and_unsupported_methods(
         ("q=%20%20", StatusCode::UNPROCESSABLE_ENTITY),
         ("q=one%0Atwo", StatusCode::UNPROCESSABLE_ENTITY),
         ("priority=unknown", StatusCode::UNPROCESSABLE_ENTITY),
+        ("due_date=", StatusCode::UNPROCESSABLE_ENTITY),
+        ("due_date=2026-02-30", StatusCode::UNPROCESSABLE_ENTITY),
+        ("due_date=2026-1-01", StatusCode::UNPROCESSABLE_ENTITY),
+        ("q=&due_date=2026-10-30", StatusCode::UNPROCESSABLE_ENTITY),
+        (
+            "due_date=2026-10-30&due_date=2026-10-31",
+            StatusCode::BAD_REQUEST,
+        ),
         (
             "q=one&priority=high&priority=urgent",
             StatusCode::BAD_REQUEST,

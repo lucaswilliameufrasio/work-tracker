@@ -171,6 +171,59 @@ describe('issue DTO boundary', () => {
     expect(fetcher).toHaveBeenCalledTimes(1);
   });
 
+  it('supports an exact due-date-only search and rejects mismatched results or dates', async () => {
+    const dueDateIssue = { ...summary, due_date: '2026-10-30' };
+    expect(
+      parseIssueSearchPage(
+        { data: [dueDateIssue], has_more: false },
+        id,
+        undefined,
+        20,
+        undefined,
+        undefined,
+        '2026-10-30',
+      ),
+    ).toEqual({ data: [dueDateIssue], has_more: false });
+    expect(() =>
+      parseIssueSearchPage(
+        { data: [summary], has_more: false },
+        id,
+        undefined,
+        20,
+        undefined,
+        undefined,
+        '2026-10-30',
+      ),
+    ).toThrow('Invalid issue API response');
+
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(
+        Response.json({ data: [dueDateIssue], has_more: false }),
+      );
+    vi.stubGlobal('fetch', fetcher);
+    await expect(
+      getIssueSearchPage(
+        id,
+        undefined,
+        { page_size: 20 },
+        signal(),
+        undefined,
+        '2026-10-30',
+      ),
+    ).resolves.toEqual({ data: [dueDateIssue], has_more: false });
+    expect(String(fetcher.mock.calls[0]?.[0])).toContain(
+      `/api/v1/projects/${id}/issues/search?due_date=2026-10-30&page_size=20`,
+    );
+    await expect(
+      getIssueSearchPage(id, undefined, {}, signal(), undefined, '2026-02-30'),
+    ).rejects.toThrow('Invalid issue API response');
+    await expect(
+      getIssueSearchPage(id, '', {}, signal(), undefined, '2026-10-30'),
+    ).rejects.toThrow('Invalid issue API response');
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
   it('decodes exact typed text-change events but never text snapshots or unknown kinds', () => {
     for (const kind of [
       'issue.title_updated',

@@ -171,6 +171,12 @@ fn generated_contract_has_unique_operations_resolved_refs_and_only_implemented_r
         priority_parameter["schema"]["enum"],
         serde_json::json!(["none", "low", "medium", "high", "urgent"])
     );
+    let due_date_parameter = search_parameters
+        .iter()
+        .find(|parameter| parameter["name"] == "due_date")
+        .unwrap();
+    assert_eq!(due_date_parameter["required"], false);
+    assert_eq!(due_date_parameter["schema"]["format"], "date");
     assert!(
         search["description"]
             .as_str()

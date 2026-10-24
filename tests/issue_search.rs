@@ -1,4 +1,4 @@
-use chrono::Utc;
+use chrono::{NaiveDate, Utc};
 use puxiri::{
     db::Database,
     issues::{
@@ -74,6 +74,23 @@ fn search_options<'a>(
     IssueSearchOptions {
         query,
         priority,
+        due_date: None,
+        after,
+        page_size,
+    }
+}
+
+fn search_options_with_due_date<'a>(
+    query: Option<&'a str>,
+    priority: Option<IssuePriority>,
+    due_date: NaiveDate,
+    after: Option<&'a IssueSearchCursor>,
+    page_size: u16,
+) -> IssueSearchOptions<'a> {
+    IssueSearchOptions {
+        query,
+        priority,
+        due_date: Some(due_date),
         after,
         page_size,
     }
@@ -488,6 +505,158 @@ async fn issue_search_filters_priority_with_or_without_text_and_uses_a_bounded_i
         .join(" ");
     assert!(
         plan_details.contains("issues_project_priority_search_idx"),
+        "unexpected query plan: {plan_details}"
+    );
+}
+
+#[tokio::test]
+async fn issue_search_filters_exact_due_date_with_text_priority_pagination_and_index() {
+    let directory = TempDir::new().unwrap();
+    let database = Database::open(directory.path()).await.unwrap();
+    sqlx::query("INSERT INTO organizations (id, name, locale, timezone, created_at, updated_at) VALUES (1, 'Search tests', 'en', 'UTC', 'now', 'now')")
+        .execute(database.pool())
+        .await
+        .unwrap();
+    let owner = Uuid::now_v7().to_string();
+    sqlx::query("INSERT INTO users (id, display_name, state, created_at, updated_at) VALUES (?, 'Search owner', 'active', 'now', 'now')")
+        .bind(&owner)
+        .execute(database.pool())
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO organization_members (organization_id, user_id, role, created_at) VALUES (1, ?, 'owner', 'now')")
+        .bind(&owner)
+        .execute(database.pool())
+        .await
+        .unwrap();
+    let project = ProjectStore::new(database.pool().clone())
+        .create(&owner, "FIND", "Search", None, Utc::now())
+        .await
+        .unwrap();
+    let store = IssueStore::new(database.pool().clone());
+    let mut issue_ids = Vec::new();
+    for title in [
+        "Shared urgent due",
+        "Shared high later",
+        "Other urgent due",
+        "Shared without due date",
+    ] {
+        issue_ids.push(
+            store
+                .create(
+                    &owner,
+                    &project.id,
+                    NewIssue {
+                        title,
+                        description: None,
+                        assignee_user_id: None,
+                    },
+                    Utc::now(),
+                )
+                .await
+                .unwrap()
+                .id,
+        );
+    }
+    let due_date = NaiveDate::from_ymd_opt(2026, 10, 30).unwrap();
+    for (issue_id, date, priority) in [
+        (&issue_ids[0], "2026-10-30", "urgent"),
+        (&issue_ids[1], "2026-10-31", "high"),
+        (&issue_ids[2], "2026-10-30", "urgent"),
+    ] {
+        sqlx::query("UPDATE issues SET due_date = ?, priority = ? WHERE id = ?")
+            .bind(date)
+            .bind(priority)
+            .bind(issue_id)
+            .execute(database.pool())
+            .await
+            .unwrap();
+    }
+
+    let first = store
+        .search_project_issues_with_options(
+            &owner,
+            &project.id,
+            search_options_with_due_date(None, None, due_date, None, 1),
+        )
+        .await
+        .unwrap();
+    assert_eq!(first.items[0].id, issue_ids[0]);
+    assert_eq!(first.items[0].due_date, Some(due_date));
+    let second = store
+        .search_project_issues_with_options(
+            &owner,
+            &project.id,
+            search_options_with_due_date(None, None, due_date, first.next_cursor.as_ref(), 10),
+        )
+        .await
+        .unwrap();
+    assert_eq!(second.items.len(), 1);
+    assert_eq!(second.items[0].id, issue_ids[2]);
+    assert!(second.next_cursor.is_none());
+
+    let combined = store
+        .search_project_issues_with_options(
+            &owner,
+            &project.id,
+            search_options_with_due_date(
+                Some("Shared"),
+                Some(IssuePriority::Urgent),
+                due_date,
+                None,
+                10,
+            ),
+        )
+        .await
+        .unwrap();
+    assert_eq!(combined.items.len(), 1);
+    assert_eq!(combined.items[0].id, issue_ids[0]);
+    let key_mismatch = store
+        .search_project_issues_with_options(
+            &owner,
+            &project.id,
+            search_options_with_due_date(
+                Some("FIND-2"),
+                Some(IssuePriority::High),
+                due_date,
+                None,
+                10,
+            ),
+        )
+        .await
+        .unwrap();
+    assert!(key_mismatch.items.is_empty());
+    assert!(matches!(
+        store
+            .search_project_issues_with_options(
+                &owner,
+                &project.id,
+                search_options_with_due_date(Some("  "), None, due_date, None, 10,),
+            )
+            .await,
+        Err(IssueReadError::InvalidSearchQuery)
+    ));
+
+    let plan = sqlx::query(
+        "EXPLAIN QUERY PLAN SELECT id FROM issues \
+         WHERE project_id = ? AND due_date = ? AND trashed_at IS NULL \
+           AND (issue_number, id) > (?, ?) \
+         ORDER BY issue_number ASC, id ASC LIMIT ?",
+    )
+    .bind(&project.id)
+    .bind("2026-10-30")
+    .bind(0_i64)
+    .bind("")
+    .bind(51_i64)
+    .fetch_all(database.pool())
+    .await
+    .unwrap();
+    let plan_details = plan
+        .iter()
+        .map(|row| row.get::<String, _>("detail"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        plan_details.contains("issues_project_due_date_search_idx"),
         "unexpected query plan: {plan_details}"
     );
 }
