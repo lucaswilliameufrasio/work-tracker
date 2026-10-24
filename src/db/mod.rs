@@ -57,6 +57,12 @@ impl Database {
             pool.close().await;
             return Err(error.into());
         }
+        if let Err(error) =
+            crate::jobs::JobStore::recover_abandoned_on_startup(&pool, chrono::Utc::now()).await
+        {
+            pool.close().await;
+            return Err(error.into());
+        }
         Ok(Self {
             pool,
             _directory_lock: directory_lock,

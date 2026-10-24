@@ -7,6 +7,7 @@ pub mod db;
 pub mod http;
 pub mod invitations;
 pub mod issues;
+pub mod jobs;
 pub(crate) mod organization_timezone;
 pub mod organizations;
 pub mod projects;

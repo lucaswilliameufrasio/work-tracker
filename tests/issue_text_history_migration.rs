@@ -422,6 +422,34 @@ async fn migration_preserves_existing_receipts_and_envelopes_and_supports_repeat
             .unwrap(),
         0
     );
+    let mut transaction = pool.begin().await.unwrap();
+    sqlx::raw_sql(include_str!("../migrations/0038_durable_jobs.sql"))
+        .execute(&mut *transaction)
+        .await
+        .unwrap();
+    transaction.commit().await.unwrap();
+    assert_eq!(
+        structured_events_before_assignee,
+        sqlx::query_as(structured_events_sql)
+            .fetch_all(&pool)
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        outbox_before_assignee,
+        sqlx::query_as(outbox_sql).fetch_all(&pool).await.unwrap()
+    );
+    assert_eq!(
+        receipts_before,
+        sqlx::query_as(receipts_sql).fetch_all(&pool).await.unwrap()
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM jobs")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        0
+    );
     let assignee_at =
         (Utc::now() + TimeDelta::seconds(13)).to_rfc3339_opts(chrono::SecondsFormat::Nanos, true);
     sqlx::query(
