@@ -10,8 +10,11 @@ import {
   getIssueDetail,
   getIssueHistoryPage,
   getIssuePage,
+  getIssueSearchPage,
   parseIssueHistoryPage,
   IssueRequestError,
+  validateIssueSearchCursor,
+  validateIssueSearchText,
   type IssueDetail,
   type IssueHistoryEvent,
   type IssuePage,
@@ -36,12 +39,15 @@ export type WorkRoute =
   | { type: 'column'; projectId: string; statusId: string; cursor?: string }
   | { type: 'projects'; cursor?: string; includeArchived: boolean }
   | { type: 'issues'; projectId: string; cursor?: string }
+  | { type: 'search'; projectId: string; query: string; cursor?: string }
   | {
       type: 'detail';
       projectId: string;
       number: string;
       historyCursor?: string;
       from?: string;
+      fromSearchQuery?: string;
+      fromSearchCursor?: string;
     }
   | { type: 'invalid' };
 
@@ -125,10 +131,23 @@ export function workRoute(path: string, search: string): WorkRoute {
       return { type: 'invalid' };
     }
     if (parts.length === 4) {
-      if ([...values.keys()].some((key) => key !== 'cursor')) {
+      if ([...values.keys()].some((key) => !['cursor', 'q'].includes(key))) {
         return { type: 'invalid' };
       }
       const cursor = values.get('cursor');
+      const search = values.get('q');
+      if (search !== undefined) {
+        validateIssueSearchText(search);
+        if (cursor !== undefined) {
+          validateIssueSearchCursor(cursor);
+        }
+        return {
+          type: 'search',
+          projectId,
+          query: search,
+          ...(cursor === undefined ? {} : { cursor }),
+        };
+      }
       return {
         type: 'issues',
         projectId,
@@ -139,7 +158,8 @@ export function workRoute(path: string, search: string): WorkRoute {
       parts.length !== 5 ||
       parts[4] === undefined ||
       [...values.keys()].some(
-        (key) => !['history_cursor', 'from'].includes(key),
+        (key) =>
+          !['history_cursor', 'from', 'from_q', 'from_cursor'].includes(key),
       )
     ) {
       return { type: 'invalid' };
@@ -158,12 +178,28 @@ export function workRoute(path: string, search: string): WorkRoute {
       );
     }
     const from = values.get('from');
+    const fromSearchQuery = values.get('from_q');
+    const fromSearchCursor = values.get('from_cursor');
+    if (
+      (from !== undefined && fromSearchQuery !== undefined) ||
+      (fromSearchCursor !== undefined && fromSearchQuery === undefined)
+    ) {
+      return { type: 'invalid' };
+    }
+    if (fromSearchQuery !== undefined) {
+      validateIssueSearchText(fromSearchQuery);
+      if (fromSearchCursor !== undefined) {
+        validateIssueSearchCursor(fromSearchCursor);
+      }
+    }
     return {
       type: 'detail',
       projectId,
       number: number(parts[4]),
       ...(history === undefined ? {} : { historyCursor: history }),
       ...(from === undefined ? {} : { from: number(from) }),
+      ...(fromSearchQuery === undefined ? {} : { fromSearchQuery }),
+      ...(fromSearchCursor === undefined ? {} : { fromSearchCursor }),
     };
   } catch {
     return { type: 'invalid' };
@@ -182,6 +218,12 @@ export type WorkData =
   | { type: 'column'; status: ProjectStatus; page: BoardPage }
   | { type: 'projects'; page: IssuePage<AccessibleProject> }
   | { type: 'issues'; page: IssuePage<IssueSummary> }
+  | {
+      type: 'search';
+      projectId: string;
+      query: string;
+      page: IssuePage<IssueSummary>;
+    }
   | {
       type: 'detail';
       issue: IssueDetail;
@@ -251,6 +293,19 @@ export async function loadWork(
       type: 'issues',
       page: await getIssuePage(
         route.projectId,
+        { cursor: route.cursor, page_size: 20 },
+        signal,
+      ),
+    };
+  }
+  if (route.type === 'search') {
+    return {
+      type: 'search',
+      projectId: route.projectId,
+      query: route.query,
+      page: await getIssueSearchPage(
+        route.projectId,
+        route.query,
         { cursor: route.cursor, page_size: 20 },
         signal,
       ),

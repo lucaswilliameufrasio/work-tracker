@@ -3,10 +3,12 @@ import {
   getIssueDetail,
   getIssueHistoryPage,
   getIssuePage,
+  getIssueSearchPage,
   IssueRequestError,
   parseIssueDetail,
   parseIssueHistoryPage,
   parseIssuePage,
+  parseIssueSearchPage,
 } from './issues';
 
 const id = '019a0000-0000-7000-8000-000000000001';
@@ -39,6 +41,10 @@ const cursor = btoa(`${time}/${id}`)
   .replaceAll('+', '-')
   .replaceAll('/', '_')
   .replaceAll('=', '');
+const searchCursor = btoa(`9007199254740993/${id}`)
+  .replaceAll('+', '-')
+  .replaceAll('/', '_')
+  .replaceAll('=', '');
 const signal = () => new AbortController().signal;
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -46,6 +52,83 @@ afterEach(() => {
 });
 
 describe('issue DTO boundary', () => {
+  it('validates literal search pages and their opaque issue-number/UUID keyset cursor', () => {
+    const result = parseIssueSearchPage(
+      { data: [summary], has_more: true, next_cursor: searchCursor },
+      id,
+      'two literal terms',
+      1,
+    );
+    expect(result).toEqual({
+      data: [summary],
+      has_more: true,
+      next_cursor: searchCursor,
+    });
+    expect(
+      parseIssueSearchPage(
+        { data: [], has_more: false },
+        id,
+        'two literal terms',
+        1,
+        searchCursor,
+      ),
+    ).toEqual({ data: [], has_more: false });
+    for (const raw of [
+      { data: [summary], has_more: true, next_cursor: cursor },
+      { data: [summary], has_more: true, next_cursor: `${searchCursor}=` },
+      { data: [summary], has_more: false, next_cursor: searchCursor },
+      { data: [{ ...summary, project_id: other }], has_more: false },
+      {
+        data: [{ ...summary, issue_number: '1' }],
+        has_more: true,
+        next_cursor: searchCursor,
+      },
+    ]) {
+      expect(() => parseIssueSearchPage(raw, id, 'term', 1)).toThrow();
+    }
+    for (const query of [
+      '',
+      '  ',
+      'one\ntwo',
+      'x'.repeat(513),
+      'one '.repeat(16) + 'last',
+    ]) {
+      expect(() =>
+        parseIssueSearchPage({ data: [], has_more: false }, id, query, 20),
+      ).toThrow();
+    }
+  });
+
+  it('requests search through the dedicated route and validates input before network access', async () => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(
+      Response.json({
+        data: [summary],
+        has_more: true,
+        next_cursor: searchCursor,
+      }),
+    );
+    vi.stubGlobal('fetch', fetcher);
+    await expect(
+      getIssueSearchPage(id, 'two literal terms', { page_size: 1 }, signal()),
+    ).resolves.toMatchObject({
+      data: [summary],
+      has_more: true,
+      next_cursor: searchCursor,
+    });
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(String(fetcher.mock.calls[0]?.[0])).toContain(
+      `/api/v1/projects/${id}/issues/search?q=two+literal+terms&page_size=1`,
+    );
+    fetcher.mockClear();
+    await expect(
+      getIssueSearchPage(id, 'bad\nquery', {}, signal()),
+    ).rejects.toThrow();
+    await expect(
+      getIssueSearchPage(id, 'valid', { cursor: 'A'.repeat(53) }, signal()),
+    ).rejects.toThrow('Invalid issue API response');
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
   it('decodes exact typed text-change events but never text snapshots or unknown kinds', () => {
     for (const kind of [
       'issue.title_updated',

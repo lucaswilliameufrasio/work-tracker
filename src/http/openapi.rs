@@ -48,7 +48,7 @@ pub fn browser_document() -> Value {
             "listProjectIssues",
             "IssuePage",
             issue_query,
-            "Session identity, explicit current project read access and summaries share one SQLite snapshot. Missing/inaccessible project gives generic404. Archived projects are readable; trash excluded. No descriptions/history/rank. Issue numbers and versions are decimal JSON strings preserving positive i64 precision. No issue mutation/detail/search or MCP access is provided. Cross-request pagination is not a frozen snapshot.",
+            "Session identity, explicit current project read access and summaries share one SQLite snapshot. Missing/inaccessible project gives generic404. Archived projects are readable; trash excluded. No descriptions/history/rank. Issue numbers and versions are decimal JSON strings preserving positive i64 precision. This collection route has no search/filter options; use the dedicated project search operation. Cross-request pagination is not a frozen snapshot.",
         ),
         (
             "/api/v1/admin/projects",
@@ -147,6 +147,20 @@ pub fn browser_document() -> Value {
     ] {
         paths.insert(path.into(), json!({"get": operation(id, Some(schema), query.clone(), description), "head": operation(&format!("{id}Head"), None, query, description)}));
     }
+    let issue_search_query = vec![
+        json!({"name": "project_id", "in": "path", "required": true, "schema": uuid.clone()}),
+        json!({"name": "q", "in": "query", "required": true, "schema": {"type": "string", "minLength": 1, "maxLength": 256, "x-maxUtf8Bytes": 512}, "description": "Literal Unicode-whitespace-separated terms combined with AND; FTS operators are not syntax. A project-local issue key is matched exactly, case-insensitively. Blank/control-containing queries are rejected."}),
+        json!({"name": "page_size", "in": "query", "schema": {"type": "integer", "minimum": 1, "maximum": 100, "default": 50}}),
+        json!({"name": "cursor", "in": "query", "schema": {"type": "string", "minLength": 51, "maxLength": 75, "pattern": "^[A-Za-z0-9_-]+$"}, "description": "Opaque canonical Base64URL issue_number/issue_id keyset boundary; no padding. Does not grant access or require a surviving row."}),
+    ];
+    let issue_search_description = "Search title/description with FTS5 or match a project-local issue key exactly. Session identity and explicit project membership are revalidated in the same SQLite snapshot as results. Missing/inaccessible project is generic404. Archived projects remain readable; trashed issues and comments are excluded. Summaries contain no description/snippet. Results are ordered by immutable issue_number/id and bounded with one lookahead. A cursor is not authorization and traversal is not frozen across requests. No structured filters, facets, relevance ranking or saved views are provided.";
+    paths.insert(
+        "/api/v1/projects/{project_id}/issues/search".into(),
+        json!({
+            "get": operation("searchProjectIssues", Some("IssuePage"), issue_search_query.clone(), issue_search_description),
+            "head": operation("searchProjectIssuesHead", None, issue_search_query, issue_search_description)
+        }),
+    );
     let catalog_query = vec![
         json!({"name": "project_id", "in": "path", "required": true, "schema": uuid.clone()}),
         json!({"name": "page_size", "in": "query", "schema": {"type": "integer", "minimum": 1, "maximum": 100, "default": 50}}),
@@ -631,6 +645,7 @@ fn operation(id: &str, schema: Option<&str>, parameters: Vec<Value>, description
         parameter["name"] == "page_size"
             || parameter["name"] == "session_id"
             || parameter["name"] == "issue_number"
+            || parameter["name"] == "q"
             || parameter["name"] == "record_id"
             || parameter["name"] == "project_id"
     }) {

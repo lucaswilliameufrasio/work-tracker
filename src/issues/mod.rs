@@ -15,6 +15,7 @@ const MAX_TITLE_CHARS: usize = 240;
 mod board;
 pub(crate) mod deadlines;
 mod queries;
+mod search;
 pub use board::{BoardColumnPage, BoardCursor, BoardOptions};
 pub mod creation;
 pub mod fields;
@@ -25,6 +26,7 @@ pub use queries::{
     IssueDetails, IssueEvent, IssueEventKind, IssueFieldChange, IssueHistoryCursor,
     IssueHistoryPage, IssueListPage, IssueReadError, IssueSummary,
 };
+pub use search::{IssueSearchCursor, IssueSearchPage};
 
 #[derive(Debug, Error)]
 pub enum IssueCreationError {

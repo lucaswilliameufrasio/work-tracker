@@ -33,6 +33,7 @@ pub(super) fn routes() -> Router<Arc<BrowserState>> {
         )
         .merge(detail::routes())
         .merge(board::routes())
+        .merge(search::routes())
         .route(
             "/api/v1/projects/{project_id}/issues/{issue_number}/text",
             put(text::replace),
@@ -62,6 +63,7 @@ mod detail;
 mod due_date;
 mod movement;
 mod priority;
+mod search;
 mod text;
 
 #[derive(Default, Deserialize)]
@@ -246,6 +248,15 @@ fn read_error(error: SessionIssueReadError) -> ApiError {
         }
         SessionIssueReadError::Issue(IssueReadError::InvalidBoardCursor) => {
             ApiError::invalid_field("cursor", "Use a valid board cursor")
+        }
+        SessionIssueReadError::Issue(IssueReadError::InvalidSearchCursor) => {
+            ApiError::invalid_field("cursor", "Use a valid issue-search cursor")
+        }
+        SessionIssueReadError::Issue(IssueReadError::InvalidSearchQuery) => {
+            ApiError::invalid_field(
+                "q",
+                "Use 1–16 terms, up to 256 characters and 512 UTF-8 bytes, without controls",
+            )
         }
         _ => ApiError::new(
             StatusCode::INTERNAL_SERVER_ERROR,

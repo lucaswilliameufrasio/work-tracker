@@ -154,19 +154,48 @@
     return `/projects/${project}/issues${cursor === undefined ? '' : `?cursor=${cursor}`}`;
   }
 
+  function searchLink(project: string, query: string, cursor?: string): string {
+    const params = new SvelteURLSearchParams({ q: query });
+    if (cursor !== undefined) {
+      params.set('cursor', cursor);
+    }
+    return `/projects/${project}/issues?${params}`;
+  }
+
+  function issueCollectionPath(): string {
+    if (route.type === 'issues' || route.type === 'search') {
+      return `/projects/${route.projectId}/issues`;
+    }
+    return '/projects';
+  }
+
   function detailLink(
     project: string,
     number: string,
     history?: string,
   ): string {
     const query = new SvelteURLSearchParams();
+    const fromSearch =
+      route.type === 'search'
+        ? { query: route.query, cursor: route.cursor }
+        : route.type === 'detail' && route.fromSearchQuery !== undefined
+          ? {
+              query: route.fromSearchQuery,
+              cursor: route.fromSearchCursor,
+            }
+          : undefined;
     const from =
       route.type === 'issues'
         ? route.cursor
         : route.type === 'detail'
           ? route.from
           : undefined;
-    if (from !== undefined) {
+    if (fromSearch !== undefined) {
+      query.set('from_q', fromSearch.query);
+      if (fromSearch.cursor !== undefined) {
+        query.set('from_cursor', fromSearch.cursor);
+      }
+    } else if (from !== undefined) {
       query.set('from', from);
     }
     if (history !== undefined) {
@@ -572,12 +601,14 @@
         ? 'Meus projetos'
         : route.type === 'detail'
           ? 'Leitura da issue'
-          : 'Issues do projeto'}
+          : route.type === 'search'
+            ? 'Busca de issues'
+            : 'Issues do projeto'}
   </h1>
   <p class="intro">
-    Leitura em desenvolvimento. O board permite mover cards para o topo das
-    colunas visíveis; prioridade, prazo e responsável podem ser alterados no
-    detalhe. Filtros e atualização ao vivo ainda não estão disponíveis.
+    Leitura em desenvolvimento. Busque por termos no título/descrição ou por
+    chave exata; filtros estruturados e atualização ao vivo ainda não estão
+    disponíveis.
   </p>
   <nav class="work-links" aria-label="Navegação do trabalho">
     <a href="/projects">Meus projetos</a>
@@ -588,8 +619,17 @@
           href={listLink(route.projectId)}>Lista de issues</a
         >{/if}
     {/if}
-    {#if route.type === 'detail'}<a href={listLink(route.projectId, route.from)}
-        >Voltar à lista de issues</a
+    {#if route.type === 'detail'}<a
+        href={route.fromSearchQuery === undefined
+          ? listLink(route.projectId, route.from)
+          : searchLink(
+              route.projectId,
+              route.fromSearchQuery,
+              route.fromSearchCursor,
+            )}
+        >{route.fromSearchQuery === undefined
+          ? 'Voltar à lista de issues'
+          : 'Voltar aos resultados da busca'}</a
       >{/if}
   </nav>
   {#if view.type === 'idle' || view.type === 'loading'}
@@ -657,10 +697,33 @@
             href={projectLink(data.page.next_cursor)}
             >Próxima página de projetos</a
           >{/if}
-      {:else if data.type === 'issues'}
-        {#if data.page.data.length === 0}<p role="status">
-            Nenhuma issue fora da lixeira nesta página.
-          </p>{/if}
+      {:else if data.type === 'issues' || data.type === 'search'}
+        <form class="search-form" method="get" action={issueCollectionPath()}>
+          <label for="issue-search"
+            >Buscar no título, descrição ou chave exata</label
+          >
+          <div>
+            <input
+              id="issue-search"
+              type="search"
+              name="q"
+              maxlength="256"
+              value={data.type === 'search' ? data.query : ''}
+              placeholder="Ex.: prazo revisão ou DEV-123"
+            />
+            <button type="submit">Buscar</button>
+          </div>
+          {#if data.type === 'search'}<a href={listLink(data.projectId)}
+              >Limpar busca</a
+            >{/if}
+        </form>
+        {#if data.page.data.length === 0}
+          <p role="status">
+            {data.type === 'search'
+              ? `Nenhuma issue corresponde a “${data.query}”. Tente outros termos ou uma chave exata.`
+              : 'Nenhuma issue fora da lixeira nesta página.'}
+          </p>
+        {/if}
         <ul class="work-index" aria-label="Issues do projeto">
           {#each data.page.data as issue (issue.id)}
             <li data-issue-id={issue.id}>
@@ -679,11 +742,20 @@
             </li>
           {/each}
         </ul>
-        {#if data.page.has_more && route.type === 'issues'}<a
-            class="next-page"
-            href={listLink(route.projectId, data.page.next_cursor)}
-            >Próxima página de issues</a
-          >{/if}
+        {#if data.page.has_more}
+          {#if data.type === 'search'}<a
+              class="next-page"
+              href={searchLink(
+                data.projectId,
+                data.query,
+                data.page.next_cursor,
+              )}>Próxima página de resultados</a
+            >{:else if route.type === 'issues'}<a
+              class="next-page"
+              href={listLink(route.projectId, data.page.next_cursor)}
+              >Próxima página de issues</a
+            >{/if}
+        {/if}
       {:else if data.type === 'board'}
         {@const statuses = data.columns.map((column) => column.status)}
         <p class="hint">
@@ -1002,6 +1074,43 @@
     list-style: none;
     padding: 0;
     margin: 24px 0;
+  }
+  .search-form {
+    display: grid;
+    gap: 10px;
+    margin: 24px 0;
+  }
+  .search-form label {
+    font-weight: 600;
+  }
+  .search-form > div {
+    display: flex;
+    gap: 10px;
+  }
+  .search-form input {
+    box-sizing: border-box;
+    min-width: 0;
+    min-height: 44px;
+    flex: 1;
+    padding: 10px 12px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--surface);
+    color: var(--text);
+    font: inherit;
+  }
+  .search-form button {
+    min-height: 44px;
+    padding: 8px 14px;
+    font: inherit;
+  }
+  .search-form a {
+    width: fit-content;
+  }
+  .search-form input:focus-visible,
+  .search-form button:focus-visible {
+    outline: 3px solid var(--primary);
+    outline-offset: 3px;
   }
   .work-index li {
     border-bottom: 1px solid var(--border);

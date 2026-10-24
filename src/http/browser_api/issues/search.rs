@@ -1,0 +1,79 @@
+use std::sync::Arc;
+
+use axum::{
+    Router,
+    extract::{Path, Query, Request, State, rejection::PathRejection},
+    response::Response,
+    routing::get,
+};
+use chrono::Utc;
+use serde::Deserialize;
+
+use super::{
+    BrowserState, ListedIssue, Page, authenticated_token, canonical_uuid, malformed_query,
+    no_store, read_error,
+};
+use crate::{http::error::ApiError, issues::IssueSearchCursor};
+
+pub(super) fn routes() -> Router<Arc<BrowserState>> {
+    Router::new().route("/api/v1/projects/{project_id}/issues/search", get(search))
+}
+
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SearchQuery {
+    q: Option<String>,
+    cursor: Option<String>,
+    page_size: Option<u16>,
+}
+
+async fn search(
+    State(state): State<Arc<BrowserState>>,
+    path: Result<Path<String>, PathRejection>,
+    request: Request,
+) -> Result<Response, ApiError> {
+    let (request, _) = request.into_parts();
+    let token = authenticated_token(&state, &request).await?;
+    let Path(project_id) =
+        path.map_err(|_| ApiError::invalid_field("project_id", "Use a canonical UUID"))?;
+    if !canonical_uuid(&project_id) {
+        return Err(ApiError::invalid_field(
+            "project_id",
+            "Use a canonical UUID",
+        ));
+    }
+    let query = Query::<SearchQuery>::try_from_uri(&request.uri)
+        .map_err(|_| malformed_query())?
+        .0;
+    let search_text = query
+        .q
+        .as_deref()
+        .ok_or_else(|| ApiError::invalid_field("q", "Provide a non-empty search query"))?;
+    let cursor = query
+        .cursor
+        .as_deref()
+        .map(IssueSearchCursor::decode)
+        .transpose()
+        .map_err(|error| read_error(error.into()))?;
+    let page = state
+        .issues
+        .search_project_issues(
+            &token,
+            &project_id,
+            search_text,
+            cursor.as_ref(),
+            query.page_size.unwrap_or(50),
+            Utc::now(),
+        )
+        .await
+        .map_err(read_error)?;
+    let mut data = Vec::with_capacity(page.items.len());
+    for issue in page.items {
+        data.push(ListedIssue::try_from(issue).map_err(|error| read_error(error.into()))?);
+    }
+    Ok(no_store(Page {
+        data,
+        has_more: page.next_cursor.is_some(),
+        next_cursor: page.next_cursor.map(|cursor| cursor.encode()),
+    }))
+}

@@ -24,6 +24,10 @@ pub enum IssueReadError {
     InvalidHistoryCursor,
     #[error("board cursor is invalid")]
     InvalidBoardCursor,
+    #[error("issue-search cursor is invalid")]
+    InvalidSearchCursor,
+    #[error("issue-search query is invalid")]
+    InvalidSearchQuery,
     #[error("issue-list page size must be between 1 and 100")]
     InvalidPageSize,
     #[error("persisted issue or history data is invalid")]

@@ -63,6 +63,8 @@ fn generated_contract_has_unique_operations_resolved_refs_and_only_implemented_r
         ("/api/v1/projects/{project_id}/issues", "get"),
         ("/api/v1/projects/{project_id}/issues", "head"),
         ("/api/v1/projects/{project_id}/issues", "post"),
+        ("/api/v1/projects/{project_id}/issues/search", "get"),
+        ("/api/v1/projects/{project_id}/issues/search", "head"),
         (
             "/api/v1/projects/{project_id}/issues/{issue_number}/text",
             "put",

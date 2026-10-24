@@ -272,6 +272,124 @@ export function parseIssuePage(
   return { data, has_more: false };
 }
 
+type SearchBoundary = { issue_number: string; issue_id: string };
+
+function searchText(value: unknown): string {
+  const query = text(value);
+  const terms = query
+    .split(/[\u0020\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+/u)
+    .filter((term) => term.length > 0);
+  if (
+    new TextEncoder().encode(query).byteLength > 512 ||
+    [...query].length > 256 ||
+    /\p{Cc}/u.test(query) ||
+    terms.length < 1 ||
+    terms.length > 16
+  ) {
+    return invalid();
+  }
+  return query;
+}
+
+export function validateIssueSearchText(value: unknown): string {
+  return searchText(value);
+}
+
+function searchBoundary(value: unknown): SearchBoundary {
+  if (
+    typeof value !== 'string' ||
+    value.length < 51 ||
+    value.length > 75 ||
+    !/^[A-Za-z0-9_-]+$/.test(value)
+  ) {
+    return invalid();
+  }
+  let raw: string;
+  try {
+    raw = atob(value.replaceAll('-', '+').replaceAll('_', '/'));
+  } catch {
+    return invalid();
+  }
+  if (
+    btoa(raw).replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', '') !==
+      value ||
+    raw.length < 38 ||
+    raw.length > 56
+  ) {
+    return invalid();
+  }
+  const separator = raw.indexOf('/');
+  if (separator < 0 || raw.indexOf('/', separator + 1) >= 0) {
+    return invalid();
+  }
+  const issueNumber = decimal(raw.slice(0, separator));
+  const issueId = uuid(raw.slice(separator + 1));
+  return { issue_number: issueNumber, issue_id: issueId };
+}
+
+export function validateIssueSearchCursor(value: unknown): string {
+  if (typeof value !== 'string') {
+    return invalid();
+  }
+  searchBoundary(value);
+  return value;
+}
+
+function searchBoundaryAfter(
+  left: SearchBoundary,
+  right: SearchBoundary,
+): boolean {
+  const leftNumber = BigInt(left.issue_number);
+  const rightNumber = BigInt(right.issue_number);
+  return (
+    leftNumber > rightNumber ||
+    (leftNumber === rightNumber && left.issue_id > right.issue_id)
+  );
+}
+
+export function parseIssueSearchPage(
+  value: unknown,
+  projectId: string,
+  query: string,
+  pageSize: number,
+  after?: string,
+): IssuePage<IssueSummary> {
+  uuid(projectId);
+  searchText(query);
+  const item = page(value, pageSize);
+  let previous =
+    after === undefined
+      ? { issue_number: '0', issue_id: '' }
+      : searchBoundary(after);
+  const data: IssueSummary[] = [];
+  const ids = new Set<string>();
+  for (const raw of item.data) {
+    const issue = summary(fields(raw, summaryFields), projectId);
+    const boundary = {
+      issue_number: issue.issue_number,
+      issue_id: issue.id,
+    };
+    if (!searchBoundaryAfter(boundary, previous) || ids.has(issue.id)) {
+      return invalid();
+    }
+    previous = boundary;
+    ids.add(issue.id);
+    data.push(issue);
+  }
+  if (item.has_more) {
+    const nextCursor = validateIssueSearchCursor(item.next_cursor);
+    const cursor = searchBoundary(nextCursor);
+    if (
+      cursor.issue_number !== previous.issue_number ||
+      cursor.issue_id !== previous.issue_id
+    ) {
+      return invalid();
+    }
+    return { data, has_more: true, next_cursor: nextCursor };
+  }
+  return { data, has_more: false };
+}
+
 function historyBoundary(value: unknown): string {
   if (typeof value !== 'string' || !/^[A-Za-z0-9_-]{90}$/.test(value)) {
     return invalid();
@@ -417,6 +535,33 @@ export async function getIssuePage(
   return parseIssuePage(
     await readIssueJson(`${path}?${encoded}`, signal),
     projectId,
+    pageSize,
+    options.cursor,
+  );
+}
+
+export async function getIssueSearchPage(
+  projectId: string,
+  queryText: string,
+  options: PageOptions,
+  signal: AbortSignal,
+): Promise<IssuePage<IssueSummary>> {
+  uuid(projectId);
+  const search = searchText(queryText);
+  const pageSize = size(options.page_size);
+  const encoded = new URLSearchParams({
+    q: search,
+    page_size: String(pageSize),
+  });
+  if (options.cursor !== undefined) {
+    searchBoundary(options.cursor);
+    encoded.set('cursor', options.cursor);
+  }
+  const path = `${projectPath(projectId)}/search`;
+  return parseIssueSearchPage(
+    await readIssueJson(`${path}?${encoded}`, signal),
+    projectId,
+    search,
     pageSize,
     options.cursor,
   );

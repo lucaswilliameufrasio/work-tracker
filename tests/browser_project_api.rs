@@ -306,8 +306,8 @@ async fn every_documented_browser_operation_matches_real_success_and_auth_error_
                 .replace("{project_id}", &project.id)
                 .replace("{user_id}", &actor);
             let uri = uri.replace("{issue_number}", &contract_issue.issue_number.to_string());
-            let uri = uri.replace("{status_id}", &contract_issue.status_id);
-            let uri = uri.replace(
+            let mut uri = uri.replace("{status_id}", &contract_issue.status_id);
+            uri = uri.replace(
                 "{record_id}",
                 if path.contains("/statuses/") {
                     &contract_issue.status_id
@@ -315,6 +315,9 @@ async fn every_documented_browser_operation_matches_real_success_and_auth_error_
                     &contract_issue.issue_type_id
                 },
             );
+            if path.ends_with("/issues/search") {
+                uri.push_str("?q=Contract");
+            }
             let token = csrf(&app, &issued.token).await;
             let mut req = if method == "delete" || method == "post" || method == "put" {
                 revoke_request(&uri, &issued.token, &token)
