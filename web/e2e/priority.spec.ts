@@ -29,6 +29,7 @@ test('issue detail updates priority through the versioned one-field command', as
     description: 'Private text stays outside history.',
     creator_user_id: actorId,
     priority,
+    is_overdue: false,
     version,
     created_at: now,
     updated_at: changed ? changedAt : now,

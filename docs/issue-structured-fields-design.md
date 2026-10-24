@@ -2,6 +2,8 @@
 
 The first vertical slice edits only `priority`, one structured issue attribute already present in the schema and summary/detail reads. It does not add batch editing, assignment, due-date editing, labels, custom fields, search, or an outbox consumer. Assignment editing must wait for an authorized participant-picker journey; due-date editing can follow as a separate field command.
 
+The follow-on due-date contract, including organization-local overdue calculation, is recorded in [`issue-due-date-design.md`](issue-due-date-design.md) and [ADR 0004](adr/0004-organization-timezone-conversion.md); it does not change the scope or evidence of this priority slice.
+
 ## Command contract
 
 `PUT /api/v1/projects/{project_id}/issues/{issue_number}/priority` accepts exactly `expected_version` and `priority`. The version is a positive canonical decimal string; priority is one of `none`, `low`, `medium`, `high`, or `urgent`. It requires the browser session, configured origin, CSRF token and canonical `Idempotency-Key`. There are no query parameters, explicit `null`, unknown fields, or multi-field patches.

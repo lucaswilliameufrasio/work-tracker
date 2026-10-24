@@ -1,4 +1,5 @@
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use chrono::{DateTime, Utc};
 use sqlx::{Row, Sqlite, Transaction};
 
 use super::{
@@ -69,6 +70,7 @@ impl IssueStore {
         project_id: &str,
         status_id: &str,
         options: BoardOptions<'_>,
+        now: DateTime<Utc>,
     ) -> Result<BoardColumnPage, IssueReadError> {
         if !(1..=100).contains(&options.page_size) {
             return Err(IssueReadError::InvalidPageSize);
@@ -90,16 +92,17 @@ impl IssueStore {
         if visible == 0 || archived.is_some() {
             return Err(IssueReadError::Unavailable);
         }
+        let local_today = super::queries::organization_local_today(transaction, now).await?;
         let total_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM issues WHERE project_id = ? AND status_id = ? AND trashed_at IS NULL")
             .bind(project_id).bind(status_id).fetch_one(&mut **transaction).await?;
-        let rows = sqlx::query("SELECT issues.id, issues.project_id, issues.issue_number, projects.project_key, issues.issue_type_id, issues.status_id, issues.title, issues.assignee_user_id, issues.creator_user_id, issues.priority, issues.due_date, issues.rank, issues.version, issues.created_at, issues.updated_at FROM issues JOIN projects ON projects.id = issues.project_id WHERE issues.project_id = ? AND issues.status_id = ? AND issues.trashed_at IS NULL AND (issues.rank, issues.id) > (?, ?) ORDER BY issues.rank ASC, issues.id ASC LIMIT ?")
+        let rows = sqlx::query("SELECT issues.id, issues.project_id, issues.issue_number, projects.project_key, issues.issue_type_id, issues.status_id, issues.title, issues.assignee_user_id, issues.creator_user_id, issues.priority, issues.due_date, statuses.category AS status_category, issues.rank, issues.version, issues.created_at, issues.updated_at FROM issues JOIN projects ON projects.id = issues.project_id JOIN statuses ON statuses.project_id = issues.project_id AND statuses.id = issues.status_id WHERE issues.project_id = ? AND issues.status_id = ? AND issues.trashed_at IS NULL AND (issues.rank, issues.id) > (?, ?) ORDER BY issues.rank ASC, issues.id ASC LIMIT ?")
             .bind(project_id).bind(status_id).bind(options.after.map(|cursor| cursor.rank).unwrap_or(i64::MIN))
             .bind(options.after.map(|cursor| cursor.issue_id.as_str()).unwrap_or(""))
             .bind(i64::from(options.page_size) + 1).fetch_all(&mut **transaction).await?;
         let has_more = rows.len() > usize::from(options.page_size);
         let mut items = Vec::with_capacity(rows.len().min(usize::from(options.page_size)));
         for row in rows.into_iter().take(usize::from(options.page_size)) {
-            items.push(issue_summary_from_row(&row)?);
+            items.push(issue_summary_from_row(&row, local_today)?);
         }
         let next_cursor = if has_more {
             items.last().map(|issue| BoardCursor {

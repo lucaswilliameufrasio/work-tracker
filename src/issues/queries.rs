@@ -3,7 +3,10 @@ use chrono::{DateTime, NaiveDate, Utc};
 use sqlx::{Row, Sqlite, Transaction, sqlite::SqliteRow};
 use thiserror::Error;
 
-use crate::access::{AccessCapability, AccessStore, AccessStoreError, authorize};
+use crate::{
+    access::{AccessCapability, AccessStore, AccessStoreError, authorize},
+    organization_timezone::OrganizationTimezone,
+};
 
 use super::{IssuePriority, IssueRecord, IssueStore};
 
@@ -25,6 +28,8 @@ pub enum IssueReadError {
     InvalidPageSize,
     #[error("persisted issue or history data is invalid")]
     CorruptData,
+    #[error("organization timezone is unavailable")]
+    OrganizationTimezoneUnavailable,
     #[error("persisted authorization state is invalid: {0}")]
     AccessState(#[from] AccessStoreError),
     #[error("issue query failed: {0}")]
@@ -44,6 +49,7 @@ pub struct IssueSummary {
     pub creator_user_id: String,
     pub priority: IssuePriority,
     pub due_date: Option<NaiveDate>,
+    pub is_overdue: bool,
     pub rank: i64,
     pub version: i64,
     pub created_at: DateTime<Utc>,
@@ -71,6 +77,10 @@ pub enum IssueFieldChange {
     Priority {
         before: super::IssuePriority,
         after: super::IssuePriority,
+    },
+    DueDate {
+        before: Option<NaiveDate>,
+        after: Option<NaiveDate>,
     },
 }
 
@@ -151,12 +161,14 @@ impl IssueStore {
     ) -> Result<IssueListPage, IssueReadError> {
         validate_list_options(after_issue_number, page_size)?;
         let mut transaction = self.pool.begin().await?;
+        let now = Utc::now();
         let page = Self::list_in_transaction(
             &mut transaction,
             actor_user_id,
             project_id,
             after_issue_number,
             page_size,
+            now,
         )
         .await?;
         transaction.commit().await?;
@@ -169,18 +181,23 @@ impl IssueStore {
         project_id: &str,
         after_issue_number: Option<i64>,
         page_size: u16,
+        now: DateTime<Utc>,
     ) -> Result<IssueListPage, IssueReadError> {
         validate_list_options(after_issue_number, page_size)?;
         authorize_project_read(transaction, actor_user_id, project_id).await?;
+        let local_today = organization_local_today(transaction, now).await?;
 
         let rows = sqlx::query(
             "SELECT issues.id, issues.project_id, issues.issue_number, \
                     projects.project_key, issues.issue_type_id, issues.status_id, \
                     issues.title, issues.assignee_user_id, issues.creator_user_id, \
-                    issues.priority, issues.due_date, issues.rank, issues.version, \
+                    issues.priority, issues.due_date, statuses.category AS status_category, \
+                    issues.rank, issues.version, \
                     issues.created_at, issues.updated_at \
              FROM issues \
              JOIN projects ON projects.id = issues.project_id \
+             JOIN statuses ON statuses.project_id = issues.project_id \
+                          AND statuses.id = issues.status_id \
              WHERE issues.project_id = ? \
                AND issues.trashed_at IS NULL \
                AND issues.issue_number > COALESCE(?, 0) \
@@ -196,7 +213,7 @@ impl IssueStore {
         let has_more = rows.len() > usize::from(page_size);
         let mut items = Vec::with_capacity(rows.len().min(usize::from(page_size)));
         for row in rows.into_iter().take(usize::from(page_size)) {
-            items.push(issue_summary_from_row(&row)?);
+            items.push(issue_summary_from_row(&row, local_today)?);
         }
 
         let next_after_issue_number = if has_more {
@@ -223,9 +240,14 @@ impl IssueStore {
         }
 
         let mut transaction = self.pool.begin().await?;
-        let issue =
-            Self::record_in_transaction(&mut transaction, actor_user_id, project_id, issue_number)
-                .await?;
+        let issue = Self::record_in_transaction(
+            &mut transaction,
+            actor_user_id,
+            project_id,
+            issue_number,
+            Utc::now(),
+        )
+        .await?;
         let history = sqlx::query("SELECT id, project_id, issue_id, actor_user_id, event_kind, occurred_at, field_key, before_value_json, after_value_json FROM issue_events WHERE project_id = ? AND issue_id = ? ORDER BY occurred_at ASC, id ASC")
             .bind(project_id).bind(&issue.id).fetch_all(&mut *transaction).await?;
         let mut events = Vec::with_capacity(history.len());
@@ -244,20 +266,25 @@ impl IssueStore {
         actor_user_id: &str,
         project_id: &str,
         issue_number: i64,
+        now: DateTime<Utc>,
     ) -> Result<IssueRecord, IssueReadError> {
         if issue_number <= 0 {
             return Err(IssueReadError::InvalidIssueNumber);
         }
         authorize_project_read(transaction, actor_user_id, project_id).await?;
+        let local_today = organization_local_today(transaction, now).await?;
         let row = sqlx::query(
             "SELECT issues.id, issues.project_id, issues.issue_number, \
                     projects.project_key, issues.issue_type_id, issues.status_id, \
                     issues.title, issues.description, issues.assignee_user_id, \
                     issues.creator_user_id, issues.priority, issues.due_date, \
+                    statuses.category AS status_category, \
                     issues.rank, issues.version, issues.completed_at, issues.trashed_at, \
                     issues.created_at, issues.updated_at \
              FROM issues \
              JOIN projects ON projects.id = issues.project_id \
+             JOIN statuses ON statuses.project_id = issues.project_id \
+                          AND statuses.id = issues.status_id \
              WHERE issues.project_id = ? AND issues.issue_number = ?",
         )
         .bind(project_id)
@@ -265,7 +292,7 @@ impl IssueStore {
         .fetch_optional(&mut **transaction)
         .await?
         .ok_or(IssueReadError::Unavailable)?;
-        let issue = issue_record_from_row(&row)?;
+        let issue = issue_record_from_row(&row, local_today)?;
 
         let creation = sqlx::query(
             "SELECT id, project_id, issue_id, actor_user_id, event_kind, occurred_at, \
@@ -290,10 +317,11 @@ impl IssueStore {
         issue_number: i64,
         after: Option<&IssueHistoryCursor>,
         page_size: u16,
+        now: DateTime<Utc>,
     ) -> Result<IssueHistoryPage, IssueReadError> {
         validate_list_options(None, page_size)?;
         let issue =
-            Self::record_in_transaction(transaction, actor_user_id, project_id, issue_number)
+            Self::record_in_transaction(transaction, actor_user_id, project_id, issue_number, now)
                 .await?;
         let rows = sqlx::query("SELECT id, project_id, issue_id, actor_user_id, event_kind, occurred_at, field_key, before_value_json, after_value_json FROM issue_events WHERE project_id = ? AND issue_id = ? AND (occurred_at, id) > (?, ?) ORDER BY occurred_at ASC, id ASC LIMIT ?")
             .bind(project_id).bind(&issue.id)
@@ -361,7 +389,10 @@ pub(super) async fn authorize_project_read(
     Ok(())
 }
 
-pub(super) fn issue_summary_from_row(row: &SqliteRow) -> Result<IssueSummary, IssueReadError> {
+pub(super) fn issue_summary_from_row(
+    row: &SqliteRow,
+    local_today: NaiveDate,
+) -> Result<IssueSummary, IssueReadError> {
     let issue_number: i64 = row.try_get("issue_number")?;
     let project_key: String = row.try_get("project_key")?;
     let project_id: String = row.try_get("project_id")?;
@@ -372,6 +403,11 @@ pub(super) fn issue_summary_from_row(row: &SqliteRow) -> Result<IssueSummary, Is
     if title.trim().is_empty() || title.chars().count() > 240 {
         return Err(IssueReadError::CorruptData);
     }
+
+    let due_date = parse_optional_date(row.try_get("due_date")?)?;
+    let status_category: String = row.try_get("status_category")?;
+    let is_overdue = super::deadlines::is_overdue(due_date, &status_category, local_today)
+        .ok_or(IssueReadError::CorruptData)?;
 
     Ok(IssueSummary {
         id: row.try_get("id")?,
@@ -384,7 +420,8 @@ pub(super) fn issue_summary_from_row(row: &SqliteRow) -> Result<IssueSummary, Is
         assignee_user_id: row.try_get("assignee_user_id")?,
         creator_user_id: row.try_get("creator_user_id")?,
         priority: parse_priority(&row.try_get::<String, _>("priority")?)?,
-        due_date: parse_optional_date(row.try_get("due_date")?)?,
+        due_date,
+        is_overdue,
         rank: row.try_get("rank")?,
         version: parse_version(row.try_get("version")?)?,
         created_at: parse_timestamp(&row.try_get::<String, _>("created_at")?)?,
@@ -392,8 +429,11 @@ pub(super) fn issue_summary_from_row(row: &SqliteRow) -> Result<IssueSummary, Is
     })
 }
 
-fn issue_record_from_row(row: &SqliteRow) -> Result<IssueRecord, IssueReadError> {
-    let summary = issue_summary_from_row(row)?;
+fn issue_record_from_row(
+    row: &SqliteRow,
+    local_today: NaiveDate,
+) -> Result<IssueRecord, IssueReadError> {
+    let summary = issue_summary_from_row(row, local_today)?;
     let description: Option<String> = row.try_get("description")?;
     if description
         .as_ref()
@@ -414,6 +454,7 @@ fn issue_record_from_row(row: &SqliteRow) -> Result<IssueRecord, IssueReadError>
         creator_user_id: summary.creator_user_id,
         priority: summary.priority,
         due_date: summary.due_date,
+        is_overdue: summary.is_overdue,
         rank: summary.rank,
         version: summary.version,
         completed_at: parse_optional_timestamp(row.try_get("completed_at")?)?,
@@ -454,6 +495,16 @@ fn issue_event_from_row(row: &SqliteRow) -> Result<IssueEvent, IssueReadError> {
             }
             Some(IssueFieldChange::Priority { before, after })
         }
+        (IssueEventKind::FieldUpdated, Some(field_key), Some(before_value), Some(after_value))
+            if field_key == "due_date" =>
+        {
+            let before = parse_json_due_date(&before_value)?;
+            let after = parse_json_due_date(&after_value)?;
+            if before == after {
+                return Err(IssueReadError::CorruptData);
+            }
+            Some(IssueFieldChange::DueDate { before, after })
+        }
         (IssueEventKind::FieldUpdated, _, _, _) => return Err(IssueReadError::CorruptData),
         (_, None, None, None) => None,
         _ => return Err(IssueReadError::CorruptData),
@@ -490,10 +541,34 @@ fn parse_version(value: i64) -> Result<i64, IssueReadError> {
 
 fn parse_optional_date(value: Option<String>) -> Result<Option<NaiveDate>, IssueReadError> {
     value
-        .map(|date| {
-            NaiveDate::parse_from_str(&date, "%Y-%m-%d").map_err(|_| IssueReadError::CorruptData)
-        })
+        .as_deref()
+        .map(parse_date)
         .transpose()
+        .map_err(|_| IssueReadError::CorruptData)
+}
+
+fn parse_date(value: &str) -> Result<NaiveDate, IssueReadError> {
+    super::deadlines::parse_date(value).ok_or(IssueReadError::CorruptData)
+}
+
+fn parse_json_due_date(value: &str) -> Result<Option<NaiveDate>, IssueReadError> {
+    let date: Option<String> =
+        serde_json::from_str(value).map_err(|_| IssueReadError::CorruptData)?;
+    date.as_deref().map(parse_date).transpose()
+}
+
+pub(super) async fn organization_local_today(
+    transaction: &mut Transaction<'_, Sqlite>,
+    now: DateTime<Utc>,
+) -> Result<NaiveDate, IssueReadError> {
+    let timezone: Option<String> =
+        sqlx::query_scalar("SELECT timezone FROM organizations WHERE id = 1")
+            .fetch_optional(&mut **transaction)
+            .await?;
+    let timezone = timezone.ok_or(IssueReadError::OrganizationTimezoneUnavailable)?;
+    let timezone = OrganizationTimezone::parse(&timezone)
+        .map_err(|_| IssueReadError::OrganizationTimezoneUnavailable)?;
+    Ok(timezone.local_date(now))
 }
 
 fn parse_timestamp(value: &str) -> Result<DateTime<Utc>, IssueReadError> {

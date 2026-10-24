@@ -35,6 +35,13 @@
         <a href={`/projects/${issue.project_id}/issues/${issue.issue_number}`}
           ><span>{issue.issue_key}</span><strong>{issue.title}</strong></a
         >
+        {#if issue.due_date !== undefined || issue.is_overdue}<p class="hint">
+            {issue.due_date === undefined
+              ? ''
+              : `Prazo ${issue.due_date}`}{issue.is_overdue
+              ? ' · Atrasada'
+              : ''}
+          </p>{/if}
         {#if canMove && moveStatuses.length > 0}<details class="move-control">
             <summary>Movimentar</summary>
             <form
@@ -136,6 +143,12 @@
   .continue {
     padding: 12px 0;
     text-decoration: underline;
+    font-size: 14px;
+  }
+  .hint {
+    margin: 0;
+    padding: 0 14px 12px;
+    color: var(--muted);
     font-size: 14px;
   }
   .move-control {

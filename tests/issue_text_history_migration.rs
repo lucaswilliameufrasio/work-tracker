@@ -22,6 +22,17 @@ type ReceiptSnapshot = (
     i64,
     String,
 );
+type StructuredEventSnapshot = (
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+);
 
 #[tokio::test]
 async fn migration_preserves_existing_receipts_and_envelopes_and_supports_repeated_content_free_changes()
@@ -307,6 +318,79 @@ async fn migration_preserves_existing_receipts_and_envelopes_and_supports_repeat
             .await
             .is_err()
     );
+    let structured_events_sql = "SELECT id, project_id, issue_id, actor_user_id, event_kind, occurred_at, field_key, before_value_json, after_value_json FROM issue_events ORDER BY id";
+    let structured_events_before: Vec<StructuredEventSnapshot> =
+        sqlx::query_as(structured_events_sql)
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    let due_migration_outbox_before: Vec<OutboxSnapshot> =
+        sqlx::query_as(outbox_sql).fetch_all(&pool).await.unwrap();
+    let mut transaction = pool.begin().await.unwrap();
+    sqlx::raw_sql(include_str!("../migrations/0036_issue_due_dates.sql"))
+        .execute(&mut *transaction)
+        .await
+        .unwrap();
+    transaction.commit().await.unwrap();
+    assert_eq!(
+        structured_events_before,
+        sqlx::query_as(structured_events_sql)
+            .fetch_all(&pool)
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        due_migration_outbox_before,
+        sqlx::query_as(outbox_sql).fetch_all(&pool).await.unwrap()
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM issue_priority_receipts")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        0
+    );
+    let due_at =
+        (Utc::now() + TimeDelta::seconds(12)).to_rfc3339_opts(chrono::SecondsFormat::Nanos, true);
+    sqlx::query(
+        "INSERT INTO issue_events \
+         (id, project_id, issue_id, actor_user_id, event_kind, occurred_at, \
+          field_key, before_value_json, after_value_json) \
+         VALUES (?, ?, ?, ?, 'issue.field_updated', ?, 'due_date', 'null', '\"2028-02-29\"')",
+    )
+    .bind(Uuid::now_v7().to_string())
+    .bind(&project.id)
+    .bind(issue)
+    .bind(&actor)
+    .bind(due_at)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let history = store
+        .get_project_issue(&actor, &project.id, 1)
+        .await
+        .unwrap()
+        .history;
+    assert_eq!(history.len(), 8);
+    assert_eq!(
+        history.last().unwrap().change,
+        Some(puxiri::issues::IssueFieldChange::DueDate {
+            before: None,
+            after: Some(chrono::NaiveDate::from_ymd_opt(2028, 2, 29).unwrap()),
+        })
+    );
+    for (before, after) in [("\"none\"", "\"2028-02-29\""), ("null", "null")] {
+        assert!(sqlx::query("INSERT INTO issue_events (id, project_id, issue_id, actor_user_id, event_kind, occurred_at, field_key, before_value_json, after_value_json) VALUES (?, ?, ?, ?, 'issue.field_updated', 'now', 'due_date', ?, ?)")
+            .bind(Uuid::now_v7().to_string())
+            .bind(&project.id)
+            .bind(issue)
+            .bind(&actor)
+            .bind(before)
+            .bind(after)
+            .execute(&pool)
+            .await
+            .is_err());
+    }
     assert!(
         sqlx::query("PRAGMA foreign_key_check")
             .fetch_all(&pool)

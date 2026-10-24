@@ -6,8 +6,9 @@ use axum::{
     response::Response,
     routing::get,
 };
-use chrono::Utc;
+use chrono::{NaiveDate, Utc};
 use serde::Serialize;
+use serde_json::Value;
 
 use super::{
     BrowserState, ListQuery, ListedIssue, Page, authenticated_token, canonical_uuid,
@@ -62,6 +63,7 @@ impl TryFrom<IssueRecord> for IssueDetail {
             creator_user_id: issue.creator_user_id,
             priority: issue.priority,
             due_date: issue.due_date,
+            is_overdue: issue.is_overdue,
             rank: issue.rank,
             version: issue.version,
             created_at: issue.created_at,
@@ -91,8 +93,8 @@ struct HistoryEvent {
 #[derive(Serialize)]
 struct HistoryChange {
     field: &'static str,
-    before: &'static str,
-    after: &'static str,
+    before: Value,
+    after: Value,
 }
 
 fn priority_name(priority: IssuePriority) -> &'static str {
@@ -192,8 +194,16 @@ async fn history(
                 "issue.field_updated",
                 Some(HistoryChange {
                     field: "priority",
-                    before: priority_name(before),
-                    after: priority_name(after),
+                    before: Value::String(priority_name(before).to_owned()),
+                    after: Value::String(priority_name(after).to_owned()),
+                }),
+            ),
+            (IssueEventKind::FieldUpdated, Some(IssueFieldChange::DueDate { before, after })) => (
+                "issue.field_updated",
+                Some(HistoryChange {
+                    field: "due_date",
+                    before: date_value(before),
+                    after: date_value(after),
                 }),
             ),
             _ => return Err(read_error(IssueReadError::CorruptData.into())),
@@ -213,4 +223,11 @@ async fn history(
         has_more: page.next_cursor.is_some(),
         next_cursor: page.next_cursor.map(|cursor| cursor.encode()),
     }))
+}
+
+fn date_value(value: Option<NaiveDate>) -> Value {
+    match value {
+        Some(date) => Value::String(date.format("%Y-%m-%d").to_string()),
+        None => Value::Null,
+    }
 }

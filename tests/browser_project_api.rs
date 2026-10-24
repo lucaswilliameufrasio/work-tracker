@@ -83,13 +83,120 @@ async fn json(response: Response, status: StatusCode) -> Value {
 
 // Checks the subset of JSON Schema emitted by our metadata, not a general
 // OpenAPI/JSON Schema validator. Route behavior remains real Axum + SQLite.
+fn schema_accepts(document: &Value, schema: &Value, value: &Value) -> bool {
+    if let Some(reference) = schema.get("$ref") {
+        let Some(schema) = document.pointer(&reference.as_str().unwrap()[1..]) else {
+            return false;
+        };
+        return schema_accepts(document, schema, value);
+    }
+    if let Some(constant) = schema.get("const")
+        && constant != value
+    {
+        return false;
+    }
+    if let Some(values) = schema["enum"].as_array()
+        && !values.contains(value)
+    {
+        return false;
+    }
+    if let Some(variants) = schema["anyOf"].as_array() {
+        return variants
+            .iter()
+            .any(|variant| schema_accepts(document, variant, value));
+    }
+    if let Some(variants) = schema["oneOf"].as_array() {
+        return variants
+            .iter()
+            .filter(|variant| schema_accepts(document, variant, value))
+            .count()
+            == 1;
+    }
+    match schema["type"].as_str() {
+        Some("object") => {
+            let Some(fields) = value.as_object() else {
+                return false;
+            };
+            if schema.get("required").is_some_and(|required| {
+                required
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|field| !fields.contains_key(field.as_str().unwrap()))
+            }) {
+                return false;
+            }
+            for (name, property_value) in fields {
+                if let Some(property) = schema["properties"].get(name) {
+                    if !schema_accepts(document, property, property_value) {
+                        return false;
+                    }
+                } else if schema["additionalProperties"] == false
+                    || (schema["additionalProperties"].is_object()
+                        && !schema_accepts(
+                            document,
+                            &schema["additionalProperties"],
+                            property_value,
+                        ))
+                {
+                    return false;
+                }
+            }
+            true
+        }
+        Some("array") => value.as_array().is_some_and(|items| {
+            items
+                .iter()
+                .all(|item| schema_accepts(document, &schema["items"], item))
+        }),
+        Some("string") => value
+            .as_str()
+            .is_some_and(|text| match schema["format"].as_str() {
+                Some("date") => chrono::NaiveDate::parse_from_str(text, "%Y-%m-%d")
+                    .is_ok_and(|date| date.format("%Y-%m-%d").to_string() == text),
+                Some("uuid") => Uuid::parse_str(text).is_ok(),
+                Some("date-time") => chrono::DateTime::parse_from_rfc3339(text).is_ok(),
+                _ => true,
+            }),
+        Some("boolean") => value.is_boolean(),
+        Some("integer") => value.as_i64().is_some(),
+        Some("null") => value.is_null(),
+        _ => true,
+    }
+}
+
 fn assert_contract_shape(document: &Value, schema: &Value, value: &Value) {
     if let Some(reference) = schema.get("$ref") {
         let schema = document.pointer(&reference.as_str().unwrap()[1..]).unwrap();
         assert_contract_shape(document, schema, value);
         return;
     }
-    assert!(!value.is_null());
+    if let Some(variants) = schema["anyOf"].as_array() {
+        let matching: Vec<_> = variants
+            .iter()
+            .filter(|variant| schema_accepts(document, variant, value))
+            .collect();
+        assert!(!matching.is_empty(), "value does not match anyOf: {value}");
+        assert_contract_shape(document, matching[0], value);
+        return;
+    }
+    if let Some(variants) = schema["oneOf"].as_array() {
+        let matching: Vec<_> = variants
+            .iter()
+            .filter(|variant| schema_accepts(document, variant, value))
+            .collect();
+        assert_eq!(matching.len(), 1, "value does not match oneOf: {value}");
+        assert_contract_shape(document, matching[0], value);
+        return;
+    }
+    if schema["type"] == "null" {
+        assert!(value.is_null());
+        return;
+    }
+    assert!(
+        schema_accepts(document, schema, value),
+        "schema mismatch: {value}"
+    );
     match schema["type"].as_str().unwrap() {
         "object" => {
             let fields = value.as_object().unwrap();
@@ -125,6 +232,12 @@ fn assert_contract_shape(document: &Value, schema: &Value, value: &Value) {
                 }
                 Some("date-time") => {
                     chrono::DateTime::parse_from_rfc3339(text).unwrap();
+                }
+                Some("date") => {
+                    assert!(
+                        chrono::NaiveDate::parse_from_str(text, "%Y-%m-%d")
+                            .is_ok_and(|date| date.format("%Y-%m-%d").to_string() == text)
+                    );
                 }
                 _ => {}
             }
@@ -243,9 +356,29 @@ async fn every_documented_browser_operation_matches_real_success_and_auth_error_
                         "priority": "high",
                     })
                     .to_string()
-                } else if operation["operationId"] == "moveProjectIssue" {
+                } else if operation["operationId"] == "setProjectIssueDueDate" {
+                    let expected_version: i64 = sqlx::query_scalar(
+                        "SELECT version FROM issues WHERE project_id = ? AND issue_number = 1",
+                    )
+                    .bind(&project.id)
+                    .fetch_one(database.pool())
+                    .await
+                    .unwrap();
                     serde_json::json!({
-                        "expected_version": "1",
+                        "expected_version": expected_version.to_string(),
+                        "due_date": "2028-02-29",
+                    })
+                    .to_string()
+                } else if operation["operationId"] == "moveProjectIssue" {
+                    let expected_version: i64 = sqlx::query_scalar(
+                        "SELECT version FROM issues WHERE project_id = ? AND issue_number = 1",
+                    )
+                    .bind(&project.id)
+                    .fetch_one(database.pool())
+                    .await
+                    .unwrap();
+                    serde_json::json!({
+                        "expected_version": expected_version.to_string(),
                         "target_status_id": move_status_id,
                     })
                     .to_string()

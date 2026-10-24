@@ -31,6 +31,7 @@ const issue: IssueDetail = {
   issue_type_id: id,
   status_id: id,
   priority: 'none',
+  is_overdue: false,
   creator_user_id: id,
   version: '1',
   created_at: time,

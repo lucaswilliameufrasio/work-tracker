@@ -56,6 +56,7 @@ impl SessionIssueReader {
             project_id,
             status_id,
             options,
+            now,
         )
         .await?;
         transaction.commit().await?;
@@ -79,6 +80,7 @@ impl SessionIssueReader {
             principal.user_id(),
             project_id,
             issue_number,
+            now,
         )
         .await?;
         transaction.commit().await?;
@@ -107,6 +109,7 @@ impl SessionIssueReader {
             issue_number,
             after,
             page_size,
+            now,
         )
         .await?;
         transaction.commit().await?;
@@ -140,6 +143,7 @@ impl SessionIssueReader {
             project_id,
             options.after_issue_number,
             options.page_size,
+            now,
         )
         .await?;
         transaction.commit().await?;
@@ -221,6 +225,7 @@ mod tests {
             &project.id,
             None,
             50,
+            now,
         )
         .await
         .unwrap();
@@ -230,6 +235,7 @@ mod tests {
             principal.user_id(),
             &project.id,
             issue.issue_number,
+            now,
         )
         .await
         .unwrap();
@@ -243,6 +249,7 @@ mod tests {
                 after: None,
                 page_size: 20,
             },
+            now,
         )
         .await
         .unwrap();
@@ -255,6 +262,7 @@ mod tests {
             issue.issue_number,
             None,
             50,
+            now,
         )
         .await
         .unwrap();

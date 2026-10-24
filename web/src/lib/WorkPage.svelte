@@ -23,6 +23,12 @@
     type IssuePriorityInput,
     type IssuePriorityTarget,
   } from './issue-priority.ts';
+  import {
+    IssueDueDateIdentityChanged,
+    setIssueDueDate,
+    type IssueDueDateInput,
+    type IssueDueDateTarget,
+  } from './issue-due-date.ts';
   import type { IssuePriority } from './issues.ts';
 
   const route = workRoute(
@@ -58,15 +64,34 @@
     | { type: 'confirmed'; priority: IssuePriority }
     | { type: 'conflict' }
     | { type: 'error' };
+  type DueDateCommand = {
+    projectId: string;
+    actorId: string;
+    issue: IssueDueDateTarget;
+    idempotencyKey: string;
+    input: IssueDueDateInput;
+  };
+  type DueDateState =
+    | { type: 'idle' }
+    | { type: 'pending'; command: DueDateCommand }
+    | { type: 'uncertain'; command: DueDateCommand }
+    | { type: 'confirmed'; dueDate: string | null }
+    | { type: 'conflict' }
+    | { type: 'error' };
   let view = $state<WorkState>({ type: 'idle' });
   let moveState = $state<MoveState>({ type: 'idle' });
   let priorityState = $state<PriorityState>({ type: 'idle' });
+  let dueDateState = $state<DueDateState>({ type: 'idle' });
   let selectedPriority = $state<IssuePriority>('none');
+  let selectedDueDate = $state('');
   let selectedPriorityIssueId = '';
+  let selectedDueDateIssueId = '';
   let moveOperation = new AbortController();
   let moveGeneration = 0;
   let priorityOperation = new AbortController();
   let priorityGeneration = 0;
+  let dueDateOperation = new AbortController();
+  let dueDateGeneration = 0;
   let heading: HTMLElement | undefined;
   const screen = new WorkScreen(route, (state) => {
     view = state;
@@ -95,6 +120,11 @@
       if (selectedPriorityIssueId !== view.data.issue.id) {
         selectedPriorityIssueId = view.data.issue.id;
         selectedPriority = view.data.issue.priority;
+      }
+      if (selectedDueDateIssueId !== view.data.issue.id) {
+        selectedDueDateIssueId = view.data.issue.id;
+        selectedDueDate = view.data.issue.due_date ?? '';
+        dueDateState = { type: 'idle' };
       }
     }
   });
@@ -348,6 +378,108 @@
     }
   }
 
+  async function sendDueDate(command: DueDateCommand): Promise<void> {
+    if (dueDateState.type === 'pending') {
+      return;
+    }
+    const generation = ++dueDateGeneration;
+    dueDateState = { type: 'pending', command };
+    try {
+      const result = await setIssueDueDate(
+        command.projectId,
+        command.issue,
+        command.actorId,
+        command.idempotencyKey,
+        command.input,
+        dueDateOperation.signal,
+      );
+      if (generation !== dueDateGeneration) {
+        return;
+      }
+      selectedDueDate = result.receipt.due_date ?? '';
+      dueDateState = {
+        type: 'confirmed',
+        dueDate: result.receipt.due_date,
+      };
+      await screen.refresh();
+    } catch (error) {
+      if (generation !== dueDateGeneration) {
+        return;
+      }
+      if (error instanceof IssueDueDateIdentityChanged) {
+        selectedDueDate = '';
+        selectedDueDateIssueId = '';
+        dueDateState = { type: 'idle' };
+        screen.suspend();
+        if (document.visibilityState === 'visible') {
+          void screen.start();
+        }
+        return;
+      }
+      if (error instanceof IssueRequestError) {
+        if (error.status === 401) {
+          selectedDueDate = '';
+          selectedDueDateIssueId = '';
+          dueDateState = { type: 'idle' };
+          return;
+        }
+        if (error.status === 409) {
+          dueDateState = { type: 'conflict' };
+          await screen.refresh();
+          return;
+        }
+        if (error.status >= 500) {
+          dueDateState = { type: 'uncertain', command };
+          return;
+        }
+        dueDateState = { type: 'error' };
+        if (error.status === 403 || error.status === 404) {
+          await screen.refresh();
+          if (view.type === 'ready' && view.data.type === 'detail') {
+            selectedDueDate = view.data.issue.due_date ?? '';
+          } else {
+            selectedDueDate = '';
+          }
+        }
+        return;
+      }
+      dueDateState = { type: 'uncertain', command };
+    }
+  }
+
+  function saveDueDate(value: string | null = selectedDueDate || null): void {
+    if (
+      view.type !== 'ready' ||
+      view.data.type !== 'detail' ||
+      !view.data.canUpdateIssueFields ||
+      view.data.issue.trashed_at !== undefined ||
+      dueDateState.type === 'pending' ||
+      dueDateState.type === 'uncertain'
+    ) {
+      return;
+    }
+    void sendDueDate({
+      projectId: view.data.issue.project_id,
+      actorId: view.data.actorId,
+      issue: {
+        id: view.data.issue.id,
+        issue_number: view.data.issue.issue_number,
+        issue_key: view.data.issue.issue_key,
+      },
+      idempotencyKey: globalThis.crypto.randomUUID(),
+      input: {
+        expected_version: view.data.issue.version,
+        due_date: value,
+      },
+    });
+  }
+
+  function replayDueDate(): void {
+    if (dueDateState.type === 'uncertain') {
+      void sendDueDate(dueDateState.command);
+    }
+  }
+
   onMount(() => {
     const unsubscribeSession = onSessionEnded(() => {
       moveGeneration += 1;
@@ -358,6 +490,12 @@
       priorityOperation.abort();
       priorityOperation = new AbortController();
       priorityState = { type: 'idle' };
+      dueDateGeneration += 1;
+      dueDateOperation.abort();
+      dueDateOperation = new AbortController();
+      dueDateState = { type: 'idle' };
+      selectedDueDate = '';
+      selectedDueDateIssueId = '';
       flushSync(() => screen.sessionEnded());
     });
     const conceal = () => {
@@ -365,6 +503,8 @@
       moveOperation = new AbortController();
       priorityOperation.abort();
       priorityOperation = new AbortController();
+      dueDateOperation.abort();
+      dueDateOperation = new AbortController();
       flushSync(() => screen.suspend());
     };
     const restore = () => {
@@ -422,8 +562,8 @@
   </h1>
   <p class="intro">
     Leitura em desenvolvimento. O board permite mover cards para o topo das
-    colunas visíveis e a prioridade pode ser alterada no detalhe; atribuição,
-    prazo, filtros e atualização ao vivo ainda não estão disponíveis.
+    colunas visíveis; prioridade e prazo podem ser alterados no detalhe.
+    Atribuição, filtros e atualização ao vivo ainda não estão disponíveis.
   </p>
   <nav class="work-links" aria-label="Navegação do trabalho">
     <a href="/projects">Meus projetos</a>
@@ -518,7 +658,9 @@
               <p class="hint">
                 {priorities[issue.priority]}{issue.due_date === undefined
                   ? ''
-                  : ` · Prazo ${issue.due_date}`}
+                  : ` · Prazo ${issue.due_date}`}{issue.is_overdue
+                  ? ' · Atrasada'
+                  : ''}
               </p>
             </li>
           {/each}
@@ -610,7 +752,7 @@
             </div>
             {#if issue.due_date !== undefined}<div>
                 <dt>Prazo</dt>
-                <dd>{issue.due_date}</dd>
+                <dd>{issue.due_date}{issue.is_overdue ? ' · Atrasada' : ''}</dd>
               </div>{/if}
             <div>
               <dt>Versão</dt>
@@ -679,6 +821,68 @@
                   {priorities[priorityState.priority]}.
                 </p>{/if}
             </section>{/if}
+          {#if data.canUpdateIssueFields && issue.trashed_at === undefined}<section
+              aria-labelledby="due-date-update-title"
+            >
+              <h3 id="due-date-update-title">Alterar prazo</h3>
+              <form
+                class="due-date-form"
+                onsubmit={(event) => {
+                  event.preventDefault();
+                  saveDueDate();
+                }}
+              >
+                <label for="issue-due-date">Prazo · data civil</label>
+                <input
+                  id="issue-due-date"
+                  type="date"
+                  bind:value={selectedDueDate}
+                  disabled={dueDateState.type === 'pending' ||
+                    dueDateState.type === 'uncertain'}
+                />
+                <p class="hint">
+                  O prazo permanece nesta data no calendário da organização;
+                  datas passadas são aceitas.
+                </p>
+                <div class="form-actions">
+                  <button
+                    type="submit"
+                    disabled={dueDateState.type === 'pending' ||
+                      dueDateState.type === 'uncertain'}>Salvar prazo</button
+                  >
+                  <button
+                    type="button"
+                    disabled={dueDateState.type === 'pending' ||
+                      dueDateState.type === 'uncertain'}
+                    onclick={() => saveDueDate(null)}>Limpar prazo</button
+                  >
+                </div>
+              </form>
+              {#if dueDateState.type === 'pending'}<p role="status">
+                  Salvando prazo…
+                </p>{/if}
+              {#if dueDateState.type === 'uncertain'}<div role="alert">
+                  <p>
+                    Não foi possível confirmar o prazo. Não crie outro comando.
+                  </p>
+                  <button onclick={replayDueDate}
+                    >Repetir o mesmo comando com a mesma chave</button
+                  >
+                </div>{/if}
+              {#if dueDateState.type === 'conflict'}<p role="alert">
+                  A issue mudou. Os dados foram atualizados; revise a data
+                  escolhida antes de salvar novamente.
+                </p>{/if}
+              {#if dueDateState.type === 'error'}<p role="alert">
+                  O prazo não foi alterado. Verifique o acesso e tente
+                  novamente.
+                </p>{/if}
+              {#if dueDateState.type === 'confirmed'}<p role="status">
+                  {dueDateState.dueDate === null
+                    ? 'Prazo removido.'
+                    : `Prazo definido para ${dueDateState.dueDate}.`}
+                </p>{/if}
+            </section>{/if}
           <section aria-labelledby="description-title">
             <h3 id="description-title">Descrição · fonte Markdown</h3>
             <p class="hint">
@@ -699,11 +903,13 @@
                     >Referência do autor {event.actor_user_id}</span
                   >
                   {#if event.change !== undefined}<span>
-                      {event.change.field === 'priority'
-                        ? 'Prioridade'
-                        : 'Campo'}:
-                      {priorities[event.change.before]} →
-                      {priorities[event.change.after]}
+                      {#if event.change.field === 'priority'}Prioridade:
+                        {priorities[event.change.before]} →
+                        {priorities[event.change.after]}
+                      {:else}
+                        Prazo: {event.change.before ?? 'Sem prazo'} →
+                        {event.change.after ?? 'Sem prazo'}
+                      {/if}
                     </span>{/if}
                 </li>{/each}
             </ul>
@@ -814,6 +1020,39 @@
     margin-top: 32px;
     border-top: 1px solid var(--border);
     padding-top: 20px;
+  }
+  .due-date-form {
+    display: grid;
+    gap: 12px;
+  }
+  .due-date-form label {
+    font-weight: 600;
+  }
+  .due-date-form input {
+    box-sizing: border-box;
+    width: 100%;
+    min-height: 44px;
+    padding: 10px 12px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--surface);
+    color: var(--text);
+    font: inherit;
+  }
+  .due-date-form input:focus-visible,
+  .due-date-form button:focus-visible {
+    outline: 3px solid var(--primary);
+    outline-offset: 3px;
+  }
+  .form-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+  }
+  .due-date-form button {
+    min-height: 44px;
+    padding: 8px 12px;
+    font: inherit;
   }
   h3 {
     font-size: 16px;

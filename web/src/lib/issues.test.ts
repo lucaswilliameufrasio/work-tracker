@@ -22,6 +22,7 @@ const summary = {
   title: 'Untrusted <script>text</script>',
   creator_user_id: id,
   priority: 'none',
+  is_overdue: false,
   version: '9223372036854775807',
   created_at: time,
   updated_at: time,
@@ -75,7 +76,7 @@ describe('issue DTO boundary', () => {
       ),
     ).toThrow();
   });
-  it('accepts only typed priority diffs for structured field events', () => {
+  it('accepts only typed priority or civil-date diffs for structured field events', () => {
     const changed = {
       ...event,
       event_kind: 'issue.field_updated',
@@ -86,10 +87,6 @@ describe('issue DTO boundary', () => {
         .data[0],
     ).toEqual(changed);
     for (const value of [
-      {
-        ...changed,
-        change: { field: 'due_date', before: 'none', after: 'urgent' },
-      },
       {
         ...changed,
         change: { field: 'priority', before: 'none', after: 'none' },
@@ -103,6 +100,40 @@ describe('issue DTO boundary', () => {
     ]) {
       expect(() =>
         parseIssueHistoryPage({ data: [value], has_more: false }, id, 20),
+      ).toThrow();
+    }
+    const dueDateChange = {
+      ...changed,
+      change: { field: 'due_date', before: null, after: '2028-02-29' },
+    };
+    expect(
+      parseIssueHistoryPage({ data: [dueDateChange], has_more: false }, id, 20)
+        .data[0],
+    ).toEqual(dueDateChange);
+    for (const invalidChange of [
+      {
+        ...dueDateChange,
+        change: { field: 'due_date', before: null, after: '2026-02-29' },
+      },
+      {
+        ...dueDateChange,
+        change: {
+          field: 'due_date',
+          before: '2028-02-29',
+          after: '2028-02-29',
+        },
+      },
+      {
+        ...dueDateChange,
+        change: { field: 'due_date', before: 'none', after: null },
+      },
+    ]) {
+      expect(() =>
+        parseIssueHistoryPage(
+          { data: [invalidChange], has_more: false },
+          id,
+          20,
+        ),
       ).toThrow();
     }
   });
@@ -156,6 +187,7 @@ describe('issue DTO boundary', () => {
       { ...summary, title: '\ud800' },
       { ...summary, description: '\udfff' },
       { ...summary, priority: 'critical' },
+      { ...summary, is_overdue: 'false' },
       { ...summary, description: null },
       { ...summary, description: 'é'.repeat(32769) },
       { ...summary, assignee_user_id: null },

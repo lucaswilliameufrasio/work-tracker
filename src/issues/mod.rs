@@ -13,6 +13,7 @@ const MAX_DESCRIPTION_BYTES: usize = 65_536;
 const MAX_TITLE_CHARS: usize = 240;
 
 mod board;
+pub(crate) mod deadlines;
 mod queries;
 pub use board::{BoardColumnPage, BoardCursor, BoardOptions};
 pub mod creation;
@@ -72,6 +73,7 @@ pub struct IssueRecord {
     pub creator_user_id: String,
     pub priority: IssuePriority,
     pub due_date: Option<NaiveDate>,
+    pub is_overdue: bool,
     pub rank: i64,
     pub version: i64,
     pub completed_at: Option<DateTime<Utc>>,
@@ -274,6 +276,7 @@ impl IssueStore {
             creator_user_id: actor_user_id.to_owned(),
             priority: IssuePriority::None,
             due_date: None,
+            is_overdue: false,
             rank,
             version: 1,
             completed_at: None,

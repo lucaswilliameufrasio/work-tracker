@@ -42,6 +42,10 @@ pub(super) fn routes() -> Router<Arc<BrowserState>> {
             put(priority::set_priority),
         )
         .route(
+            "/api/v1/projects/{project_id}/issues/{issue_number}/due-date",
+            put(due_date::set_due_date),
+        )
+        .route(
             "/api/v1/projects/{project_id}/issues/{issue_number}/move",
             post(movement::move_issue),
         )
@@ -50,6 +54,7 @@ pub(super) fn routes() -> Router<Arc<BrowserState>> {
 mod board;
 mod create;
 mod detail;
+mod due_date;
 mod movement;
 mod priority;
 mod text;
@@ -76,6 +81,7 @@ struct ListedIssue {
     priority: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     due_date: Option<String>,
+    is_overdue: bool,
     version: String,
     created_at: String,
     updated_at: String,
@@ -123,6 +129,7 @@ impl TryFrom<IssueSummary> for ListedIssue {
             due_date: issue
                 .due_date
                 .map(|date| date.format("%Y-%m-%d").to_string()),
+            is_overdue: issue.is_overdue,
             version: issue.version.to_string(),
             created_at: format_timestamp(issue.created_at),
             updated_at: format_timestamp(issue.updated_at),
@@ -210,7 +217,10 @@ fn read_error(error: SessionIssueReadError) -> ApiError {
         | SessionIssueReadError::Issue(IssueReadError::Database(_))
         | SessionIssueReadError::Issue(IssueReadError::AccessState(AccessStoreError::Database(
             _,
-        ))) => storage_unavailable(),
+        )))
+        | SessionIssueReadError::Issue(IssueReadError::OrganizationTimezoneUnavailable) => {
+            storage_unavailable()
+        }
         SessionIssueReadError::Issue(IssueReadError::Unavailable) => ApiError::new(
             StatusCode::NOT_FOUND,
             "not_found",

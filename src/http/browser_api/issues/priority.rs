@@ -148,7 +148,7 @@ fn unexpected() -> ApiError {
     )
 }
 
-fn field_error(error: IssueFieldError) -> ApiError {
+pub(super) fn field_error(error: IssueFieldError) -> ApiError {
     match error {
         IssueFieldError::Unauthenticated => unauthenticated(),
         IssueFieldError::Unavailable => ApiError::new(
@@ -160,7 +160,7 @@ fn field_error(error: IssueFieldError) -> ApiError {
         IssueFieldError::VersionConflict => ApiError::new(
             StatusCode::CONFLICT,
             "issue_version_conflict",
-            "Reload the issue before changing its priority",
+            "Reload the issue before changing a field",
             false,
         ),
         IssueFieldError::IdempotencyConflict => ApiError::new(
@@ -197,6 +197,7 @@ fn field_error(error: IssueFieldError) -> ApiError {
         IssueFieldError::Database(_) | IssueFieldError::Access(AccessStoreError::Database(_)) => {
             storage_unavailable()
         }
+        IssueFieldError::OrganizationTimezoneUnavailable => storage_unavailable(),
         IssueFieldError::Session(error) => session_error(error),
         _ => unexpected(),
     }

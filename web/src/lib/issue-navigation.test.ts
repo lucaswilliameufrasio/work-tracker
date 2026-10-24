@@ -277,6 +277,7 @@ it('composite detail rejects a journal from a different issue even in the same p
       title: 'Detail',
       creator_user_id: id,
       priority: 'none',
+      is_overdue: false,
       version: '1',
       created_at: time,
       updated_at: time,

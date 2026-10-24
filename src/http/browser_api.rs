@@ -513,6 +513,7 @@ async fn method_not_allowed(request: Request) -> Response {
                         path.as_str(),
                         "/api/v1/projects/{project_id}/issues/{issue_number}/text"
                             | "/api/v1/projects/{project_id}/issues/{issue_number}/priority"
+                            | "/api/v1/projects/{project_id}/issues/{issue_number}/due-date"
                     )
                 })
             {

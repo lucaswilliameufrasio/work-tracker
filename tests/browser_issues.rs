@@ -42,6 +42,9 @@ mod movement;
 #[path = "browser_issues/priority.rs"]
 mod priority;
 
+#[path = "browser_issues/due_date.rs"]
+mod due_date;
+
 #[tokio::test]
 async fn history_serializes_repeated_typed_text_changes_without_content_snapshots() {
     let f = Fixture::new().await;

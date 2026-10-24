@@ -13,6 +13,7 @@ export type IssueSummary = {
   creator_user_id: string;
   priority: 'none' | 'low' | 'medium' | 'high' | 'urgent';
   due_date?: string;
+  is_overdue: boolean;
   version: string;
   created_at: string;
   updated_at: string;
@@ -35,7 +36,9 @@ export type IssueHistoryEvent = {
     | 'issue.text_updated'
     | 'issue.moved'
     | 'issue.field_updated';
-  change?: { field: 'priority'; before: IssuePriority; after: IssuePriority };
+  change?:
+    | { field: 'priority'; before: IssuePriority; after: IssuePriority }
+    | { field: 'due_date'; before: string | null; after: string | null };
   occurred_at: string;
 };
 export type IssuePage<T> = {
@@ -57,6 +60,7 @@ const summaryFields = [
   'creator_user_id',
   'priority',
   'due_date',
+  'is_overdue',
   'version',
   'created_at',
   'updated_at',
@@ -148,6 +152,9 @@ function summary(
     return invalid();
   }
   const issuePriority = priority(item.priority);
+  if (typeof item.is_overdue !== 'boolean') {
+    return invalid();
+  }
   const result: IssueSummary = {
     id: uuid(item.id),
     project_id: project,
@@ -158,6 +165,7 @@ function summary(
     title,
     creator_user_id: uuid(item.creator_user_id),
     priority: issuePriority,
+    is_overdue: item.is_overdue,
     version: decimal(item.version),
     created_at: timestamp(item.created_at),
     updated_at: timestamp(item.updated_at),
@@ -307,12 +315,24 @@ export function parseIssueHistoryPage(
     let change: IssueHistoryEvent['change'];
     if (kind === 'issue.field_updated') {
       const rawChange = fields(event.change, ['field', 'before', 'after']);
-      const before = priority(rawChange.before);
-      const after = priority(rawChange.after);
-      if (rawChange.field !== 'priority' || before === after) {
+      if (rawChange.field === 'priority') {
+        const before = priority(rawChange.before);
+        const after = priority(rawChange.after);
+        if (before === after) {
+          return invalid();
+        }
+        change = { field: 'priority', before, after };
+      } else if (rawChange.field === 'due_date') {
+        const before =
+          rawChange.before === null ? null : date(rawChange.before);
+        const after = rawChange.after === null ? null : date(rawChange.after);
+        if (before === after) {
+          return invalid();
+        }
+        change = { field: 'due_date', before, after };
+      } else {
         return invalid();
       }
-      change = { field: 'priority', before, after };
     } else if ('change' in event) {
       return invalid();
     }

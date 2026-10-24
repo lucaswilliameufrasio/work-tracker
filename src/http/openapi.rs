@@ -279,6 +279,36 @@ pub fn browser_document() -> Value {
         "/api/v1/projects/{project_id}/issues/{issue_number}/priority".into(),
         json!({"put": set_priority}),
     );
+    let mut set_due_date = create.clone();
+    set_due_date["operationId"] = json!("setProjectIssueDueDate");
+    set_due_date["description"] = json!(
+        "Set or clear one nontrashed issue's civil due date using its current expected version. The date remains YYYY-MM-DD; overdue is derived using the organization's configured IANA timezone. Session, MutateIssues authority, timezone validity, issue eligibility, version, structured history, content-free outbox envelope and immutable idempotency receipt share one transaction. Past dates are allowed. Exact replay returns the original receipt; preserve the same key and request after an uncertain result. A stale version returns409. No query options, omitted due_date, unknown or duplicate fields."
+    );
+    set_due_date["parameters"].as_array_mut().unwrap().push(
+        json!({"name": "issue_number", "in": "path", "required": true, "schema": decimal_i64()}),
+    );
+    set_due_date["requestBody"] = json!({"required": true, "description": "Uncompressed JSON <=524288 bytes/one-second pre-handler deadline. Required expected_version positive i64 decimal string and due_date, which is a real canonical YYYY-MM-DD civil date or explicit null to clear. This updates exactly one field.", "content": {"application/json": {"schema": object(json!({"expected_version": decimal_i64(), "due_date": {"anyOf": [{"type": "string", "format": "date"}, {"type": "null"}]}}), &["expected_version", "due_date"])}}});
+    let mut due_date_success = set_due_date["responses"]["201"].clone();
+    due_date_success["description"] = json!(
+        "Committed due-date change, effective no-op or exact replay; changed/due_date/result_version describe the original command, not subsequent state. due_date is null when the command cleared it."
+    );
+    due_date_success["content"]["application/json"]["schema"] =
+        json!({"$ref": "#/components/schemas/IssueDueDateReceipt"});
+    set_due_date["responses"]
+        .as_object_mut()
+        .unwrap()
+        .remove("201");
+    set_due_date["responses"]["200"] = due_date_success;
+    set_due_date["responses"]["409"] = error_response(
+        "issue_version_conflict/idempotency_conflict/issue_capacity_exhausted/issue_clock_conflict; retryable=false",
+        true,
+    );
+    set_due_date["responses"]["413"] =
+        error_response("payload_too_large: due-date JSON exceeds524288 bytes", true);
+    paths.insert(
+        "/api/v1/projects/{project_id}/issues/{issue_number}/due-date".into(),
+        json!({"put": set_due_date}),
+    );
     let mut move_issue = create.clone();
     move_issue["operationId"] = json!("moveProjectIssue");
     move_issue["description"] = json!(
@@ -315,7 +345,7 @@ pub fn browser_document() -> Value {
         "info": {
             "title": "Puxiri opt-in browser API — partial development contract",
             "version": env!("CARGO_PKG_VERSION"),
-            "description": "Disabled (404) unless --browser-origin/PUXIRI_BROWSER_ORIGIN is configured. Listener does not terminate TLS; use an explicitly configured HTTPS origin. Cookie-only authentication; no Authorization fallback. Host must match; Origin and Fetch Metadata are checked when supplied, and mutations require exact Origin plus CSRF. Unknown/duplicate query fields are rejected. Every operation has no-store responses; HEAD has no body, including errors. Browser admission: eight in-flight requests per router instance, no admission queue; path+query <=2048 bytes, headers <=64 entries/16384 aggregate name+value bytes. Only matched POST issue creation/move and PUT issue text/priority mutations accept JSON body bytes (<=524288); all other operations require an empty body. Bodies must finish within one second before any handler/transaction starts. There is no whole-handler timeout or per-client requests-per-second limit. No login/signup/setup/session issuance, API tokens or OAuth are provided by this contract. Do not store bearer tokens in localStorage. This document is generated locally, not served as an endpoint or a production readiness claim."
+            "description": "Disabled (404) unless --browser-origin/PUXIRI_BROWSER_ORIGIN is configured. Listener does not terminate TLS; use an explicitly configured HTTPS origin. Cookie-only authentication; no Authorization fallback. Host must match; Origin and Fetch Metadata are checked when supplied, and mutations require exact Origin plus CSRF. Unknown/duplicate query fields are rejected. Every operation has no-store responses; HEAD has no body, including errors. Browser admission: eight in-flight requests per router instance, no admission queue; path+query <=2048 bytes, headers <=64 entries/16384 aggregate name+value bytes. Only matched POST issue creation/move and PUT issue text/priority/due-date mutations accept JSON body bytes (<=524288); all other operations require an empty body. Bodies must finish within one second before any handler/transaction starts. There is no whole-handler timeout or per-client requests-per-second limit. No login/signup/setup/session issuance, API tokens or OAuth are provided by this contract. Do not store bearer tokens in localStorage. This document is generated locally, not served as an endpoint or a production readiness claim."
         },
         "security": [{"browserSession": []}],
         "paths": paths,
@@ -335,12 +365,13 @@ pub fn browser_document() -> Value {
                     "title": {"type": "string", "minLength": 1, "maxLength": 240},
                     "assignee_user_id": uuid.clone(), "creator_user_id": uuid.clone(),
                     "priority": {"type": "string", "enum": ["none", "low", "medium", "high", "urgent"]},
-                    "due_date": {"type": "string", "format": "date"}, "version": decimal_i64(),
+                    "due_date": {"type": "string", "format": "date"}, "is_overdue": {"type": "boolean"}, "version": decimal_i64(),
                     "created_at": timestamp.clone(), "updated_at": timestamp.clone()
-                }), &["id", "project_id", "issue_number", "issue_key", "issue_type_id", "status_id", "title", "creator_user_id", "priority", "version", "created_at", "updated_at"]),
+                }), &["id", "project_id", "issue_number", "issue_key", "issue_type_id", "status_id", "title", "creator_user_id", "priority", "is_overdue", "version", "created_at", "updated_at"]),
                 "IssuePage": page("Issue"),
                 "IssueTextReceipt": object(json!({"id": uuid.clone(), "project_id": uuid.clone(), "issue_number": decimal_i64(), "issue_key": {"type": "string"}, "result_version": decimal_i64(), "changed": {"type": "boolean"}}), &["id", "project_id", "issue_number", "issue_key", "result_version", "changed"]),
                 "IssuePriorityReceipt": object(json!({"id": uuid.clone(), "project_id": uuid.clone(), "issue_number": decimal_i64(), "issue_key": {"type": "string"}, "priority": {"type": "string", "enum": ["none", "low", "medium", "high", "urgent"]}, "result_version": decimal_i64(), "changed": {"type": "boolean"}}), &["id", "project_id", "issue_number", "issue_key", "priority", "result_version", "changed"]),
+                "IssueDueDateReceipt": object(json!({"id": uuid.clone(), "project_id": uuid.clone(), "issue_number": decimal_i64(), "issue_key": {"type": "string"}, "due_date": {"anyOf": [{"type": "string", "format": "date"}, {"type": "null"}]}, "result_version": decimal_i64(), "changed": {"type": "boolean"}}), &["id", "project_id", "issue_number", "issue_key", "due_date", "result_version", "changed"]),
                 "ProjectCapabilities": object(json!({"project_id": uuid.clone(), "can_create_issues": {"type": "boolean"}, "can_update_issue_fields": {"type": "boolean"}, "can_replace_issue_text": {"type": "boolean"}, "can_move_issues": {"type": "boolean"}}), &["project_id", "can_create_issues", "can_update_issue_fields", "can_replace_issue_text", "can_move_issues"]),
                 "IssueCreationReceipt": object(json!({"id": uuid.clone(), "project_id": uuid.clone(), "issue_number": decimal_i64(), "issue_key": {"type": "string"}, "created_version": {"type": "string", "enum": ["1"]}}), &["id", "project_id", "issue_number", "issue_key", "created_version"]),
                 "IssueMoveReceipt": object(json!({"id": uuid.clone(), "project_id": uuid.clone(), "issue_number": decimal_i64(), "issue_key": {"type": "string"}, "status_id": uuid.clone(), "result_version": decimal_i64(), "changed": {"type": "boolean"}}), &["id", "project_id", "issue_number", "issue_key", "status_id", "result_version", "changed"]),
@@ -364,8 +395,32 @@ pub fn browser_document() -> Value {
     detail["properties"]["completed_at"] = timestamp.clone();
     detail["properties"]["trashed_at"] = timestamp;
     document["components"]["schemas"]["IssueDetail"] = detail;
+    let priority_change = object(
+        json!({
+            "field": {"type": "string", "const": "priority"},
+            "before": {"type": "string", "enum": ["none", "low", "medium", "high", "urgent"]},
+            "after": {"type": "string", "enum": ["none", "low", "medium", "high", "urgent"]}
+        }),
+        &["field", "before", "after"],
+    );
+    let due_date_change = object(
+        json!({
+            "field": {"type": "string", "const": "due_date"},
+            "before": {"anyOf": [{"type": "string", "format": "date"}, {"type": "null"}]},
+            "after": {"anyOf": [{"type": "string", "format": "date"}, {"type": "null"}]}
+        }),
+        &["field", "before", "after"],
+    );
     let mut history_event = object(
-        json!({"id": uuid.clone(), "project_id": uuid.clone(), "issue_id": uuid.clone(), "actor_user_id": uuid, "event_kind": {"type": "string", "enum": ["issue.created", "issue.title_updated", "issue.description_updated", "issue.text_updated", "issue.moved", "issue.field_updated"]}, "change": object(json!({"field": {"type": "string", "const": "priority"}, "before": {"type": "string", "enum": ["none", "low", "medium", "high", "urgent"]}, "after": {"type": "string", "enum": ["none", "low", "medium", "high", "urgent"]}}), &["field", "before", "after"]), "occurred_at": {"type": "string", "format": "date-time"}}),
+        json!({
+            "id": uuid.clone(),
+            "project_id": uuid.clone(),
+            "issue_id": uuid.clone(),
+            "actor_user_id": uuid,
+            "event_kind": {"type": "string", "enum": ["issue.created", "issue.title_updated", "issue.description_updated", "issue.text_updated", "issue.moved", "issue.field_updated"]},
+            "change": {"oneOf": [priority_change, due_date_change]},
+            "occurred_at": {"type": "string", "format": "date-time"}
+        }),
         &[
             "id",
             "project_id",

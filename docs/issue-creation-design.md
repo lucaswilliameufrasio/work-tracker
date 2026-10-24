@@ -1,6 +1,6 @@
 # Issue creation — feature design
 
-**Status:** The original SQLite issue model/internal creation slice used `RUSTUP_TOOLCHAIN=1.99.0 PUXIRI_E2E_PORT=18495 make check`. Follow-up slice235 adds [session-bound idempotent creation and durable outbox envelopes](idempotent-issue-creation-design.md); the canonical development plan records its newer gate. HTTP/MCP creation, mutation UI, due-date operations and outbox workers remain pending.
+**Status:** The original SQLite issue model/internal creation slice used `RUSTUP_TOOLCHAIN=1.99.0 PUXIRI_E2E_PORT=18495 make check`. Follow-up slices add [session-bound idempotent creation and durable outbox envelopes](idempotent-issue-creation-design.md), browser creation/client/form, and the separate [versioned due-date operation](issue-due-date-design.md). Browser creation and due-date editing have local verification in the canonical development plan. MCP creation and outbox workers remain pending.
 
 **Requirements:** `docs/development-plan.md`, sections 2, 4–6, and 11.
 
@@ -8,7 +8,7 @@
 
 - An active project manager or member may create an issue in a project they explicitly belong to. A viewer, organization role without project membership, installation-admin role, inactive account, and archived project do not grant issue mutation.
 - The application boundary will supply the actor ID from a validated session. `IssueStore::create` is an internal use case, not an HTTP authorization boundary; it reloads current account, organization, project membership, and archive state inside `BEGIN IMMEDIATE` before authorization.
-- The caller supplies a required title, optional Markdown description, and optional assignee. Type/status are not client-selectable in this command: the use case resolves the active `task` and `todo` system keys, independent of localized/editable names. Priority starts at `none`; due date is omitted until the organization-timezone rule is available.
+- The caller supplies a required title, optional Markdown description, and optional assignee. Type/status are not client-selectable in this command: the use case resolves the active `task` and `todo` system keys, independent of localized/editable names. Priority starts at `none`; this command leaves due date unset, and the separate versioned field command edits or clears it.
 - Optional assignee must be an active project manager/member, including a guest with explicit project membership. Viewers and non-members cannot be assigned.
 - Under the same write transaction, allocate the next project issue number, choose a rank in the `todo` column, insert the issue and append content-free history and (since migration0031) a versioned outbox envelope. SessionIssueWriter additionally persists an idempotency receipt before commit. A failure at any step leaves no partial issue/event/receipt or consumed counter value.
 
@@ -18,7 +18,7 @@
 - Composite foreign keys bind issue type, status, and assignee to the same project. The creator is retained as authorship. The database checks title length (1–240 Unicode scalar values), Markdown description byte size (at most 64 KiB), priority enum, positive issue number/version, and integer rank.
 - Initial rank uses a 1,024-point stride after the current maximum rank in the active target column. This leaves integer gaps for later inserts; rebalance/move behavior remains a separate slice.
 - History records operation, actor, issue, project, and UTC time only. It has no free-text diff/payload, so create history cannot duplicate the title or description.
-- Project-local today and timezone-aware due-date validation are not approximated with UTC. This command does not accept a due date; adding that contract requires using the configured IANA organization timezone.
+- This creation command does not accept a due date. The separate due-date field command uses the configured IANA organization timezone to derive the overdue projection; any future creation-time date input must follow the same civil-date contract.
 
 ## Transaction and module ownership
 
@@ -29,7 +29,7 @@
 
 ## Deliberately deferred
 
-Slice235 implements the internal operation/principal-scoped receipt contract and atomic versioned outbox persistence; no expiry/reuse policy is enabled. Public HTTP/MCP idempotency/envelope contracts, production retention/quotas/key rotation, outbox job leases/delivery, due dates, arbitrary type/status selection, issue update/move/reopen/trash/purge, comments, FTS, mutation routes/UI and real-time delivery remain separate. Before supporting due dates, use the organization-local day. Before triggering automations, implement durable claim/retry/recovery and current relevance/access checks, not an in-memory event queue.
+Slice235 implements the internal operation/principal-scoped receipt contract and atomic versioned outbox persistence; no expiry/reuse policy is enabled. MCP creation, production retention/quotas/key rotation, outbox job leases/delivery, arbitrary type/status selection, assignment editing, reopen/trash/purge, comments, FTS and real-time delivery remain separate. Due-date editing is a separate browser command and is not part of issue creation. Before triggering automations, implement durable claim/retry/recovery and current relevance/access checks, not an in-memory event queue.
 
 ## Verification plan
 

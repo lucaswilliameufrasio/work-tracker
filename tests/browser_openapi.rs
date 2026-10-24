@@ -68,6 +68,10 @@ fn generated_contract_has_unique_operations_resolved_refs_and_only_implemented_r
             "put",
         ),
         (
+            "/api/v1/projects/{project_id}/issues/{issue_number}/due-date",
+            "put",
+        ),
+        (
             "/api/v1/projects/{project_id}/issues/{issue_number}/move",
             "post",
         ),
@@ -141,6 +145,31 @@ fn generated_contract_has_unique_operations_resolved_refs_and_only_implemented_r
         }
     }
     assert_eq!(actual, expected);
+    let due_date =
+        &document["paths"]["/api/v1/projects/{project_id}/issues/{issue_number}/due-date"]["put"];
+    assert_eq!(due_date["operationId"], "setProjectIssueDueDate");
+    assert_eq!(
+        due_date["requestBody"]["content"]["application/json"]["schema"]["required"],
+        serde_json::json!(["expected_version", "due_date"])
+    );
+    assert_eq!(
+        document["components"]["schemas"]["IssueDueDateReceipt"]["required"],
+        serde_json::json!([
+            "id",
+            "project_id",
+            "issue_number",
+            "issue_key",
+            "due_date",
+            "result_version",
+            "changed"
+        ])
+    );
+    assert!(
+        document["components"]["schemas"]["Issue"]["required"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("is_overdue"))
+    );
     let round_trip: Value =
         serde_json::from_str(&serde_json::to_string_pretty(&document).unwrap()).unwrap();
     assert_eq!(round_trip, document);
