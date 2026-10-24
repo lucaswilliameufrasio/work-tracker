@@ -249,6 +249,36 @@ pub fn browser_document() -> Value {
         "/api/v1/projects/{project_id}/issues/{issue_number}/text".into(),
         json!({"put": replace}),
     );
+    let mut set_priority = create.clone();
+    set_priority["operationId"] = json!("setProjectIssuePriority");
+    set_priority["description"] = json!(
+        "Set one nontrashed issue's priority with the current expected version. Session, MutateIssues authority, issue eligibility, version, structured history, outbox envelope and immutable idempotency receipt share one transaction. Exact replay returns the original content-free receipt; preserve the same key and request after an uncertain result. A stale version returns409. No query options, explicit null, unknown or duplicate fields."
+    );
+    set_priority["parameters"].as_array_mut().unwrap().push(
+        json!({"name": "issue_number", "in": "path", "required": true, "schema": decimal_i64()}),
+    );
+    set_priority["requestBody"] = json!({"required": true, "description": "Uncompressed JSON <=524288 bytes/one-second pre-handler deadline. Required expected_version positive i64 decimal string and priority enum. This updates exactly one field.", "content": {"application/json": {"schema": object(json!({"expected_version": decimal_i64(), "priority": {"type": "string", "enum": ["none", "low", "medium", "high", "urgent"]}}), &["expected_version", "priority"])}}});
+    let mut priority_success = set_priority["responses"]["201"].clone();
+    priority_success["description"] = json!(
+        "Committed priority change, effective no-op or exact replay; changed/priority/result_version describe the original command, not subsequent state."
+    );
+    priority_success["content"]["application/json"]["schema"] =
+        json!({"$ref": "#/components/schemas/IssuePriorityReceipt"});
+    set_priority["responses"]
+        .as_object_mut()
+        .unwrap()
+        .remove("201");
+    set_priority["responses"]["200"] = priority_success;
+    set_priority["responses"]["409"] = error_response(
+        "issue_version_conflict/idempotency_conflict/issue_capacity_exhausted/issue_clock_conflict; retryable=false",
+        true,
+    );
+    set_priority["responses"]["413"] =
+        error_response("payload_too_large: priority JSON exceeds524288 bytes", true);
+    paths.insert(
+        "/api/v1/projects/{project_id}/issues/{issue_number}/priority".into(),
+        json!({"put": set_priority}),
+    );
     let mut move_issue = create.clone();
     move_issue["operationId"] = json!("moveProjectIssue");
     move_issue["description"] = json!(
@@ -285,7 +315,7 @@ pub fn browser_document() -> Value {
         "info": {
             "title": "Puxiri opt-in browser API — partial development contract",
             "version": env!("CARGO_PKG_VERSION"),
-            "description": "Disabled (404) unless --browser-origin/PUXIRI_BROWSER_ORIGIN is configured. Listener does not terminate TLS; use an explicitly configured HTTPS origin. Cookie-only authentication; no Authorization fallback. Host must match; Origin and Fetch Metadata are checked when supplied, and mutations require exact Origin plus CSRF. Unknown/duplicate query fields are rejected. Every operation has no-store responses; HEAD has no body, including errors. Browser admission: eight in-flight requests per router instance, no admission queue; path+query <=2048 bytes, headers <=64 entries/16384 aggregate name+value bytes. Only matched POST issue creation, POST issue move and PUT issue text replacement accept JSON body bytes (<=524288); all other operations require an empty body. Bodies must finish within one second before any handler/transaction starts. There is no whole-handler timeout or per-client requests-per-second limit. No login/signup/setup/session issuance, API tokens or OAuth are provided by this contract. Do not store bearer tokens in localStorage. This document is generated locally, not served as an endpoint or a production readiness claim."
+            "description": "Disabled (404) unless --browser-origin/PUXIRI_BROWSER_ORIGIN is configured. Listener does not terminate TLS; use an explicitly configured HTTPS origin. Cookie-only authentication; no Authorization fallback. Host must match; Origin and Fetch Metadata are checked when supplied, and mutations require exact Origin plus CSRF. Unknown/duplicate query fields are rejected. Every operation has no-store responses; HEAD has no body, including errors. Browser admission: eight in-flight requests per router instance, no admission queue; path+query <=2048 bytes, headers <=64 entries/16384 aggregate name+value bytes. Only matched POST issue creation/move and PUT issue text/priority mutations accept JSON body bytes (<=524288); all other operations require an empty body. Bodies must finish within one second before any handler/transaction starts. There is no whole-handler timeout or per-client requests-per-second limit. No login/signup/setup/session issuance, API tokens or OAuth are provided by this contract. Do not store bearer tokens in localStorage. This document is generated locally, not served as an endpoint or a production readiness claim."
         },
         "security": [{"browserSession": []}],
         "paths": paths,
@@ -310,7 +340,8 @@ pub fn browser_document() -> Value {
                 }), &["id", "project_id", "issue_number", "issue_key", "issue_type_id", "status_id", "title", "creator_user_id", "priority", "version", "created_at", "updated_at"]),
                 "IssuePage": page("Issue"),
                 "IssueTextReceipt": object(json!({"id": uuid.clone(), "project_id": uuid.clone(), "issue_number": decimal_i64(), "issue_key": {"type": "string"}, "result_version": decimal_i64(), "changed": {"type": "boolean"}}), &["id", "project_id", "issue_number", "issue_key", "result_version", "changed"]),
-                "ProjectCapabilities": object(json!({"project_id": uuid.clone(), "can_create_issues": {"type": "boolean"}, "can_replace_issue_text": {"type": "boolean"}, "can_move_issues": {"type": "boolean"}}), &["project_id", "can_create_issues", "can_replace_issue_text", "can_move_issues"]),
+                "IssuePriorityReceipt": object(json!({"id": uuid.clone(), "project_id": uuid.clone(), "issue_number": decimal_i64(), "issue_key": {"type": "string"}, "priority": {"type": "string", "enum": ["none", "low", "medium", "high", "urgent"]}, "result_version": decimal_i64(), "changed": {"type": "boolean"}}), &["id", "project_id", "issue_number", "issue_key", "priority", "result_version", "changed"]),
+                "ProjectCapabilities": object(json!({"project_id": uuid.clone(), "can_create_issues": {"type": "boolean"}, "can_update_issue_fields": {"type": "boolean"}, "can_replace_issue_text": {"type": "boolean"}, "can_move_issues": {"type": "boolean"}}), &["project_id", "can_create_issues", "can_update_issue_fields", "can_replace_issue_text", "can_move_issues"]),
                 "IssueCreationReceipt": object(json!({"id": uuid.clone(), "project_id": uuid.clone(), "issue_number": decimal_i64(), "issue_key": {"type": "string"}, "created_version": {"type": "string", "enum": ["1"]}}), &["id", "project_id", "issue_number", "issue_key", "created_version"]),
                 "IssueMoveReceipt": object(json!({"id": uuid.clone(), "project_id": uuid.clone(), "issue_number": decimal_i64(), "issue_key": {"type": "string"}, "status_id": uuid.clone(), "result_version": decimal_i64(), "changed": {"type": "boolean"}}), &["id", "project_id", "issue_number", "issue_key", "status_id", "result_version", "changed"]),
                 "Error": object(json!({"code": {"type": "string"}, "message": {"type": "string"}, "request_id": {"type": "string", "format": "uuid"}, "field_errors": {"type": "object", "additionalProperties": {"type": "string"}}, "retryable": {"type": "boolean"}}), &["code", "message", "request_id", "field_errors", "retryable"])
@@ -333,8 +364,8 @@ pub fn browser_document() -> Value {
     detail["properties"]["completed_at"] = timestamp.clone();
     detail["properties"]["trashed_at"] = timestamp;
     document["components"]["schemas"]["IssueDetail"] = detail;
-    document["components"]["schemas"]["IssueHistoryEvent"] = object(
-        json!({"id": uuid.clone(), "project_id": uuid.clone(), "issue_id": uuid.clone(), "actor_user_id": uuid, "event_kind": {"type": "string", "enum": ["issue.created", "issue.title_updated", "issue.description_updated", "issue.text_updated", "issue.moved"]}, "occurred_at": {"type": "string", "format": "date-time"}}),
+    let mut history_event = object(
+        json!({"id": uuid.clone(), "project_id": uuid.clone(), "issue_id": uuid.clone(), "actor_user_id": uuid, "event_kind": {"type": "string", "enum": ["issue.created", "issue.title_updated", "issue.description_updated", "issue.text_updated", "issue.moved", "issue.field_updated"]}, "change": object(json!({"field": {"type": "string", "const": "priority"}, "before": {"type": "string", "enum": ["none", "low", "medium", "high", "urgent"]}, "after": {"type": "string", "enum": ["none", "low", "medium", "high", "urgent"]}}), &["field", "before", "after"]), "occurred_at": {"type": "string", "format": "date-time"}}),
         &[
             "id",
             "project_id",
@@ -344,6 +375,23 @@ pub fn browser_document() -> Value {
             "occurred_at",
         ],
     );
+    history_event["allOf"] = json!([
+        {
+            "if": {
+                "properties": {"event_kind": {"const": "issue.field_updated"}},
+                "required": ["event_kind"]
+            },
+            "then": {"required": ["change"]}
+        },
+        {
+            "if": {
+                "properties": {"event_kind": {"not": {"const": "issue.field_updated"}}},
+                "required": ["event_kind"]
+            },
+            "then": {"not": {"required": ["change"]}}
+        }
+    ]);
+    document["components"]["schemas"]["IssueHistoryEvent"] = history_event;
     document["components"]["schemas"]["IssueHistoryPage"] = page("IssueHistoryEvent");
     let mut properties = json!({
         "id": {"type": "string", "format": "uuid"},

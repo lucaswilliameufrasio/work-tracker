@@ -17,6 +17,13 @@
   } from './issue-move.ts';
   import type { BoardCard } from './board.ts';
   import { onSessionEnded } from './session-lifecycle.ts';
+  import {
+    IssuePriorityIdentityChanged,
+    setIssuePriority,
+    type IssuePriorityInput,
+    type IssuePriorityTarget,
+  } from './issue-priority.ts';
+  import type { IssuePriority } from './issues.ts';
 
   const route = workRoute(
     globalThis.location.pathname,
@@ -37,10 +44,29 @@
     | { type: 'confirmed'; issueKey: string }
     | { type: 'conflict' }
     | { type: 'error' };
+  type PriorityCommand = {
+    projectId: string;
+    actorId: string;
+    issue: IssuePriorityTarget;
+    idempotencyKey: string;
+    input: IssuePriorityInput;
+  };
+  type PriorityState =
+    | { type: 'idle' }
+    | { type: 'pending'; command: PriorityCommand }
+    | { type: 'uncertain'; command: PriorityCommand }
+    | { type: 'confirmed'; priority: IssuePriority }
+    | { type: 'conflict' }
+    | { type: 'error' };
   let view = $state<WorkState>({ type: 'idle' });
   let moveState = $state<MoveState>({ type: 'idle' });
+  let priorityState = $state<PriorityState>({ type: 'idle' });
+  let selectedPriority = $state<IssuePriority>('none');
+  let selectedPriorityIssueId = '';
   let moveOperation = new AbortController();
   let moveGeneration = 0;
+  let priorityOperation = new AbortController();
+  let priorityGeneration = 0;
   let heading: HTMLElement | undefined;
   const screen = new WorkScreen(route, (state) => {
     view = state;
@@ -59,9 +85,19 @@
     'issue.description_updated': 'Descrição alterada',
     'issue.text_updated': 'Título e descrição alterados',
     'issue.moved': 'Issue movida',
+    'issue.field_updated': 'Campo estruturado alterado',
   };
   const date = (value: string) =>
     `${new Intl.DateTimeFormat('pt-BR', { dateStyle: 'medium', timeStyle: 'short', timeZone: 'UTC' }).format(new Date(value))} UTC`;
+
+  $effect(() => {
+    if (view.type === 'ready' && view.data.type === 'detail') {
+      if (selectedPriorityIssueId !== view.data.issue.id) {
+        selectedPriorityIssueId = view.data.issue.id;
+        selectedPriority = view.data.issue.priority;
+      }
+    }
+  });
 
   function projectLink(cursor?: string): string {
     const query = new SvelteURLSearchParams({
@@ -219,17 +255,116 @@
     }
   }
 
+  async function sendPriority(command: PriorityCommand): Promise<void> {
+    if (priorityState.type === 'pending') {
+      return;
+    }
+    const generation = ++priorityGeneration;
+    priorityState = { type: 'pending', command };
+    try {
+      const result = await setIssuePriority(
+        command.projectId,
+        command.issue,
+        command.actorId,
+        command.idempotencyKey,
+        command.input,
+        priorityOperation.signal,
+      );
+      if (generation !== priorityGeneration) {
+        return;
+      }
+      selectedPriority = result.receipt.priority;
+      priorityState = {
+        type: 'confirmed',
+        priority: result.receipt.priority,
+      };
+      await screen.refresh();
+    } catch (error) {
+      if (generation !== priorityGeneration) {
+        return;
+      }
+      if (error instanceof IssuePriorityIdentityChanged) {
+        priorityState = { type: 'idle' };
+        screen.suspend();
+        if (document.visibilityState === 'visible') {
+          void screen.start();
+        }
+        return;
+      }
+      if (error instanceof IssueRequestError) {
+        if (error.status === 401) {
+          priorityState = { type: 'idle' };
+          return;
+        }
+        if (error.status === 409) {
+          priorityState = { type: 'conflict' };
+          await screen.refresh();
+          return;
+        }
+        if (error.status >= 500) {
+          priorityState = { type: 'uncertain', command };
+          return;
+        }
+        priorityState = { type: 'error' };
+        if (error.status === 403 || error.status === 404) {
+          await screen.refresh();
+        }
+        return;
+      }
+      priorityState = { type: 'uncertain', command };
+    }
+  }
+
+  function savePriority(): void {
+    if (
+      view.type !== 'ready' ||
+      view.data.type !== 'detail' ||
+      !view.data.canUpdateIssueFields ||
+      view.data.issue.trashed_at !== undefined ||
+      priorityState.type === 'pending' ||
+      priorityState.type === 'uncertain'
+    ) {
+      return;
+    }
+    void sendPriority({
+      projectId: view.data.issue.project_id,
+      actorId: view.data.actorId,
+      issue: {
+        id: view.data.issue.id,
+        issue_number: view.data.issue.issue_number,
+        issue_key: view.data.issue.issue_key,
+      },
+      idempotencyKey: globalThis.crypto.randomUUID(),
+      input: {
+        expected_version: view.data.issue.version,
+        priority: selectedPriority,
+      },
+    });
+  }
+
+  function replayPriority(): void {
+    if (priorityState.type === 'uncertain') {
+      void sendPriority(priorityState.command);
+    }
+  }
+
   onMount(() => {
     const unsubscribeSession = onSessionEnded(() => {
       moveGeneration += 1;
       moveOperation.abort();
       moveOperation = new AbortController();
       moveState = { type: 'idle' };
+      priorityGeneration += 1;
+      priorityOperation.abort();
+      priorityOperation = new AbortController();
+      priorityState = { type: 'idle' };
       flushSync(() => screen.sessionEnded());
     });
     const conceal = () => {
       moveOperation.abort();
       moveOperation = new AbortController();
+      priorityOperation.abort();
+      priorityOperation = new AbortController();
       flushSync(() => screen.suspend());
     };
     const restore = () => {
@@ -268,6 +403,8 @@
       unsubscribeSession();
       moveGeneration += 1;
       moveOperation.abort();
+      priorityGeneration += 1;
+      priorityOperation.abort();
       screen.dispose();
     };
   });
@@ -285,8 +422,8 @@
   </h1>
   <p class="intro">
     Leitura em desenvolvimento. O board permite mover cards para o topo das
-    colunas visíveis; outras edições, filtros e atualização ao vivo ainda não
-    estão disponíveis.
+    colunas visíveis e a prioridade pode ser alterada no detalhe; atribuição,
+    prazo, filtros e atualização ao vivo ainda não estão disponíveis.
   </p>
   <nav class="work-links" aria-label="Navegação do trabalho">
     <a href="/projects">Meus projetos</a>
@@ -487,6 +624,61 @@
               </dd>
             </div>
           </dl>
+          {#if data.canUpdateIssueFields && issue.trashed_at === undefined}<section
+              aria-labelledby="priority-update-title"
+            >
+              <h3 id="priority-update-title">Alterar prioridade</h3>
+              <form
+                onsubmit={(event) => {
+                  event.preventDefault();
+                  savePriority();
+                }}
+              >
+                <label for="issue-priority">Prioridade</label>
+                <select
+                  id="issue-priority"
+                  bind:value={selectedPriority}
+                  disabled={priorityState.type === 'pending' ||
+                    priorityState.type === 'uncertain'}
+                >
+                  <option value="none">Sem prioridade</option>
+                  <option value="low">Baixa</option>
+                  <option value="medium">Média</option>
+                  <option value="high">Alta</option>
+                  <option value="urgent">Urgente</option>
+                </select>
+                <button
+                  type="submit"
+                  disabled={priorityState.type === 'pending' ||
+                    priorityState.type === 'uncertain'}
+                  >Salvar prioridade</button
+                >
+              </form>
+              {#if priorityState.type === 'pending'}<p role="status">
+                  Salvando prioridade…
+                </p>{/if}
+              {#if priorityState.type === 'uncertain'}<div role="alert">
+                  <p>
+                    Não foi possível confirmar a alteração. Não crie outro
+                    comando.
+                  </p>
+                  <button onclick={replayPriority}
+                    >Repetir o mesmo comando com a mesma chave</button
+                  >
+                </div>{/if}
+              {#if priorityState.type === 'conflict'}<p role="alert">
+                  A issue mudou. Os dados foram atualizados; revise a prioridade
+                  escolhida antes de salvar novamente.
+                </p>{/if}
+              {#if priorityState.type === 'error'}<p role="alert">
+                  A prioridade não foi alterada. Verifique o acesso e tente
+                  novamente.
+                </p>{/if}
+              {#if priorityState.type === 'confirmed'}<p role="status">
+                  Prioridade alterada para
+                  {priorities[priorityState.priority]}.
+                </p>{/if}
+            </section>{/if}
           <section aria-labelledby="description-title">
             <h3 id="description-title">Descrição · fonte Markdown</h3>
             <p class="hint">
@@ -506,6 +698,13 @@
                   ><span class="hint"
                     >Referência do autor {event.actor_user_id}</span
                   >
+                  {#if event.change !== undefined}<span>
+                      {event.change.field === 'priority'
+                        ? 'Prioridade'
+                        : 'Campo'}:
+                      {priorities[event.change.before]} →
+                      {priorities[event.change.after]}
+                    </span>{/if}
                 </li>{/each}
             </ul>
             {#if data.history.has_more}<a

@@ -16,12 +16,13 @@ mod board;
 mod queries;
 pub use board::{BoardColumnPage, BoardCursor, BoardOptions};
 pub mod creation;
+pub mod fields;
 pub mod movement;
 pub mod session;
 pub mod text;
 pub use queries::{
-    IssueDetails, IssueEvent, IssueEventKind, IssueHistoryCursor, IssueHistoryPage, IssueListPage,
-    IssueReadError, IssueSummary,
+    IssueDetails, IssueEvent, IssueEventKind, IssueFieldChange, IssueHistoryCursor,
+    IssueHistoryPage, IssueListPage, IssueReadError, IssueSummary,
 };
 
 #[derive(Debug, Error)]

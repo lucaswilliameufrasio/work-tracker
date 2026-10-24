@@ -75,6 +75,37 @@ describe('issue DTO boundary', () => {
       ),
     ).toThrow();
   });
+  it('accepts only typed priority diffs for structured field events', () => {
+    const changed = {
+      ...event,
+      event_kind: 'issue.field_updated',
+      change: { field: 'priority', before: 'none', after: 'urgent' },
+    };
+    expect(
+      parseIssueHistoryPage({ data: [changed], has_more: false }, id, 20)
+        .data[0],
+    ).toEqual(changed);
+    for (const value of [
+      {
+        ...changed,
+        change: { field: 'due_date', before: 'none', after: 'urgent' },
+      },
+      {
+        ...changed,
+        change: { field: 'priority', before: 'none', after: 'none' },
+      },
+      {
+        ...changed,
+        change: { field: 'priority', before: [], after: 'urgent' },
+      },
+      { ...changed, title: 'private' },
+      { ...event, change: changed.change },
+    ]) {
+      expect(() =>
+        parseIssueHistoryPage({ data: [value], has_more: false }, id, 20),
+      ).toThrow();
+    }
+  });
   it('preserves full positive i64 precision, optional omission and raw text as data', () => {
     expect(parseIssueDetail(summary, id, summary.issue_number)).toEqual(
       summary,

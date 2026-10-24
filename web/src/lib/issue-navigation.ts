@@ -188,6 +188,8 @@ export type WorkData =
       history: IssuePage<IssueHistoryEvent>;
       status: ProjectStatus;
       issueType: ProjectIssueType;
+      actorId: string;
+      canUpdateIssueFields: boolean;
     };
 
 export async function loadWork(
@@ -258,7 +260,7 @@ export async function loadWork(
     return invalid();
   }
   const issue = await getIssueDetail(route.projectId, route.number, signal);
-  const [history, status, issueType] = await Promise.all([
+  const [history, status, issueType, capability, session] = await Promise.all([
     getIssueHistoryPage(
       route.projectId,
       route.number,
@@ -267,13 +269,23 @@ export async function loadWork(
     ),
     getStatusRecord(route.projectId, issue.status_id, signal),
     getIssueTypeRecord(route.projectId, issue.issue_type_id, signal),
+    getProjectCapabilities(route.projectId, signal),
+    getCurrentSession(signal),
   ]);
   for (const event of history.data) {
     if (event.issue_id !== issue.id) {
       return invalid();
     }
   }
-  return { type: 'detail', issue, history, status, issueType };
+  return {
+    type: 'detail',
+    issue,
+    history,
+    status,
+    issueType,
+    actorId: session.user_id,
+    canUpdateIssueFields: capability.can_update_issue_fields,
+  };
 }
 
 export type WorkState =

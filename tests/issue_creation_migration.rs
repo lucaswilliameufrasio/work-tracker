@@ -67,11 +67,27 @@ async fn migration_preserves_existing_issues_and_history_without_fabricating_old
         .execute(&pool)
         .await
         .unwrap();
-    let store = IssueStore::new(pool.clone());
-    let before = store
-        .get_project_issue(&owner, &project.id, 1)
+    let issue_sql = "SELECT id, project_id, issue_number, title, description, creator_user_id, rank, created_at, updated_at \
+         FROM issues WHERE id = ?";
+    let issue_before: (
+        String,
+        String,
+        i64,
+        String,
+        Option<String>,
+        String,
+        i64,
+        String,
+        String,
+    ) = sqlx::query_as(issue_sql)
+        .bind(&issue)
+        .fetch_one(&pool)
         .await
         .unwrap();
+    let history_sql = "SELECT id, project_id, issue_id, actor_user_id, event_kind, occurred_at \
+         FROM issue_events ORDER BY id";
+    let history_before: Vec<(String, String, String, String, String, String)> =
+        sqlx::query_as(history_sql).fetch_all(&pool).await.unwrap();
     sqlx::raw_sql(include_str!(
         "../migrations/0031_issue_creation_receipts_and_outbox.sql"
     ))
@@ -79,18 +95,23 @@ async fn migration_preserves_existing_issues_and_history_without_fabricating_old
     .await
     .unwrap();
     assert_eq!(
-        before,
-        store
-            .get_project_issue(&owner, &project.id, 1)
+        issue_before,
+        sqlx::query_as(issue_sql)
+            .bind(&issue)
+            .fetch_one(&pool)
             .await
             .unwrap()
+    );
+    assert_eq!(
+        history_before,
+        sqlx::query_as(history_sql).fetch_all(&pool).await.unwrap()
     );
     let outbox: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM outbox_events")
         .fetch_one(&pool)
         .await
         .unwrap();
     assert_eq!(outbox, 0);
-    let created = store
+    let created = IssueStore::new(pool.clone())
         .create(
             &owner,
             &project.id,

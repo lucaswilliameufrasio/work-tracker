@@ -92,6 +92,9 @@ async fn admit_request(budget: &BrowserBudget, request: Request, next: Next) -> 
                     && path.as_str() == "/api/v1/projects/{project_id}/issues/{issue_number}/text")
                 || (parts.method == axum::http::Method::POST
                     && path.as_str() == "/api/v1/projects/{project_id}/issues/{issue_number}/move")
+                || (parts.method == axum::http::Method::PUT
+                    && path.as_str()
+                        == "/api/v1/projects/{project_id}/issues/{issue_number}/priority")
         })
         && budget.security.is_some();
     let limit = if json_mutation { MAX_JSON_BODY } else { 0 };

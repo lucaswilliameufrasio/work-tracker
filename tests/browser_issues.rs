@@ -39,6 +39,9 @@ mod text;
 #[path = "browser_issues/movement.rs"]
 mod movement;
 
+#[path = "browser_issues/priority.rs"]
+mod priority;
+
 #[tokio::test]
 async fn history_serializes_repeated_typed_text_changes_without_content_snapshots() {
     let f = Fixture::new().await;

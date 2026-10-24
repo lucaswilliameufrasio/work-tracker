@@ -217,7 +217,7 @@ async fn every_documented_browser_operation_matches_real_success_and_auth_error_
                     "idempotency-key",
                     HeaderValue::from_str(&Uuid::now_v7().to_string()).unwrap(),
                 );
-                *req.body_mut() = Body::from(if method == "put" {
+                *req.body_mut() = Body::from(if operation["operationId"] == "replaceIssueText" {
                     let expected_version: i64 = sqlx::query_scalar(
                         "SELECT version FROM issues WHERE project_id = ? AND issue_number = 1",
                     )
@@ -228,6 +228,19 @@ async fn every_documented_browser_operation_matches_real_success_and_auth_error_
                     serde_json::json!({
                         "title": "Contract replacement",
                         "expected_version": expected_version.to_string(),
+                    })
+                    .to_string()
+                } else if operation["operationId"] == "setProjectIssuePriority" {
+                    let expected_version: i64 = sqlx::query_scalar(
+                        "SELECT version FROM issues WHERE project_id = ? AND issue_number = 1",
+                    )
+                    .bind(&project.id)
+                    .fetch_one(database.pool())
+                    .await
+                    .unwrap();
+                    serde_json::json!({
+                        "expected_version": expected_version.to_string(),
+                        "priority": "high",
                     })
                     .to_string()
                 } else if operation["operationId"] == "moveProjectIssue" {

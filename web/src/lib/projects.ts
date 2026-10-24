@@ -12,6 +12,7 @@ export type AccessibleProject = {
 export type ProjectCapabilities = {
   project_id: string;
   can_create_issues: boolean;
+  can_update_issue_fields: boolean;
   can_replace_issue_text: boolean;
   can_move_issues: boolean;
 };
@@ -23,6 +24,7 @@ export function parseProjectCapabilities(
   const item = fields(value, [
     'project_id',
     'can_create_issues',
+    'can_update_issue_fields',
     'can_replace_issue_text',
     'can_move_issues',
   ]);
@@ -30,6 +32,8 @@ export function parseProjectCapabilities(
   if (
     project !== uuid(projectId) ||
     typeof item.can_create_issues !== 'boolean' ||
+    (item.can_update_issue_fields !== undefined &&
+      typeof item.can_update_issue_fields !== 'boolean') ||
     (item.can_replace_issue_text !== undefined &&
       typeof item.can_replace_issue_text !== 'boolean') ||
     (item.can_move_issues !== undefined &&
@@ -40,6 +44,7 @@ export function parseProjectCapabilities(
   return {
     project_id: project,
     can_create_issues: item.can_create_issues,
+    can_update_issue_fields: item.can_update_issue_fields === true,
     can_replace_issue_text: item.can_replace_issue_text === true,
     can_move_issues: item.can_move_issues === true,
   };

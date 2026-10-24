@@ -16,7 +16,10 @@ use super::{
 use crate::{
     auth::time::format_timestamp,
     http::error::ApiError,
-    issues::{IssueEventKind, IssueHistoryCursor, IssueReadError, IssueRecord, IssueSummary},
+    issues::{
+        IssueEventKind, IssueFieldChange, IssueHistoryCursor, IssuePriority, IssueReadError,
+        IssueRecord, IssueSummary,
+    },
 };
 
 pub(super) fn routes() -> Router<Arc<BrowserState>> {
@@ -80,7 +83,26 @@ struct HistoryEvent {
     issue_id: String,
     actor_user_id: String,
     event_kind: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    change: Option<HistoryChange>,
     occurred_at: String,
+}
+
+#[derive(Serialize)]
+struct HistoryChange {
+    field: &'static str,
+    before: &'static str,
+    after: &'static str,
+}
+
+fn priority_name(priority: IssuePriority) -> &'static str {
+    match priority {
+        IssuePriority::None => "none",
+        IssuePriority::Low => "low",
+        IssuePriority::Medium => "medium",
+        IssuePriority::High => "high",
+        IssuePriority::Urgent => "urgent",
+    }
 }
 
 fn issue_path(
@@ -160,18 +182,29 @@ async fn history(
                 return Err(read_error(IssueReadError::CorruptData.into()));
             }
         }
+        let (event_kind, change) = match (event.kind, event.change) {
+            (IssueEventKind::Created, None) => ("issue.created", None),
+            (IssueEventKind::TitleUpdated, None) => ("issue.title_updated", None),
+            (IssueEventKind::DescriptionUpdated, None) => ("issue.description_updated", None),
+            (IssueEventKind::TextUpdated, None) => ("issue.text_updated", None),
+            (IssueEventKind::Moved, None) => ("issue.moved", None),
+            (IssueEventKind::FieldUpdated, Some(IssueFieldChange::Priority { before, after })) => (
+                "issue.field_updated",
+                Some(HistoryChange {
+                    field: "priority",
+                    before: priority_name(before),
+                    after: priority_name(after),
+                }),
+            ),
+            _ => return Err(read_error(IssueReadError::CorruptData.into())),
+        };
         data.push(HistoryEvent {
             id: event.id,
             project_id: event.project_id,
             issue_id: event.issue_id,
             actor_user_id: event.actor_user_id,
-            event_kind: match event.kind {
-                IssueEventKind::Created => "issue.created",
-                IssueEventKind::TitleUpdated => "issue.title_updated",
-                IssueEventKind::DescriptionUpdated => "issue.description_updated",
-                IssueEventKind::TextUpdated => "issue.text_updated",
-                IssueEventKind::Moved => "issue.moved",
-            },
+            event_kind,
+            change,
             occurred_at: format_timestamp(event.occurred_at),
         });
     }

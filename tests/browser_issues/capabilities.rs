@@ -16,7 +16,7 @@ async fn capabilities_use_current_membership_archive_and_manager_context_without
     .await;
     assert_eq!(
         initial,
-        serde_json::json!({ "project_id": f.project, "can_create_issues": true, "can_replace_issue_text": true, "can_move_issues": true })
+        serde_json::json!({ "project_id": f.project, "can_create_issues": true, "can_update_issue_fields": true, "can_replace_issue_text": true, "can_move_issues": true })
     );
     let member_id = user(&f.db, "member").await;
     member(&f.db, &f.project, &member_id, "member").await;
@@ -43,6 +43,7 @@ async fn capabilities_use_current_membership_archive_and_manager_context_without
     )
     .await;
     assert_eq!(viewer["can_replace_issue_text"], false);
+    assert_eq!(viewer["can_update_issue_fields"], false);
     assert_eq!(viewer["can_move_issues"], false);
     let csrf = json(
         f.get("/api/v1/auth/session", Some(&session.token)).await,
@@ -97,6 +98,7 @@ async fn capabilities_use_current_membership_archive_and_manager_context_without
     )
     .await;
     assert_eq!(archived["can_replace_issue_text"], false);
+    assert_eq!(archived["can_update_issue_fields"], false);
     assert_eq!(archived["can_move_issues"], false);
     assert_eq!(
         json(

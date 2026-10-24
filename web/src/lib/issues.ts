@@ -22,6 +22,7 @@ export type IssueDetail = IssueSummary & {
   completed_at?: string;
   trashed_at?: string;
 };
+export type IssuePriority = IssueSummary['priority'];
 export type IssueHistoryEvent = {
   id: string;
   project_id: string;
@@ -32,7 +33,9 @@ export type IssueHistoryEvent = {
     | 'issue.title_updated'
     | 'issue.description_updated'
     | 'issue.text_updated'
-    | 'issue.moved';
+    | 'issue.moved'
+    | 'issue.field_updated';
+  change?: { field: 'priority'; before: IssuePriority; after: IssuePriority };
   occurred_at: string;
 };
 export type IssuePage<T> = {
@@ -100,6 +103,19 @@ function timestamp(value: unknown): string {
   return value;
 }
 
+function priority(value: unknown): IssuePriority {
+  if (
+    value !== 'none' &&
+    value !== 'low' &&
+    value !== 'medium' &&
+    value !== 'high' &&
+    value !== 'urgent'
+  ) {
+    return invalid();
+  }
+  return value;
+}
+
 function text(value: unknown): string {
   if (typeof value !== 'string') {
     return invalid();
@@ -131,16 +147,7 @@ function summary(
   ) {
     return invalid();
   }
-  const priority = item.priority;
-  if (
-    priority !== 'none' &&
-    priority !== 'low' &&
-    priority !== 'medium' &&
-    priority !== 'high' &&
-    priority !== 'urgent'
-  ) {
-    return invalid();
-  }
+  const issuePriority = priority(item.priority);
   const result: IssueSummary = {
     id: uuid(item.id),
     project_id: project,
@@ -150,7 +157,7 @@ function summary(
     status_id: uuid(item.status_id),
     title,
     creator_user_id: uuid(item.creator_user_id),
-    priority,
+    priority: issuePriority,
     version: decimal(item.version),
     created_at: timestamp(item.created_at),
     updated_at: timestamp(item.updated_at),
@@ -289,6 +296,7 @@ export function parseIssueHistoryPage(
       'issue_id',
       'actor_user_id',
       'event_kind',
+      'change',
       'occurred_at',
     ]);
     const id = uuid(event.id);
@@ -296,6 +304,18 @@ export function parseIssueHistoryPage(
     const occurred = timestamp(event.occurred_at);
     const boundary = `${occurred}/${id}`;
     const kind = event.event_kind;
+    let change: IssueHistoryEvent['change'];
+    if (kind === 'issue.field_updated') {
+      const rawChange = fields(event.change, ['field', 'before', 'after']);
+      const before = priority(rawChange.before);
+      const after = priority(rawChange.after);
+      if (rawChange.field !== 'priority' || before === after) {
+        return invalid();
+      }
+      change = { field: 'priority', before, after };
+    } else if ('change' in event) {
+      return invalid();
+    }
     if (
       uuid(event.project_id) !== projectId ||
       (issueId !== undefined && issue !== issueId) ||
@@ -303,7 +323,8 @@ export function parseIssueHistoryPage(
         kind !== 'issue.title_updated' &&
         kind !== 'issue.description_updated' &&
         kind !== 'issue.text_updated' &&
-        kind !== 'issue.moved') ||
+        kind !== 'issue.moved' &&
+        kind !== 'issue.field_updated') ||
       boundary <= previous ||
       ids.has(id)
     ) {
@@ -318,6 +339,7 @@ export function parseIssueHistoryPage(
       issue_id: issue,
       actor_user_id: uuid(event.actor_user_id),
       event_kind: kind,
+      ...(change === undefined ? {} : { change }),
       occurred_at: occurred,
     });
   }

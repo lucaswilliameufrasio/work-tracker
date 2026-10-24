@@ -64,6 +64,10 @@ fn generated_contract_has_unique_operations_resolved_refs_and_only_implemented_r
             "put",
         ),
         (
+            "/api/v1/projects/{project_id}/issues/{issue_number}/priority",
+            "put",
+        ),
+        (
             "/api/v1/projects/{project_id}/issues/{issue_number}/move",
             "post",
         ),

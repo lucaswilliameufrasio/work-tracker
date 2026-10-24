@@ -38,6 +38,10 @@ pub(super) fn routes() -> Router<Arc<BrowserState>> {
             put(text::replace),
         )
         .route(
+            "/api/v1/projects/{project_id}/issues/{issue_number}/priority",
+            put(priority::set_priority),
+        )
+        .route(
             "/api/v1/projects/{project_id}/issues/{issue_number}/move",
             post(movement::move_issue),
         )
@@ -47,6 +51,7 @@ mod board;
 mod create;
 mod detail;
 mod movement;
+mod priority;
 mod text;
 
 #[derive(Default, Deserialize)]

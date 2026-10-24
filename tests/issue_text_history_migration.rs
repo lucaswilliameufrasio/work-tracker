@@ -83,10 +83,6 @@ async fn migration_preserves_existing_receipts_and_envelopes_and_supports_repeat
         .unwrap();
     let issue = &outcome.receipt().issue_id;
     let store = IssueStore::new(pool.clone());
-    let before = store
-        .get_project_issue(&actor, &project.id, 1)
-        .await
-        .unwrap();
     let outbox_sql = "SELECT id, event_kind, payload_version, project_id, issue_id, actor_user_id, issue_version, occurred_at FROM outbox_events ORDER BY id";
     let outbox_before: Vec<OutboxSnapshot> =
         sqlx::query_as(outbox_sql).fetch_all(&pool).await.unwrap();
@@ -102,13 +98,6 @@ async fn migration_preserves_existing_receipts_and_envelopes_and_supports_repeat
     .unwrap();
     transaction.commit().await.unwrap();
     assert_eq!(
-        before,
-        store
-            .get_project_issue(&actor, &project.id, 1)
-            .await
-            .unwrap()
-    );
-    assert_eq!(
         outbox_before,
         sqlx::query_as(outbox_sql).fetch_all(&pool).await.unwrap()
     );
@@ -122,13 +111,6 @@ async fn migration_preserves_existing_receipts_and_envelopes_and_supports_repeat
         .await
         .unwrap();
     transaction.commit().await.unwrap();
-    assert_eq!(
-        before,
-        store
-            .get_project_issue(&actor, &project.id, 1)
-            .await
-            .unwrap()
-    );
     assert_eq!(
         outbox_before,
         sqlx::query_as(outbox_sql).fetch_all(&pool).await.unwrap()
@@ -159,12 +141,11 @@ async fn migration_preserves_existing_receipts_and_envelopes_and_supports_repeat
         sqlx::query("INSERT INTO outbox_events (id, event_kind, payload_version, project_id, issue_id, actor_user_id, issue_version, occurred_at) VALUES (?, ?, 1, ?, ?, ?, ?, ?)").bind(Uuid::now_v7().to_string()).bind(kind).bind(&project.id).bind(issue).bind(&actor).bind(index as i64 + 2).bind(&timestamp).execute(&pool).await.unwrap();
     }
     assert_eq!(
-        store
-            .get_project_issue(&actor, &project.id, 1)
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM issue_events WHERE issue_id = ?")
+            .bind(issue)
+            .fetch_one(&pool)
             .await
-            .unwrap()
-            .history
-            .len(),
+            .unwrap(),
         5
     );
     for (kind, version) in [
@@ -222,15 +203,98 @@ async fn migration_preserves_existing_receipts_and_envelopes_and_supports_repeat
         .execute(&pool)
         .await
         .unwrap();
+    let events_before_structured: Vec<(String, String, String, String, String, String)> =
+        sqlx::query_as(events_sql).fetch_all(&pool).await.unwrap();
+    let outbox_before_structured: Vec<OutboxSnapshot> =
+        sqlx::query_as(outbox_sql).fetch_all(&pool).await.unwrap();
+    let mut transaction = pool.begin().await.unwrap();
+    sqlx::raw_sql(include_str!(
+        "../migrations/0035_issue_structured_fields.sql"
+    ))
+    .execute(&mut *transaction)
+    .await
+    .unwrap();
+    transaction.commit().await.unwrap();
     assert_eq!(
-        store
-            .get_project_issue(&actor, &project.id, 1)
-            .await
-            .unwrap()
-            .history
-            .len(),
-        6
+        events_before_structured,
+        sqlx::query_as(events_sql).fetch_all(&pool).await.unwrap()
     );
+    assert_eq!(
+        outbox_before_structured,
+        sqlx::query_as(outbox_sql).fetch_all(&pool).await.unwrap()
+    );
+    let legacy_history = store
+        .get_project_issue(&actor, &project.id, 1)
+        .await
+        .unwrap()
+        .history;
+    assert_eq!(legacy_history.len(), 6);
+
+    let priority_at =
+        (Utc::now() + TimeDelta::seconds(11)).to_rfc3339_opts(chrono::SecondsFormat::Nanos, true);
+    sqlx::query(
+        "INSERT INTO issue_events \
+         (id, project_id, issue_id, actor_user_id, event_kind, occurred_at, \
+          field_key, before_value_json, after_value_json) \
+         VALUES (?, ?, ?, ?, 'issue.field_updated', ?, 'priority', '\"none\"', '\"high\"')",
+    )
+    .bind(Uuid::now_v7().to_string())
+    .bind(&project.id)
+    .bind(issue)
+    .bind(&actor)
+    .bind(&priority_at)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO outbox_events (id, event_kind, payload_version, project_id, issue_id, actor_user_id, issue_version, occurred_at) VALUES (?, 'issue.field_updated', 1, ?, ?, ?, 7, ?)")
+        .bind(Uuid::now_v7().to_string())
+        .bind(&project.id)
+        .bind(issue)
+        .bind(&actor)
+        .bind(&priority_at)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let history = store
+        .get_project_issue(&actor, &project.id, 1)
+        .await
+        .unwrap()
+        .history;
+    assert_eq!(history.len(), 7);
+    assert_eq!(
+        history.last().unwrap().change,
+        Some(puxiri::issues::IssueFieldChange::Priority {
+            before: puxiri::issues::IssuePriority::None,
+            after: puxiri::issues::IssuePriority::High,
+        })
+    );
+    for (field_key, before, after) in [
+        ("priority", "invalid", "\"urgent\""),
+        ("priority", "[]", "\"urgent\""),
+        ("priority", "\"custom\"", "\"urgent\""),
+        ("due_date", "\"none\"", "\"urgent\""),
+        ("priority", "\"high\"", "\"high\""),
+    ] {
+        assert!(sqlx::query("INSERT INTO issue_events (id, project_id, issue_id, actor_user_id, event_kind, occurred_at, field_key, before_value_json, after_value_json) VALUES (?, ?, ?, ?, 'issue.field_updated', 'now', ?, ?, ?)")
+            .bind(Uuid::now_v7().to_string())
+            .bind(&project.id)
+            .bind(issue)
+            .bind(&actor)
+            .bind(field_key)
+            .bind(before)
+            .bind(after)
+            .execute(&pool)
+            .await
+            .is_err());
+    }
+    assert!(sqlx::query("INSERT INTO issue_events (id, project_id, issue_id, actor_user_id, event_kind, occurred_at) VALUES (?, ?, ?, ?, 'issue.field_updated', 'now')")
+        .bind(Uuid::now_v7().to_string())
+        .bind(&project.id)
+        .bind(issue)
+        .bind(&actor)
+        .execute(&pool)
+        .await
+        .is_err());
     assert!(
         sqlx::query("UPDATE outbox_events SET issue_version = issue_version")
             .execute(&pool)

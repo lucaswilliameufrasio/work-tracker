@@ -251,6 +251,22 @@ it('composite detail rejects a journal from a different issue even in the same p
     if (path.includes('/issue-types/')) {
       return Response.json({ id, project_id: id, name: 'Type' });
     }
+    if (path.includes('/capabilities')) {
+      return Response.json({
+        project_id: id,
+        can_create_issues: true,
+        can_update_issue_fields: true,
+        can_replace_issue_text: true,
+        can_move_issues: true,
+      });
+    }
+    if (path === '/api/v1/auth/session') {
+      return Response.json({
+        user_id: id,
+        session_id: '019a0000-0000-7000-8000-000000000003',
+        csrf_token: 'A'.repeat(43),
+      });
+    }
     return Response.json({
       id,
       project_id: id,
@@ -273,5 +289,5 @@ it('composite detail rejects a journal from a different issue even in the same p
       new AbortController().signal,
     ),
   ).rejects.toThrow('Invalid issue API response');
-  expect(fetcher).toHaveBeenCalledTimes(4);
+  expect(fetcher).toHaveBeenCalledTimes(6);
 });

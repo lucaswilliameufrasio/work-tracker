@@ -40,6 +40,7 @@ struct BrowserState {
     issues: crate::issues::session::SessionIssueReader,
     catalogs: crate::projects::catalog::SessionProjectCatalogReader,
     writer: crate::issues::creation::SessionIssueWriter,
+    field_writer: crate::issues::fields::SessionIssueFieldWriter,
     text_writer: crate::issues::text::SessionIssueTextWriter,
     mover: crate::issues::movement::SessionIssueMover,
 }
@@ -61,6 +62,11 @@ pub(super) fn routes(
         security.master_key(),
     );
     let state = Arc::new(BrowserState {
+        field_writer: crate::issues::fields::SessionIssueFieldWriter::new(
+            database.pool().clone(),
+            policy,
+            security.master_key(),
+        ),
         text_writer: crate::issues::text::SessionIssueTextWriter::new(
             database.pool().clone(),
             policy,
@@ -109,6 +115,7 @@ pub(super) fn routes(
 struct ProjectCapabilities {
     project_id: String,
     can_create_issues: bool,
+    can_update_issue_fields: bool,
     can_replace_issue_text: bool,
     can_move_issues: bool,
 }
@@ -154,6 +161,7 @@ async fn project_capabilities(
         Json(ProjectCapabilities {
             project_id,
             can_create_issues,
+            can_update_issue_fields: can_create_issues,
             can_replace_issue_text: can_create_issues,
             can_move_issues: can_create_issues,
         }),
@@ -501,7 +509,11 @@ async fn method_not_allowed(request: Request) -> Response {
                 .extensions()
                 .get::<axum::extract::MatchedPath>()
                 .is_some_and(|path| {
-                    path.as_str() == "/api/v1/projects/{project_id}/issues/{issue_number}/text"
+                    matches!(
+                        path.as_str(),
+                        "/api/v1/projects/{project_id}/issues/{issue_number}/text"
+                            | "/api/v1/projects/{project_id}/issues/{issue_number}/priority"
+                    )
                 })
             {
                 "PUT"

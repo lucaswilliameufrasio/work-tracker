@@ -63,6 +63,15 @@ pub enum IssueEventKind {
     DescriptionUpdated,
     TextUpdated,
     Moved,
+    FieldUpdated,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IssueFieldChange {
+    Priority {
+        before: super::IssuePriority,
+        after: super::IssuePriority,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -72,6 +81,7 @@ pub struct IssueEvent {
     pub issue_id: String,
     pub actor_user_id: String,
     pub kind: IssueEventKind,
+    pub change: Option<IssueFieldChange>,
     pub occurred_at: DateTime<Utc>,
 }
 
@@ -216,7 +226,7 @@ impl IssueStore {
         let issue =
             Self::record_in_transaction(&mut transaction, actor_user_id, project_id, issue_number)
                 .await?;
-        let history = sqlx::query("SELECT id, project_id, issue_id, actor_user_id, event_kind, occurred_at FROM issue_events WHERE project_id = ? AND issue_id = ? ORDER BY occurred_at ASC, id ASC")
+        let history = sqlx::query("SELECT id, project_id, issue_id, actor_user_id, event_kind, occurred_at, field_key, before_value_json, after_value_json FROM issue_events WHERE project_id = ? AND issue_id = ? ORDER BY occurred_at ASC, id ASC")
             .bind(project_id).bind(&issue.id).fetch_all(&mut *transaction).await?;
         let mut events = Vec::with_capacity(history.len());
         for row in history {
@@ -258,7 +268,8 @@ impl IssueStore {
         let issue = issue_record_from_row(&row)?;
 
         let creation = sqlx::query(
-            "SELECT id, project_id, issue_id, actor_user_id, event_kind, occurred_at \
+            "SELECT id, project_id, issue_id, actor_user_id, event_kind, occurred_at, \
+                    field_key, before_value_json, after_value_json \
              FROM issue_events \
               WHERE project_id = ? AND issue_id = ? AND event_kind = 'issue.created' \
               ORDER BY occurred_at ASC, id ASC LIMIT 1",
@@ -284,7 +295,7 @@ impl IssueStore {
         let issue =
             Self::record_in_transaction(transaction, actor_user_id, project_id, issue_number)
                 .await?;
-        let rows = sqlx::query("SELECT id, project_id, issue_id, actor_user_id, event_kind, occurred_at FROM issue_events WHERE project_id = ? AND issue_id = ? AND (occurred_at, id) > (?, ?) ORDER BY occurred_at ASC, id ASC LIMIT ?")
+        let rows = sqlx::query("SELECT id, project_id, issue_id, actor_user_id, event_kind, occurred_at, field_key, before_value_json, after_value_json FROM issue_events WHERE project_id = ? AND issue_id = ? AND (occurred_at, id) > (?, ?) ORDER BY occurred_at ASC, id ASC LIMIT ?")
             .bind(project_id).bind(&issue.id)
             .bind(after.map(|cursor| cursor.occurred_at.as_str()).unwrap_or(""))
             .bind(after.map(|cursor| cursor.event_id.as_str()).unwrap_or(""))
@@ -419,6 +430,32 @@ fn issue_event_from_row(row: &SqliteRow) -> Result<IssueEvent, IssueReadError> {
         "issue.description_updated" => IssueEventKind::DescriptionUpdated,
         "issue.text_updated" => IssueEventKind::TextUpdated,
         "issue.moved" => IssueEventKind::Moved,
+        "issue.field_updated" => IssueEventKind::FieldUpdated,
+        _ => return Err(IssueReadError::CorruptData),
+    };
+
+    let field_key: Option<String> = row.try_get("field_key")?;
+    let before_value_json: Option<String> = row.try_get("before_value_json")?;
+    let after_value_json: Option<String> = row.try_get("after_value_json")?;
+    let change = match (kind, field_key, before_value_json, after_value_json) {
+        (IssueEventKind::FieldUpdated, Some(field_key), Some(before_value), Some(after_value))
+            if field_key == "priority" =>
+        {
+            let before = parse_priority(
+                &serde_json::from_str::<String>(&before_value)
+                    .map_err(|_| IssueReadError::CorruptData)?,
+            )?;
+            let after = parse_priority(
+                &serde_json::from_str::<String>(&after_value)
+                    .map_err(|_| IssueReadError::CorruptData)?,
+            )?;
+            if before == after {
+                return Err(IssueReadError::CorruptData);
+            }
+            Some(IssueFieldChange::Priority { before, after })
+        }
+        (IssueEventKind::FieldUpdated, _, _, _) => return Err(IssueReadError::CorruptData),
+        (_, None, None, None) => None,
         _ => return Err(IssueReadError::CorruptData),
     };
 
@@ -428,6 +465,7 @@ fn issue_event_from_row(row: &SqliteRow) -> Result<IssueEvent, IssueReadError> {
         issue_id: row.try_get("issue_id")?,
         actor_user_id: row.try_get("actor_user_id")?,
         kind,
+        change,
         occurred_at: parse_timestamp(&row.try_get::<String, _>("occurred_at")?)?,
     })
 }
