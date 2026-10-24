@@ -25,9 +25,10 @@ Issue mutations already append immutable outbox envelopes in the same SQLite tra
 ## Consequences and limits
 
 - SQLite serializes claims and state transitions with short `BEGIN IMMEDIATE` transactions. Durable acceptance occurs only after enqueue commits.
-- A process restart can recover abandoned claims safely under the installation lock. Runtime timeout recovery still requires the worker-supervisor slice; until then, an expired claim remains fenced and unavailable rather than being stolen.
+- A process restart can recover abandoned claims safely under the installation lock. Runtime timeout recovery still requires an application polling/scheduling supervisor; the task ownership primitive does not claim jobs or renew leases, so an expired claim remains unavailable until startup recovery or explicit joined recovery.
 - This decision does not select a generic retry/backoff curve, queue capacity default, retention/purge policy, handler payload schemas, concurrency target, or production SLO. Those must be set by concrete producers and measured operational requirements.
-- The current slice provides persistence and lifecycle primitives only. It does not dispatch the outbox, start a background worker, publish events, or claim delivery guarantees.
+- Slice 251 provided persistence and lifecycle primitives only. It did not dispatch the outbox, start a background worker, publish events, or claim delivery guarantees.
+- Runtime recovery code must carry proof that the task owning a claim was joined before it can fence/requeue that claim. A timeout or expired lease is not that proof. The currently implemented `SupervisedJobTask` is only this ownership primitive; application polling, heartbeat cadence, concurrency, shutdown budget, concrete handlers and the outbox handoff remain separate decisions/slices.
 
 ## Evidence
 

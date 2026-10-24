@@ -4,6 +4,8 @@ use sqlx::{FromRow, Row, SqlitePool, Transaction};
 use thiserror::Error;
 use uuid::Uuid;
 
+pub mod supervisor;
+
 const MAX_PAYLOAD_BYTES: usize = 65_536;
 
 const JOB_SELECT_BY_ID: &str = "SELECT id, job_kind, payload_version, payload_json, dedupe_key, \
@@ -449,6 +451,62 @@ impl JobStore {
         Ok(canceled)
     }
 
+    /// Requeues a worker claim only after its owned task has been joined.
+    pub async fn recover_after_worker_join(
+        &self,
+        stopped: &supervisor::StoppedClaim,
+        now: DateTime<Utc>,
+    ) -> Result<JobRecord, JobStoreError> {
+        let claim = stopped.claim();
+        let next_epoch = claim
+            .job
+            .claim_epoch
+            .checked_add(1)
+            .ok_or(JobStoreError::InvalidTransition)?;
+        let now_text = encode_time(now);
+        let (error_code, state) = match stopped.reason() {
+            supervisor::WorkerStopReason::Cancelled => ("worker_interrupted", "pending"),
+            supervisor::WorkerStopReason::Panicked => ("worker_panicked", "failed"),
+        };
+        let retry = state == "pending" && claim.job.attempts < claim.job.max_attempts;
+        let state = if retry { state } else { "failed" };
+        let finished_at = if state == "failed" {
+            Some(now_text.as_str())
+        } else {
+            None
+        };
+        let available_at = retry.then_some(now_text.as_str());
+
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let changed = sqlx::query(
+            "UPDATE jobs SET state = ?, \
+             available_at = COALESCE(?, available_at), \
+             claim_epoch = ?, claim_token = NULL, lease_expires_at = NULL, \
+             last_error_code = ?, finished_at = ?, updated_at = ? \
+             WHERE id = ? AND state = 'running' AND claim_epoch = ? AND claim_token = ?",
+        )
+        .bind(state)
+        .bind(available_at)
+        .bind(next_epoch)
+        .bind(error_code)
+        .bind(finished_at)
+        .bind(&now_text)
+        .bind(&claim.job.id)
+        .bind(claim.job.claim_epoch)
+        .bind(&claim.token)
+        .execute(&mut *transaction)
+        .await?
+        .rows_affected();
+        if changed != 1 {
+            return Err(JobStoreError::StaleClaim);
+        }
+        let recovered = load_by_id(&mut transaction, &claim.job.id)
+            .await?
+            .ok_or(JobStoreError::CorruptRecord)?;
+        transaction.commit().await?;
+        Ok(recovered)
+    }
+
     pub async fn get(&self, job_id: &str) -> Result<Option<JobRecord>, JobStoreError> {
         let row = sqlx::query_as::<_, JobRow>(JOB_SELECT_BY_ID)
             .bind(job_id)
@@ -777,6 +835,235 @@ mod tests {
             recovered.last_error_code.as_deref(),
             Some("worker_interrupted")
         );
+    }
+
+    #[tokio::test]
+    async fn canceled_worker_is_joined_before_claim_is_fenced_and_requeued() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
+
+        struct DropSignal(Arc<AtomicBool>);
+
+        impl Drop for DropSignal {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+
+        let (_directory, database) = database().await;
+        let store = JobStore::new(database.pool().clone());
+        let now = Utc::now();
+        let enqueued = store
+            .enqueue(spec("issue/supervisor-cancel", 2, now), 10, now)
+            .await
+            .unwrap();
+        let claim = store
+            .claim_next(now, TimeDelta::seconds(1))
+            .await
+            .unwrap()
+            .unwrap();
+        let future_dropped = Arc::new(AtomicBool::new(false));
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let drop_signal = DropSignal(future_dropped.clone());
+        let worker = supervisor::SupervisedJobTask::spawn(claim, async move {
+            let _drop_signal = drop_signal;
+            let _ = started_tx.send(());
+            std::future::pending::<()>().await;
+        });
+        started_rx.await.unwrap();
+        assert!(
+            store
+                .claim_next(now + TimeDelta::seconds(2), TimeDelta::seconds(30))
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        let supervisor::JobTaskExit::Stopped(stopped) = worker.cancel_and_join().await else {
+            panic!("canceled worker unexpectedly returned normally");
+        };
+        assert_eq!(stopped.reason(), supervisor::WorkerStopReason::Cancelled);
+        assert!(future_dropped.load(Ordering::SeqCst));
+
+        let recovered = store
+            .recover_after_worker_join(&stopped, now + TimeDelta::seconds(2))
+            .await
+            .unwrap();
+        assert_eq!(recovered.id, enqueued.job.id);
+        assert_eq!(recovered.state, JobState::Pending);
+        assert_eq!(recovered.claim_epoch, 2);
+        assert_eq!(recovered.attempts, 1);
+        assert_eq!(recovered.available_at, now + TimeDelta::seconds(2));
+        assert_eq!(
+            recovered.last_error_code.as_deref(),
+            Some("worker_interrupted")
+        );
+        assert!(matches!(
+            store
+                .succeed(stopped.claim(), now + TimeDelta::seconds(3))
+                .await,
+            Err(JobStoreError::StaleClaim)
+        ));
+        assert!(matches!(
+            store
+                .recover_after_worker_join(&stopped, now + TimeDelta::seconds(3))
+                .await,
+            Err(JobStoreError::StaleClaim)
+        ));
+
+        let second_claim = store
+            .claim_next(now + TimeDelta::seconds(2), TimeDelta::seconds(1))
+            .await
+            .unwrap()
+            .unwrap();
+        let second_worker =
+            supervisor::SupervisedJobTask::spawn(second_claim, std::future::pending::<()>());
+        let supervisor::JobTaskExit::Stopped(second_stopped) =
+            second_worker.cancel_and_join().await
+        else {
+            panic!("canceled worker unexpectedly returned normally");
+        };
+        let exhausted = store
+            .recover_after_worker_join(&second_stopped, now + TimeDelta::seconds(4))
+            .await
+            .unwrap();
+        assert_eq!(exhausted.state, JobState::Failed);
+        assert_eq!(exhausted.claim_epoch, 4);
+        assert_eq!(exhausted.attempts, 2);
+        assert_eq!(
+            exhausted.last_error_code.as_deref(),
+            Some("worker_interrupted")
+        );
+    }
+
+    #[tokio::test]
+    async fn panicked_worker_is_joined_and_not_retried_as_transient_work() {
+        let (_directory, database) = database().await;
+        let store = JobStore::new(database.pool().clone());
+        let now = Utc::now();
+        let enqueued = store
+            .enqueue(spec("issue/supervisor-panic", 3, now), 10, now)
+            .await
+            .unwrap();
+        let claim = store
+            .claim_next(now, TimeDelta::seconds(30))
+            .await
+            .unwrap()
+            .unwrap();
+        let worker: supervisor::SupervisedJobTask<()> =
+            supervisor::SupervisedJobTask::spawn(claim, async {
+                panic!("synthetic worker panic");
+            });
+
+        let supervisor::JobTaskExit::Stopped(stopped) = worker.join().await else {
+            panic!("panicked worker unexpectedly returned normally");
+        };
+        assert_eq!(stopped.reason(), supervisor::WorkerStopReason::Panicked);
+        let recovered = store
+            .recover_after_worker_join(&stopped, now + TimeDelta::seconds(1))
+            .await
+            .unwrap();
+        assert_eq!(recovered.id, enqueued.job.id);
+        assert_eq!(recovered.state, JobState::Failed);
+        assert_eq!(recovered.claim_epoch, 2);
+        assert_eq!(recovered.attempts, 1);
+        assert_eq!(recovered.finished_at, Some(now + TimeDelta::seconds(1)));
+        assert_eq!(
+            recovered.last_error_code.as_deref(),
+            Some("worker_panicked")
+        );
+    }
+
+    #[tokio::test]
+    async fn naturally_completed_worker_keeps_its_claim_for_the_handler_result() {
+        let (_directory, database) = database().await;
+        let store = JobStore::new(database.pool().clone());
+        let now = Utc::now();
+        let enqueued = store
+            .enqueue(spec("issue/supervisor-complete", 2, now), 10, now)
+            .await
+            .unwrap();
+        let claim = store
+            .claim_next(now, TimeDelta::seconds(30))
+            .await
+            .unwrap()
+            .unwrap();
+        let worker = supervisor::SupervisedJobTask::spawn(claim, async { "done" });
+
+        let supervisor::JobTaskExit::Completed { claim, output } = worker.join().await else {
+            panic!("completed worker was reported stopped");
+        };
+        assert_eq!(output, "done");
+        let succeeded = store
+            .succeed(&claim, now + TimeDelta::seconds(1))
+            .await
+            .unwrap();
+        assert_eq!(succeeded.id, enqueued.job.id);
+        assert_eq!(succeeded.state, JobState::Succeeded);
+    }
+
+    #[tokio::test]
+    async fn dropping_task_owner_aborts_locally_but_leaves_recovery_to_startup() {
+        struct DropSignal(Option<tokio::sync::oneshot::Sender<()>>);
+
+        impl Drop for DropSignal {
+            fn drop(&mut self) {
+                if let Some(sender) = self.0.take() {
+                    let _ = sender.send(());
+                }
+            }
+        }
+
+        let (directory, database) = database().await;
+        let store = JobStore::new(database.pool().clone());
+        let now = Utc::now();
+        let enqueued = store
+            .enqueue(spec("issue/supervisor-drop", 2, now), 10, now)
+            .await
+            .unwrap();
+        let claim = store
+            .claim_next(now, TimeDelta::seconds(1))
+            .await
+            .unwrap()
+            .unwrap();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (dropped_tx, dropped_rx) = tokio::sync::oneshot::channel();
+        let drop_signal = DropSignal(Some(dropped_tx));
+        let worker = supervisor::SupervisedJobTask::spawn(claim, async move {
+            let _drop_signal = drop_signal;
+            let _ = started_tx.send(());
+            std::future::pending::<()>().await;
+        });
+        started_rx.await.unwrap();
+        drop(worker);
+        dropped_rx.await.unwrap();
+
+        assert_eq!(
+            store.get(&enqueued.job.id).await.unwrap().unwrap().state,
+            JobState::Running
+        );
+        assert!(
+            store
+                .claim_next(now + TimeDelta::seconds(2), TimeDelta::seconds(1))
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        database.close().await;
+        drop(store);
+        drop(database);
+        let reopened = Database::open(directory.path()).await.unwrap();
+        let recovered = JobStore::new(reopened.pool().clone())
+            .get(&enqueued.job.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(recovered.state, JobState::Pending);
+        assert_eq!(recovered.claim_epoch, 2);
+        assert_eq!(recovered.attempts, 1);
     }
 
     #[tokio::test]
