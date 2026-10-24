@@ -40,6 +40,11 @@ it('strictly routes project, issue, detail, history and return boundaries withou
     query: 'literal terms',
     cursor: searchCursor,
   });
+  expect(workRoute(`/projects/${id}/issues`, '?priority=urgent')).toEqual({
+    type: 'search',
+    projectId: id,
+    priority: 'urgent',
+  });
   expect(
     workRoute(
       `/projects/${id}/issues/1`,
@@ -50,6 +55,18 @@ it('strictly routes project, issue, detail, history and return boundaries withou
     projectId: id,
     number: '1',
     fromSearchQuery: 'literal terms',
+    fromSearchCursor: searchCursor,
+  });
+  expect(
+    workRoute(
+      `/projects/${id}/issues/1`,
+      `?from_priority=urgent&from_cursor=${searchCursor}`,
+    ),
+  ).toEqual({
+    type: 'detail',
+    projectId: id,
+    number: '1',
+    fromSearchPriority: 'urgent',
     fromSearchCursor: searchCursor,
   });
   expect(
@@ -73,6 +90,7 @@ it('strictly routes project, issue, detail, history and return boundaries withou
     [`/projects/${id}/issues`, '?cursor=0'],
     [`/projects/${id}/issues`, '?q=%20'],
     [`/projects/${id}/issues`, '?q=one%0Atwo'],
+    [`/projects/${id}/issues`, '?priority=invalid'],
     [`/projects/${id}/issues`, '?q=one&cursor=bad'],
     [`/projects/${id}/issues/1`, '?history_cursor=bad'],
     [`/projects/${id}/issues/1`, '?from_cursor=bad'],
@@ -102,6 +120,28 @@ it('loads a project search page through the dedicated issue-search API without p
   expect(fetcher).toHaveBeenCalledTimes(1);
   expect(String(fetcher.mock.calls[0]?.[0])).toContain(
     `/api/v1/projects/${id}/issues/search?q=literal+terms&page_size=20`,
+  );
+});
+
+it('loads a priority-only project search without adding an empty text query', async () => {
+  const fetcher = vi
+    .fn<typeof fetch>()
+    .mockResolvedValue(Response.json({ data: [], has_more: false }));
+  vi.stubGlobal('fetch', fetcher);
+  await expect(
+    loadWork(
+      { type: 'search', projectId: id, priority: 'urgent' },
+      new AbortController().signal,
+    ),
+  ).resolves.toEqual({
+    type: 'search',
+    projectId: id,
+    priority: 'urgent',
+    page: { data: [], has_more: false },
+  });
+  expect(fetcher).toHaveBeenCalledTimes(1);
+  expect(String(fetcher.mock.calls[0]?.[0])).toContain(
+    `/api/v1/projects/${id}/issues/search?priority=urgent&page_size=20`,
   );
 });
 

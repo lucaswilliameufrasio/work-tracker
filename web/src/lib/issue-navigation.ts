@@ -14,10 +14,12 @@ import {
   parseIssueHistoryPage,
   IssueRequestError,
   validateIssueSearchCursor,
+  validateIssueSearchPriority,
   validateIssueSearchText,
   type IssueDetail,
   type IssueHistoryEvent,
   type IssuePage,
+  type IssuePriority,
   type IssueSummary,
 } from './issues.ts';
 import {
@@ -39,7 +41,13 @@ export type WorkRoute =
   | { type: 'column'; projectId: string; statusId: string; cursor?: string }
   | { type: 'projects'; cursor?: string; includeArchived: boolean }
   | { type: 'issues'; projectId: string; cursor?: string }
-  | { type: 'search'; projectId: string; query: string; cursor?: string }
+  | {
+      type: 'search';
+      projectId: string;
+      query?: string;
+      priority?: IssuePriority;
+      cursor?: string;
+    }
   | {
       type: 'detail';
       projectId: string;
@@ -47,6 +55,7 @@ export type WorkRoute =
       historyCursor?: string;
       from?: string;
       fromSearchQuery?: string;
+      fromSearchPriority?: IssuePriority;
       fromSearchCursor?: string;
     }
   | { type: 'invalid' };
@@ -131,27 +140,45 @@ export function workRoute(path: string, search: string): WorkRoute {
       return { type: 'invalid' };
     }
     if (parts.length === 4) {
-      if ([...values.keys()].some((key) => !['cursor', 'q'].includes(key))) {
+      if (
+        [...values.keys()].some(
+          (key) => !['cursor', 'q', 'priority'].includes(key),
+        )
+      ) {
         return { type: 'invalid' };
       }
       const cursor = values.get('cursor');
       const search = values.get('q');
-      if (search !== undefined) {
-        validateIssueSearchText(search);
+      const searchPriority = values.get('priority');
+      const parsedPriority =
+        searchPriority === undefined
+          ? undefined
+          : validateIssueSearchPriority(searchPriority);
+      if (search !== undefined || searchPriority !== undefined) {
+        if (search !== undefined) {
+          validateIssueSearchText(search);
+        }
         if (cursor !== undefined) {
           validateIssueSearchCursor(cursor);
         }
         return {
           type: 'search',
           projectId,
-          query: search,
+          ...(search === undefined ? {} : { query: search }),
+          ...(parsedPriority === undefined ? {} : { priority: parsedPriority }),
           ...(cursor === undefined ? {} : { cursor }),
+        };
+      }
+      if (cursor !== undefined) {
+        return {
+          type: 'issues',
+          projectId,
+          cursor: number(cursor),
         };
       }
       return {
         type: 'issues',
         projectId,
-        ...(cursor === undefined ? {} : { cursor: number(cursor) }),
       };
     }
     if (
@@ -159,7 +186,13 @@ export function workRoute(path: string, search: string): WorkRoute {
       parts[4] === undefined ||
       [...values.keys()].some(
         (key) =>
-          !['history_cursor', 'from', 'from_q', 'from_cursor'].includes(key),
+          ![
+            'history_cursor',
+            'from',
+            'from_q',
+            'from_cursor',
+            'from_priority',
+          ].includes(key),
       )
     ) {
       return { type: 'invalid' };
@@ -179,18 +212,24 @@ export function workRoute(path: string, search: string): WorkRoute {
     }
     const from = values.get('from');
     const fromSearchQuery = values.get('from_q');
+    const fromSearchPriority = values.get('from_priority');
     const fromSearchCursor = values.get('from_cursor');
+    const hasSearchContext =
+      fromSearchQuery !== undefined || fromSearchPriority !== undefined;
     if (
-      (from !== undefined && fromSearchQuery !== undefined) ||
-      (fromSearchCursor !== undefined && fromSearchQuery === undefined)
+      (from !== undefined && hasSearchContext) ||
+      (fromSearchCursor !== undefined && !hasSearchContext)
     ) {
       return { type: 'invalid' };
     }
     if (fromSearchQuery !== undefined) {
       validateIssueSearchText(fromSearchQuery);
-      if (fromSearchCursor !== undefined) {
-        validateIssueSearchCursor(fromSearchCursor);
-      }
+    }
+    if (fromSearchPriority !== undefined) {
+      validateIssueSearchPriority(fromSearchPriority);
+    }
+    if (fromSearchCursor !== undefined) {
+      validateIssueSearchCursor(fromSearchCursor);
     }
     return {
       type: 'detail',
@@ -199,6 +238,11 @@ export function workRoute(path: string, search: string): WorkRoute {
       ...(history === undefined ? {} : { historyCursor: history }),
       ...(from === undefined ? {} : { from: number(from) }),
       ...(fromSearchQuery === undefined ? {} : { fromSearchQuery }),
+      ...(fromSearchPriority === undefined
+        ? {}
+        : {
+            fromSearchPriority: validateIssueSearchPriority(fromSearchPriority),
+          }),
       ...(fromSearchCursor === undefined ? {} : { fromSearchCursor }),
     };
   } catch {
@@ -221,7 +265,8 @@ export type WorkData =
   | {
       type: 'search';
       projectId: string;
-      query: string;
+      query?: string;
+      priority?: IssuePriority;
       page: IssuePage<IssueSummary>;
     }
   | {
@@ -302,13 +347,15 @@ export async function loadWork(
     return {
       type: 'search',
       projectId: route.projectId,
-      query: route.query,
+      ...(route.query === undefined ? {} : { query: route.query }),
       page: await getIssueSearchPage(
         route.projectId,
         route.query,
         { cursor: route.cursor, page_size: 20 },
         signal,
+        route.priority,
       ),
+      ...(route.priority === undefined ? {} : { priority: route.priority }),
     };
   }
   if (route.type === 'invalid') {

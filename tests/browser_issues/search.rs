@@ -114,6 +114,120 @@ async fn project_search_returns_literal_text_or_exact_key_pages_without_trash_or
 }
 
 #[tokio::test]
+async fn project_search_filters_priority_alone_and_in_combination_with_text_or_key() {
+    let f = Fixture::new().await;
+    let urgent_shared = f.create("Shared urgent work").await;
+    let high_shared = f.create("Shared high work").await;
+    let urgent_other = f.create("Other urgent work").await;
+    let trashed_urgent = f.create("Trashed urgent work").await;
+    let low_issue = f.create("Low priority work").await;
+    let medium_issue = f.create("Medium priority work").await;
+    let none_issue = f.create("No priority work").await;
+    for (id, priority) in [
+        (&urgent_shared, "urgent"),
+        (&high_shared, "high"),
+        (&urgent_other, "urgent"),
+        (&trashed_urgent, "urgent"),
+        (&low_issue, "low"),
+        (&medium_issue, "medium"),
+    ] {
+        sqlx::query("UPDATE issues SET priority = ? WHERE id = ?")
+            .bind(priority)
+            .bind(id)
+            .execute(f.db.pool())
+            .await
+            .unwrap();
+    }
+    sqlx::query("UPDATE issues SET trashed_at = ? WHERE id = ?")
+        .bind(Utc::now().to_rfc3339())
+        .bind(&trashed_urgent)
+        .execute(f.db.pool())
+        .await
+        .unwrap();
+
+    let path = format!("/api/v1/projects/{}/issues/search", f.project);
+    let urgent_page = json(
+        f.get(
+            &format!("{path}?priority=urgent&page_size=1"),
+            Some(&f.token.token),
+        )
+        .await,
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(urgent_page["data"][0]["id"], urgent_shared);
+    assert_eq!(urgent_page["has_more"], true);
+    let cursor = urgent_page["next_cursor"].as_str().unwrap();
+    let next_urgent_page = json(
+        f.get(
+            &format!("{path}?priority=urgent&cursor={cursor}"),
+            Some(&f.token.token),
+        )
+        .await,
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(next_urgent_page["data"][0]["id"], urgent_other);
+    assert_eq!(next_urgent_page["has_more"], false);
+
+    let text_and_priority = json(
+        f.get(
+            &format!("{path}?q=Shared&priority=urgent"),
+            Some(&f.token.token),
+        )
+        .await,
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(text_and_priority["data"].as_array().unwrap().len(), 1);
+    assert_eq!(text_and_priority["data"][0]["id"], urgent_shared);
+    let key_and_priority = json(
+        f.get(
+            &format!("{path}?q=DEV-2&priority=high"),
+            Some(&f.token.token),
+        )
+        .await,
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(key_and_priority["data"][0]["id"], high_shared);
+    let mismatched_key_priority = json(
+        f.get(
+            &format!("{path}?q=DEV-2&priority=urgent"),
+            Some(&f.token.token),
+        )
+        .await,
+        StatusCode::OK,
+    )
+    .await;
+    assert!(
+        mismatched_key_priority["data"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    for (priority, expected_id) in [
+        ("none", &none_issue),
+        ("low", &low_issue),
+        ("medium", &medium_issue),
+        ("high", &high_shared),
+        ("urgent", &urgent_shared),
+    ] {
+        let filtered = json(
+            f.get(&format!("{path}?priority={priority}"), Some(&f.token.token))
+                .await,
+            StatusCode::OK,
+        )
+        .await;
+        assert_eq!(
+            filtered["data"][0]["id"],
+            expected_id.as_str(),
+            "{priority}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn project_search_revalidates_session_and_membership_and_hides_private_existence() {
     let f = Fixture::new().await;
     f.create("Private searchable issue").await;
@@ -127,10 +241,10 @@ async fn project_search_revalidates_session_and_membership_and_hides_private_exi
     let viewer = user(&f.db, "guest").await;
     member(&f.db, &f.project, &viewer, "viewer").await;
     let sessions = SessionStore::new(f.db.pool().clone(), policy());
-    let path = format!("/api/v1/projects/{}/issues/search?q=searchable", f.project);
+    let path = format!("/api/v1/projects/{}/issues/search?priority=none", f.project);
 
     let missing_path = format!(
-        "/api/v1/projects/{}/issues/search?q=searchable",
+        "/api/v1/projects/{}/issues/search?priority=none",
         Uuid::now_v7()
     );
     let missing = json(
@@ -192,9 +306,15 @@ async fn project_search_rejects_invalid_queries_cursors_and_unsupported_methods(
     f.create("Search input").await;
     let path = format!("/api/v1/projects/{}/issues/search", f.project);
     for (query, status) in [
+        ("", StatusCode::UNPROCESSABLE_ENTITY),
         ("q=", StatusCode::UNPROCESSABLE_ENTITY),
         ("q=%20%20", StatusCode::UNPROCESSABLE_ENTITY),
         ("q=one%0Atwo", StatusCode::UNPROCESSABLE_ENTITY),
+        ("priority=unknown", StatusCode::UNPROCESSABLE_ENTITY),
+        (
+            "q=one&priority=high&priority=urgent",
+            StatusCode::BAD_REQUEST,
+        ),
         ("q=one&unknown=true", StatusCode::BAD_REQUEST),
         ("q=one&q=two", StatusCode::BAD_REQUEST),
         ("q=one&cursor=bad", StatusCode::UNPROCESSABLE_ENTITY),

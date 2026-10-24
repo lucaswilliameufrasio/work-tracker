@@ -9,7 +9,7 @@ use crate::auth::{
 
 use super::{
     IssueHistoryCursor, IssueHistoryPage, IssueListPage, IssueReadError, IssueRecord,
-    IssueSearchCursor, IssueSearchPage, IssueStore,
+    IssueSearchOptions, IssueSearchPage, IssueStore,
 };
 
 #[derive(Debug, Error)]
@@ -152,14 +152,12 @@ impl SessionIssueReader {
     }
 
     /// Revalidates the bearer-derived identity and project read access in the
-    /// same snapshot as the bounded FTS/exact-key result page.
+    /// same snapshot as the bounded text/key/structured-filter result page.
     pub async fn search_project_issues(
         &self,
         token: &SessionToken,
         project_id: &str,
-        query: &str,
-        after: Option<&IssueSearchCursor>,
-        page_size: u16,
+        options: IssueSearchOptions<'_>,
         now: DateTime<Utc>,
     ) -> Result<IssueSearchPage, SessionIssueReadError> {
         let mut transaction = self.pool.begin().await?;
@@ -172,9 +170,7 @@ impl SessionIssueReader {
             &mut transaction,
             principal.user_id(),
             project_id,
-            query,
-            after,
-            page_size,
+            options,
             now,
         )
         .await?;

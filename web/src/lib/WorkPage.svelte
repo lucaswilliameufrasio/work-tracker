@@ -30,7 +30,7 @@
     type IssueDueDateInput,
     type IssueDueDateTarget,
   } from './issue-due-date.ts';
-  import type { IssuePriority } from './issues.ts';
+  import { validateIssueSearchText, type IssuePriority } from './issues.ts';
 
   const route = workRoute(
     globalThis.location.pathname,
@@ -91,6 +91,10 @@
   let priorityState = $state<PriorityState>({ type: 'idle' });
   let dueDateState = $state<DueDateState>({ type: 'idle' });
   let assigneeNotice = $state<AssigneeNotice | undefined>(undefined);
+  let searchDraft = $state(route.type === 'search' ? (route.query ?? '') : '');
+  let selectedSearchPriority = $state<IssuePriority | ''>(
+    route.type === 'search' ? (route.priority ?? '') : '',
+  );
   let selectedPriority = $state<IssuePriority>('none');
   let selectedDueDate = $state('');
   let selectedPriorityIssueId = '';
@@ -154,8 +158,20 @@
     return `/projects/${project}/issues${cursor === undefined ? '' : `?cursor=${cursor}`}`;
   }
 
-  function searchLink(project: string, query: string, cursor?: string): string {
-    const params = new SvelteURLSearchParams({ q: query });
+  function searchLink(
+    project: string,
+    query: string | undefined,
+    priority: IssuePriority | undefined,
+    cursor?: string,
+  ): string {
+    const params = new SvelteURLSearchParams();
+    if (query !== undefined) {
+      validateIssueSearchText(query);
+      params.set('q', query);
+    }
+    if (priority !== undefined) {
+      params.set('priority', priority);
+    }
     if (cursor !== undefined) {
       params.set('cursor', cursor);
     }
@@ -177,10 +193,17 @@
     const query = new SvelteURLSearchParams();
     const fromSearch =
       route.type === 'search'
-        ? { query: route.query, cursor: route.cursor }
-        : route.type === 'detail' && route.fromSearchQuery !== undefined
+        ? {
+            query: route.query,
+            priority: route.priority,
+            cursor: route.cursor,
+          }
+        : route.type === 'detail' &&
+            (route.fromSearchQuery !== undefined ||
+              route.fromSearchPriority !== undefined)
           ? {
               query: route.fromSearchQuery,
+              priority: route.fromSearchPriority,
               cursor: route.fromSearchCursor,
             }
           : undefined;
@@ -191,7 +214,12 @@
           ? route.from
           : undefined;
     if (fromSearch !== undefined) {
-      query.set('from_q', fromSearch.query);
+      if (fromSearch.query !== undefined) {
+        query.set('from_q', fromSearch.query);
+      }
+      if (fromSearch.priority !== undefined) {
+        query.set('from_priority', fromSearch.priority);
+      }
       if (fromSearch.cursor !== undefined) {
         query.set('from_cursor', fromSearch.cursor);
       }
@@ -607,8 +635,8 @@
   </h1>
   <p class="intro">
     Leitura em desenvolvimento. Busque por termos no título/descrição ou por
-    chave exata; filtros estruturados e atualização ao vivo ainda não estão
-    disponíveis.
+    chave exata; a prioridade também pode ser filtrada. Outros filtros
+    estruturados e atualização ao vivo ainda não estão disponíveis.
   </p>
   <nav class="work-links" aria-label="Navegação do trabalho">
     <a href="/projects">Meus projetos</a>
@@ -620,14 +648,17 @@
         >{/if}
     {/if}
     {#if route.type === 'detail'}<a
-        href={route.fromSearchQuery === undefined
+        href={route.fromSearchQuery === undefined &&
+        route.fromSearchPriority === undefined
           ? listLink(route.projectId, route.from)
           : searchLink(
               route.projectId,
               route.fromSearchQuery,
+              route.fromSearchPriority,
               route.fromSearchCursor,
             )}
-        >{route.fromSearchQuery === undefined
+        >{route.fromSearchQuery === undefined &&
+        route.fromSearchPriority === undefined
           ? 'Voltar à lista de issues'
           : 'Voltar aos resultados da busca'}</a
       >{/if}
@@ -700,27 +731,40 @@
       {:else if data.type === 'issues' || data.type === 'search'}
         <form class="search-form" method="get" action={issueCollectionPath()}>
           <label for="issue-search"
-            >Buscar no título, descrição ou chave exata</label
+            >Buscar no título, descrição ou chave exata (opcional)</label
           >
           <div>
             <input
               id="issue-search"
               type="search"
-              name="q"
+              name={searchDraft === '' ? undefined : 'q'}
               maxlength="256"
-              value={data.type === 'search' ? data.query : ''}
+              bind:value={searchDraft}
               placeholder="Ex.: prazo revisão ou DEV-123"
             />
             <button type="submit">Buscar</button>
           </div>
+          <label for="issue-search-priority">Filtrar por prioridade</label>
+          <select
+            id="issue-search-priority"
+            name={selectedSearchPriority === '' ? undefined : 'priority'}
+            bind:value={selectedSearchPriority}
+          >
+            <option value="">Todas as prioridades</option>
+            <option value="none">Sem prioridade</option>
+            <option value="low">Baixa</option>
+            <option value="medium">Média</option>
+            <option value="high">Alta</option>
+            <option value="urgent">Urgente</option>
+          </select>
           {#if data.type === 'search'}<a href={listLink(data.projectId)}
-              >Limpar busca</a
+              >Limpar busca e filtro</a
             >{/if}
         </form>
         {#if data.page.data.length === 0}
           <p role="status">
             {data.type === 'search'
-              ? `Nenhuma issue corresponde a “${data.query}”. Tente outros termos ou uma chave exata.`
+              ? 'Nenhuma issue corresponde aos critérios. Ajuste o texto ou a prioridade.'
               : 'Nenhuma issue fora da lixeira nesta página.'}
           </p>
         {/if}
@@ -748,6 +792,7 @@
               href={searchLink(
                 data.projectId,
                 data.query,
+                data.priority,
                 data.page.next_cursor,
               )}>Próxima página de resultados</a
             >{:else if route.type === 'issues'}<a
@@ -1087,7 +1132,8 @@
     display: flex;
     gap: 10px;
   }
-  .search-form input {
+  .search-form input,
+  .search-form select {
     box-sizing: border-box;
     min-width: 0;
     min-height: 44px;
@@ -1108,6 +1154,7 @@
     width: fit-content;
   }
   .search-form input:focus-visible,
+  .search-form select:focus-visible,
   .search-form button:focus-visible {
     outline: 3px solid var(--primary);
     outline-offset: 3px;

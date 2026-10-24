@@ -129,6 +129,48 @@ describe('issue DTO boundary', () => {
     expect(fetcher).not.toHaveBeenCalled();
   });
 
+  it('supports a priority-only search and rejects pages that violate its filter', async () => {
+    const urgent = { ...summary, priority: 'urgent' };
+    expect(
+      parseIssueSearchPage(
+        { data: [urgent], has_more: false },
+        id,
+        undefined,
+        20,
+        undefined,
+        'urgent',
+      ),
+    ).toEqual({ data: [urgent], has_more: false });
+    expect(() =>
+      parseIssueSearchPage(
+        { data: [summary], has_more: false },
+        id,
+        undefined,
+        20,
+        undefined,
+        'urgent',
+      ),
+    ).toThrow('Invalid issue API response');
+    expect(() =>
+      parseIssueSearchPage({ data: [], has_more: false }, id, undefined, 20),
+    ).toThrow('Invalid issue API response');
+
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(Response.json({ data: [urgent], has_more: false }));
+    vi.stubGlobal('fetch', fetcher);
+    await expect(
+      getIssueSearchPage(id, undefined, { page_size: 20 }, signal(), 'urgent'),
+    ).resolves.toEqual({ data: [urgent], has_more: false });
+    expect(String(fetcher.mock.calls[0]?.[0])).toContain(
+      `/api/v1/projects/${id}/issues/search?priority=urgent&page_size=20`,
+    );
+    await expect(
+      getIssueSearchPage(id, '', {}, signal(), 'urgent'),
+    ).rejects.toThrow('Invalid issue API response');
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
   it('decodes exact typed text-change events but never text snapshots or unknown kinds', () => {
     for (const kind of [
       'issue.title_updated',

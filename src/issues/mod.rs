@@ -26,7 +26,7 @@ pub use queries::{
     IssueDetails, IssueEvent, IssueEventKind, IssueFieldChange, IssueHistoryCursor,
     IssueHistoryPage, IssueListPage, IssueReadError, IssueSummary,
 };
-pub use search::{IssueSearchCursor, IssueSearchPage};
+pub use search::{IssueSearchCursor, IssueSearchOptions, IssueSearchPage};
 
 #[derive(Debug, Error)]
 pub enum IssueCreationError {

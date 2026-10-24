@@ -155,6 +155,28 @@ fn generated_contract_has_unique_operations_resolved_refs_and_only_implemented_r
         }
     }
     assert_eq!(actual, expected);
+    let search = &document["paths"]["/api/v1/projects/{project_id}/issues/search"]["get"];
+    let search_parameters = search["parameters"].as_array().unwrap();
+    let query_parameter = search_parameters
+        .iter()
+        .find(|parameter| parameter["name"] == "q")
+        .unwrap();
+    assert_eq!(query_parameter["required"], false);
+    let priority_parameter = search_parameters
+        .iter()
+        .find(|parameter| parameter["name"] == "priority")
+        .unwrap();
+    assert_eq!(priority_parameter["required"], false);
+    assert_eq!(
+        priority_parameter["schema"]["enum"],
+        serde_json::json!(["none", "low", "medium", "high", "urgent"])
+    );
+    assert!(
+        search["description"]
+            .as_str()
+            .unwrap()
+            .contains("at least one is required")
+    );
     let due_date =
         &document["paths"]["/api/v1/projects/{project_id}/issues/{issue_number}/due-date"]["put"];
     assert_eq!(due_date["operationId"], "setProjectIssueDueDate");

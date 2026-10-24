@@ -125,6 +125,10 @@ function priority(value: unknown): IssuePriority {
   return value;
 }
 
+export function validateIssueSearchPriority(value: unknown): IssuePriority {
+  return priority(value);
+}
+
 function text(value: unknown): string {
   if (typeof value !== 'string') {
     return invalid();
@@ -350,12 +354,21 @@ function searchBoundaryAfter(
 export function parseIssueSearchPage(
   value: unknown,
   projectId: string,
-  query: string,
+  query: string | undefined,
   pageSize: number,
   after?: string,
+  priorityFilter?: IssuePriority,
 ): IssuePage<IssueSummary> {
   uuid(projectId);
-  searchText(query);
+  if (query !== undefined) {
+    searchText(query);
+  }
+  if (priorityFilter !== undefined) {
+    priority(priorityFilter);
+  }
+  if (query === undefined && priorityFilter === undefined) {
+    return invalid();
+  }
   const item = page(value, pageSize);
   let previous =
     after === undefined
@@ -365,6 +378,9 @@ export function parseIssueSearchPage(
   const ids = new Set<string>();
   for (const raw of item.data) {
     const issue = summary(fields(raw, summaryFields), projectId);
+    if (priorityFilter !== undefined && issue.priority !== priorityFilter) {
+      return invalid();
+    }
     const boundary = {
       issue_number: issue.issue_number,
       issue_id: issue.id,
@@ -542,17 +558,27 @@ export async function getIssuePage(
 
 export async function getIssueSearchPage(
   projectId: string,
-  queryText: string,
+  queryText: string | undefined,
   options: PageOptions,
   signal: AbortSignal,
+  priorityFilter?: IssuePriority,
 ): Promise<IssuePage<IssueSummary>> {
   uuid(projectId);
-  const search = searchText(queryText);
+  const search = queryText === undefined ? undefined : searchText(queryText);
+  const selectedPriority =
+    priorityFilter === undefined ? undefined : priority(priorityFilter);
+  if (search === undefined && selectedPriority === undefined) {
+    return invalid();
+  }
   const pageSize = size(options.page_size);
-  const encoded = new URLSearchParams({
-    q: search,
-    page_size: String(pageSize),
-  });
+  const encoded = new URLSearchParams();
+  if (search !== undefined) {
+    encoded.set('q', search);
+  }
+  if (selectedPriority !== undefined) {
+    encoded.set('priority', selectedPriority);
+  }
+  encoded.set('page_size', String(pageSize));
   if (options.cursor !== undefined) {
     searchBoundary(options.cursor);
     encoded.set('cursor', options.cursor);
@@ -564,6 +590,7 @@ export async function getIssueSearchPage(
     search,
     pageSize,
     options.cursor,
+    selectedPriority,
   );
 }
 

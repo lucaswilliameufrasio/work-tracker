@@ -1,11 +1,13 @@
 use chrono::Utc;
 use puxiri::{
     db::Database,
-    issues::{IssueReadError, IssueSearchCursor, IssueStore, NewIssue},
+    issues::{
+        IssuePriority, IssueReadError, IssueSearchCursor, IssueSearchOptions, IssueStore, NewIssue,
+    },
     projects::ProjectStore,
 };
 use sqlx::{
-    ConnectOptions, SqlitePool,
+    ConnectOptions, Row, SqlitePool,
     sqlite::{SqliteConnectOptions, SqlitePoolOptions},
 };
 use tempfile::TempDir;
@@ -61,6 +63,20 @@ async fn seed_owner(pool: &SqlitePool) -> (String, String) {
         .await
         .unwrap();
     (owner, project.id)
+}
+
+fn search_options<'a>(
+    query: Option<&'a str>,
+    priority: Option<IssuePriority>,
+    after: Option<&'a IssueSearchCursor>,
+    page_size: u16,
+) -> IssueSearchOptions<'a> {
+    IssueSearchOptions {
+        query,
+        priority,
+        after,
+        page_size,
+    }
 }
 
 #[tokio::test]
@@ -306,4 +322,172 @@ async fn issue_search_uses_literal_terms_exact_keys_and_stable_bounded_pages() {
             .await,
         Err(IssueReadError::InvalidPageSize)
     ));
+}
+
+#[tokio::test]
+async fn issue_search_filters_priority_with_or_without_text_and_uses_a_bounded_index() {
+    let directory = TempDir::new().unwrap();
+    let database = Database::open(directory.path()).await.unwrap();
+    sqlx::query("INSERT INTO organizations (id, name, locale, timezone, created_at, updated_at) VALUES (1, 'Search tests', 'en', 'UTC', 'now', 'now')")
+        .execute(database.pool())
+        .await
+        .unwrap();
+    let owner = Uuid::now_v7().to_string();
+    sqlx::query("INSERT INTO users (id, display_name, state, created_at, updated_at) VALUES (?, 'Search owner', 'active', 'now', 'now')")
+        .bind(&owner)
+        .execute(database.pool())
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO organization_members (organization_id, user_id, role, created_at) VALUES (1, ?, 'owner', 'now')")
+        .bind(&owner)
+        .execute(database.pool())
+        .await
+        .unwrap();
+    let project = ProjectStore::new(database.pool().clone())
+        .create(&owner, "FIND", "Search", None, Utc::now())
+        .await
+        .unwrap();
+    let store = IssueStore::new(database.pool().clone());
+    let mut issue_ids = Vec::new();
+    for title in [
+        "Shared urgent work",
+        "Shared high work",
+        "Other urgent work",
+        "Shared without priority",
+    ] {
+        issue_ids.push(
+            store
+                .create(
+                    &owner,
+                    &project.id,
+                    NewIssue {
+                        title,
+                        description: None,
+                        assignee_user_id: None,
+                    },
+                    Utc::now(),
+                )
+                .await
+                .unwrap()
+                .id,
+        );
+    }
+    for (issue_id, priority) in [
+        (&issue_ids[0], "urgent"),
+        (&issue_ids[1], "high"),
+        (&issue_ids[2], "urgent"),
+    ] {
+        sqlx::query("UPDATE issues SET priority = ? WHERE id = ?")
+            .bind(priority)
+            .bind(issue_id)
+            .execute(database.pool())
+            .await
+            .unwrap();
+    }
+
+    let urgent = store
+        .search_project_issues_with_options(
+            &owner,
+            &project.id,
+            search_options(None, Some(IssuePriority::Urgent), None, 1),
+        )
+        .await
+        .unwrap();
+    assert_eq!(urgent.items[0].id, issue_ids[0]);
+    let next = store
+        .search_project_issues_with_options(
+            &owner,
+            &project.id,
+            search_options(
+                None,
+                Some(IssuePriority::Urgent),
+                urgent.next_cursor.as_ref(),
+                10,
+            ),
+        )
+        .await
+        .unwrap();
+    assert_eq!(next.items.len(), 1);
+    assert_eq!(next.items[0].id, issue_ids[2]);
+    assert!(next.next_cursor.is_none());
+
+    let text_and_priority = store
+        .search_project_issues_with_options(
+            &owner,
+            &project.id,
+            search_options(Some("Shared"), Some(IssuePriority::Urgent), None, 10),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        text_and_priority
+            .items
+            .iter()
+            .map(|issue| issue.id.as_str())
+            .collect::<Vec<_>>(),
+        [issue_ids[0].as_str()]
+    );
+    let key_and_priority = store
+        .search_project_issues_with_options(
+            &owner,
+            &project.id,
+            search_options(Some("find-2"), Some(IssuePriority::High), None, 10),
+        )
+        .await
+        .unwrap();
+    assert_eq!(key_and_priority.items[0].id, issue_ids[1]);
+    let mismatched_key_priority = store
+        .search_project_issues_with_options(
+            &owner,
+            &project.id,
+            search_options(Some("FIND-2"), Some(IssuePriority::Urgent), None, 10),
+        )
+        .await
+        .unwrap();
+    assert!(mismatched_key_priority.items.is_empty());
+
+    assert!(matches!(
+        store
+            .search_project_issues_with_options(
+                &owner,
+                &project.id,
+                search_options(None, None, None, 10),
+            )
+            .await,
+        Err(IssueReadError::InvalidSearchQuery)
+    ));
+    assert!(matches!(
+        store
+            .search_project_issues_with_options(
+                &owner,
+                &project.id,
+                search_options(Some("  "), Some(IssuePriority::Urgent), None, 10),
+            )
+            .await,
+        Err(IssueReadError::InvalidSearchQuery)
+    ));
+
+    let plan = sqlx::query(
+        "EXPLAIN QUERY PLAN SELECT id FROM issues \
+         WHERE project_id = ? AND priority = ? AND trashed_at IS NULL \
+           AND (issue_number, id) > (?, ?) \
+         ORDER BY issue_number ASC, id ASC LIMIT ?",
+    )
+    .bind(&project.id)
+    .bind("urgent")
+    .bind(0_i64)
+    .bind("")
+    .bind(51_i64)
+    .fetch_all(database.pool())
+    .await
+    .unwrap();
+    let plan_details = plan
+        .iter()
+        .map(|row| row.get::<String, _>("detail"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        plan_details.contains("issues_project_priority_search_idx"),
+        "unexpected query plan: {plan_details}"
+    );
 }

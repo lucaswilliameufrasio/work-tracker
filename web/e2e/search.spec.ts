@@ -22,7 +22,7 @@ function issue(number: number): Record<string, unknown> {
     title:
       number === 21 ? 'Search result twenty one' : `Search result ${number}`,
     creator_user_id: actorId,
-    priority: 'none',
+    priority: 'urgent',
     is_overdue: false,
     version: '1',
     created_at: now,
@@ -140,20 +140,21 @@ test('project search paginates, opens detail, and returns to the same query and 
   });
 
   await page.goto(
-    `/projects/${projectId}/issues?q=${encodeURIComponent(query)}`,
+    `/projects/${projectId}/issues?q=${encodeURIComponent(query)}&priority=urgent`,
   );
   await expect(
     page.getByRole('heading', { name: 'Busca de issues' }),
   ).toBeVisible();
   await expect(
-    page.getByLabel('Buscar no título, descrição ou chave exata'),
+    page.getByLabel('Buscar no título, descrição ou chave exata (opcional)'),
   ).toHaveValue(query);
+  await expect(page.getByLabel('Filtrar por prioridade')).toHaveValue('urgent');
   await expect(
     page.getByRole('link', { name: /DEV-1 Search result 1/ }),
   ).toBeVisible();
   await expect(page.getByText('Private result description')).toHaveCount(0);
   const nextCursor = boundary(20);
-  const searchPageUrl = new URLSearchParams({ q: query });
+  const searchPageUrl = new URLSearchParams({ q: query, priority: 'urgent' });
   searchPageUrl.set('cursor', nextCursor);
   await page
     .getByRole('link', { name: 'Próxima página de resultados' })
@@ -173,6 +174,7 @@ test('project search paginates, opens detail, and returns to the same query and 
   await expect(page.getByText('Private result description')).toBeVisible();
   const detailReturn = new URLSearchParams({
     from_q: query,
+    from_priority: 'urgent',
     from_cursor: nextCursor,
   });
   await expect(page).toHaveURL(
@@ -191,7 +193,9 @@ test('project search paginates, opens detail, and returns to the same query and 
   expect(searchRequests).toHaveLength(3);
   expect(
     searchRequests.every(
-      (search) => new URLSearchParams(search).get('q') === query,
+      (search) =>
+        new URLSearchParams(search).get('q') === query &&
+        new URLSearchParams(search).get('priority') === 'urgent',
     ),
   ).toBe(true);
   expect(externalRequests).toEqual([]);
@@ -200,4 +204,50 @@ test('project search paginates, opens detail, and returns to the same query and 
       () => document.documentElement.scrollWidth <= window.innerWidth,
     ),
   ).toBe(true);
+});
+
+test('submits a project search using only a selected priority', async ({
+  page,
+}) => {
+  const searchRequests: string[] = [];
+  await page.route('**/api/v1/**', async (route) => {
+    const url = new URL(route.request().url());
+    const path = url.pathname;
+    if (path === `/api/v1/projects/${projectId}/issues`) {
+      await route.fulfill({ json: { data: [], has_more: false } });
+      return;
+    }
+    if (path === `/api/v1/projects/${projectId}/issues/search`) {
+      searchRequests.push(url.search);
+      expect(url.searchParams.get('q')).toBeNull();
+      expect(url.searchParams.get('priority')).toBe('urgent');
+      await route.fulfill({
+        json: { data: [issue(1)], has_more: false },
+      });
+      return;
+    }
+    if (path === '/api/v1/auth/session') {
+      await route.fulfill({
+        json: {
+          user_id: actorId,
+          session_id: actorId,
+          csrf_token: 'A'.repeat(43),
+        },
+      });
+      return;
+    }
+    await route.fulfill({ status: 404, json: { code: 'not_found' } });
+  });
+
+  await page.goto(`/projects/${projectId}/issues`);
+  await page.getByLabel('Filtrar por prioridade').selectOption('urgent');
+  await page.getByRole('button', { name: 'Buscar' }).click();
+  await expect(page).toHaveURL(`/projects/${projectId}/issues?priority=urgent`);
+  await expect(
+    page.getByRole('heading', { name: 'Busca de issues' }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole('link', { name: /DEV-1 Search result 1/ }),
+  ).toBeVisible();
+  expect(searchRequests).toHaveLength(1);
 });

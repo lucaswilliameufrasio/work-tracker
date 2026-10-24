@@ -1,6 +1,6 @@
 # Issue read queries — feature design
 
-**Status:** Authorized internal SQLite detail/list queries are implemented. Slice225 adds a [session-bound browser list endpoint](browser-issue-list-design.md); slice226 adds [bounded detail/history HTTP](browser-issue-detail-design.md). Slice253 adds the initial per-project text/exact-key search journey described below. MCP, structured filters/facets, cross-project search and saved views remain pending. The original internal-query gate used `RUSTUP_TOOLCHAIN=1.99.0 PUXIRI_E2E_PORT=18498 make check`; newer evidence is in the development plan.
+**Status:** Authorized internal SQLite detail/list queries are implemented. Slice225 adds a [session-bound browser list endpoint](browser-issue-list-design.md); slice226 adds [bounded detail/history HTTP](browser-issue-detail-design.md). Slice253 adds the initial per-project text/exact-key search journey and slice254 adds its priority filter. Other structured filters/facets, MCP, cross-project search and saved views remain pending. The original internal-query gate used `RUSTUP_TOOLCHAIN=1.99.0 PUXIRI_E2E_PORT=18498 make check`; newer evidence is in the development plan.
 
 **Requirements:** `docs/development-plan.md`, sections 5–6 and 10.2–10.3.
 
@@ -22,7 +22,7 @@
 - List only issues with `trashed_at IS NULL`, ordered by immutable positive `issue_number` ascending. The keyset cursor is the last returned issue number; creation allocates strictly increasing numbers, so pages do not require OFFSET scans or mutable-rank cursors.
 - Require page size 1–100 and fetch one extra row to determine whether another page exists. The returned continuation cursor is absent when there is no next page.
 - Pagination is keyset-stable, not a multi-request snapshot: a concurrently created issue whose number exceeds the cursor may appear in a subsequent page. A client may restart from the beginning when it needs a fresh collection view.
-- Issue listing does not implement arbitrary filters or board rank ordering. Search is a separate indexed, session-bound query; facets, saved views, cross-project search and structured filters remain separate work.
+- Issue listing does not implement arbitrary filters or board rank ordering. Search is a separate indexed, session-bound query; aside from the priority filter in slice254, facets, saved views, cross-project search and other structured filters remain separate work.
 
 ## Slice 253 — bounded project search
 
@@ -32,6 +32,13 @@
 - Keep FTS rowids separate from `issues.rowid`: issue IDs are text primary keys, and SQLite may change an implicit rowid during `VACUUM`. An integer-keyed search-document table owns stable FTS rowids and mirrors title/description transactionally via triggers; migration backfills existing issues. Search response items are existing summaries, with no description/snippet.
 - The browser URL carries the search query and cursor. Opening a result records both in the detail URL so the return link restores the same results page. The search form submits an ordinary GET navigation; it does not persist private query/results in browser storage.
 - Verification uses real migrated SQLite and the real Axum router. Cover migration backfill and insert/update/delete trigger consistency, literal FTS syntax, exact key, trash/project isolation, current session/membership roles and revocation, generic private 404, malformed/over-limit queries and cursors, lossless IDs/page boundaries, OpenAPI/HEAD/no-store, typed client validation, and Chromium search→detail→return plus private-data concealment. No provider or external service is involved.
+
+## Slice 254 — structured priority filter
+
+- Extend the project search endpoint with an optional exact `priority` value (`none`, `low`, `medium`, `high`, or `urgent`). It combines with literal text search or an exact project-local issue key using AND; priority alone is also a valid search. At least one of `q` or `priority` is required. If `q` is supplied it retains slice253's bounds and validation, including rejection of blank/control-containing input.
+- Apply the filter inside the same session-bound SQLite transaction and explicit project-membership authorization as the search. Keep trash exclusion, project scope, bounded page size, summary-only output, stable `(issue_number, issue_id)` order and cursor behavior unchanged. Priority-only pages use the `(project_id, priority, trashed_at, issue_number, id)` index added by migration0040; combined FTS queries apply priority as an additional predicate.
+- The ordinary GET form exposes a native priority selector and allows an empty text box when a priority is selected. The URL preserves text, priority and cursor; detail return navigation restores all active search criteria. Clearing all search criteria returns to the ordinary issue list.
+- Verify all five accepted values and invalid values at the HTTP boundary, priority-only and combined text/exact-key matches, mismatched criteria, trash exclusion, keyset pagination and query-plan index use. Also verify OpenAPI, TypeScript response/input validation and navigation, and Chromium form submission plus search→detail→return preservation. Do not claim other filters, facets or cross-project search.
 
 ## Verification plan
 
