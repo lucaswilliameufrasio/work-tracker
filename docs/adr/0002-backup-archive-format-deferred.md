@@ -125,6 +125,7 @@ On 2026-10-19, evidence 217 reconciled the published 2.4.1/2.4.2 package diff an
 - Evidence 113 records the user's explicit decision not to weaken the cryptographic profile for GnuPG compatibility. GnuPG remains a compatibility/recovery-client question, not a confirmed product requirement; do not infer permission to switch to an older or less-protective profile. No code, dependency or crypto profile changed.
 - Phase 0 backup/restore and resource checkboxes remain open until the end-to-end contracts above are verified and recorded.
 - S3 remains optional; a backup's key custody and restored destination credentials remain separate from this format selection.
+- As of 2026-10-24, the disposable `web/scripts/s3-spike.test.mjs` harness uses Floci 2.3.0 pinned by OCI digest, with 38/38 local S3/bundle tests passing. Earlier MinIO evidence above remains historical and does not establish Floci, AWS S3/R2, product-adapter or production backup compatibility. See the current harness evidence in `docs/development-plan.md`.
 
 ## Evidence
 
