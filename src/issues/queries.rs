@@ -62,6 +62,7 @@ pub enum IssueEventKind {
     TitleUpdated,
     DescriptionUpdated,
     TextUpdated,
+    Moved,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -417,6 +418,7 @@ fn issue_event_from_row(row: &SqliteRow) -> Result<IssueEvent, IssueReadError> {
         "issue.title_updated" => IssueEventKind::TitleUpdated,
         "issue.description_updated" => IssueEventKind::DescriptionUpdated,
         "issue.text_updated" => IssueEventKind::TextUpdated,
+        "issue.moved" => IssueEventKind::Moved,
         _ => return Err(IssueReadError::CorruptData),
     };
 

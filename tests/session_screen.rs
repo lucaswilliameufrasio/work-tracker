@@ -356,7 +356,38 @@ async fn session_screen_uses_real_https_browser_cookies_confirmations_and_transa
         .fetch_one(database.pool())
         .await
         .unwrap();
-    assert_eq!((issue_count, issue_events), (29, 38));
+    assert_eq!((issue_count, issue_events), (29, 42));
+    let issue_move_events: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM issue_events WHERE event_kind = 'issue.moved'")
+            .fetch_one(database.pool())
+            .await
+            .unwrap();
+    let issue_move_outbox: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM outbox_events WHERE event_kind = 'issue.moved'")
+            .fetch_one(database.pool())
+            .await
+            .unwrap();
+    let issue_move_receipts: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM issue_move_receipts")
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
+    assert_eq!(
+        (issue_move_events, issue_move_outbox, issue_move_receipts),
+        (4, 4, 4)
+    );
+    let issue_one_state: (String, i64) = sqlx::query_as(
+        "SELECT issues.status_id, issues.version FROM issues JOIN projects ON projects.id = issues.project_id WHERE projects.project_key = 'READ' AND issues.issue_number = 1",
+    )
+    .fetch_one(database.pool())
+    .await
+    .unwrap();
+    let todo_status: String = sqlx::query_scalar(
+        "SELECT id FROM statuses WHERE project_id = (SELECT id FROM projects WHERE project_key = 'READ') AND system_key = 'todo'",
+    )
+    .fetch_one(database.pool())
+    .await
+    .unwrap();
+    assert_eq!(issue_one_state, (todo_status, 5));
     for (project, creator, session_id) in creation_projects {
         let counts: (i64, i64, i64, i64, i64) = sqlx::query_as("SELECT (SELECT COUNT(*) FROM issues WHERE project_id = ?), (SELECT COUNT(*) FROM issue_events WHERE project_id = ?), (SELECT COUNT(*) FROM outbox_events WHERE project_id = ?), (SELECT COUNT(*) FROM issue_creation_receipts WHERE project_id = ?), next_issue_number FROM projects WHERE id = ?")
             .bind(&project).bind(&project).bind(&project).bind(&project).bind(&project).fetch_one(database.pool()).await.unwrap();

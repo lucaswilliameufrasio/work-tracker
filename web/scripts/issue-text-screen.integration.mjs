@@ -26,6 +26,11 @@ export async function editWork(page, origin, fixture, artifacts) {
   await expect(page.locator('[data-issue-text-form]')).toBeVisible();
   const draft = 'Preserved <script>not executable</script>';
   await page.getByLabel('Título', { exact: false }).fill(draft);
+  await page.reload();
+  await expect(page.getByLabel('Título', { exact: false })).toHaveValue(draft);
+  await page.goto(`${origin}/projects/${fixture.project_id}/issues/1`);
+  await page.goto(`${origin}/projects/${fixture.project_id}/issues/1/edit`);
+  await expect(page.getByLabel('Título', { exact: false })).toHaveValue(draft);
   assert.equal(
     await page.evaluate(() => {
       globalThis.dispatchEvent(new globalThis.Event('blur'));
@@ -166,6 +171,14 @@ export async function editWork(page, origin, fixture, artifacts) {
   await expect(page.locator('[data-issue-text-form]')).toHaveCount(0);
   await expect(page.locator('body')).not.toContainText(
     'Draft removed after real revocation',
+  );
+  assert.equal(
+    await page.evaluate(() => {
+      return Object.keys(globalThis.sessionStorage).filter((key) =>
+        key.startsWith('puxiri:issue-text-draft:v1:'),
+      ).length;
+    }),
+    0,
   );
   assert.equal(puts, 4);
 }

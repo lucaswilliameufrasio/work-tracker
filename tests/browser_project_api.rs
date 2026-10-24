@@ -176,8 +176,15 @@ async fn every_documented_browser_operation_matches_real_success_and_auth_error_
         )
         .await
         .unwrap();
+    let move_status_id: String = sqlx::query_scalar(
+        "SELECT id FROM statuses WHERE project_id = ? AND system_key = 'in_progress'",
+    )
+    .bind(&project.id)
+    .fetch_one(database.pool())
+    .await
+    .unwrap();
     let sessions = SessionStore::new(database.pool().clone(), policy());
-    let app = app(&directory, database);
+    let app = app(&directory, database.clone());
     for (path, operations) in document["paths"].as_object().unwrap() {
         for (method, operation) in operations.as_object().unwrap() {
             let issued = sessions.issue(&actor, Utc::now()).await.unwrap();
@@ -211,15 +218,32 @@ async fn every_documented_browser_operation_matches_real_success_and_auth_error_
                     HeaderValue::from_str(&Uuid::now_v7().to_string()).unwrap(),
                 );
                 *req.body_mut() = Body::from(if method == "put" {
-                    r#"{"title":"Contract replacement","expected_version":"1"}"#
+                    let expected_version: i64 = sqlx::query_scalar(
+                        "SELECT version FROM issues WHERE project_id = ? AND issue_number = 1",
+                    )
+                    .bind(&project.id)
+                    .fetch_one(database.pool())
+                    .await
+                    .unwrap();
+                    serde_json::json!({
+                        "title": "Contract replacement",
+                        "expected_version": expected_version.to_string(),
+                    })
+                    .to_string()
+                } else if operation["operationId"] == "moveProjectIssue" {
+                    serde_json::json!({
+                        "expected_version": "1",
+                        "target_status_id": move_status_id,
+                    })
+                    .to_string()
                 } else {
-                    r#"{"title":"Contract creation"}"#
+                    r#"{"title":"Contract creation"}"#.to_owned()
                 });
             }
             let response = app.clone().oneshot(req).await.unwrap();
             let status = if method == "delete" {
                 StatusCode::NO_CONTENT
-            } else if method == "post" {
+            } else if method == "post" && operation["operationId"] == "createProjectIssue" {
                 StatusCode::CREATED
             } else {
                 StatusCode::OK

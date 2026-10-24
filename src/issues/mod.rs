@@ -16,6 +16,7 @@ mod board;
 mod queries;
 pub use board::{BoardColumnPage, BoardCursor, BoardOptions};
 pub mod creation;
+pub mod movement;
 pub mod session;
 pub mod text;
 pub use queries::{

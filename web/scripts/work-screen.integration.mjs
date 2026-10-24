@@ -46,6 +46,111 @@ export async function readWork(context, origin, fixture, artifacts) {
     path: join(artifacts, `${fixture.kind}-board.png`),
     fullPage: true,
   });
+  const sourceColumn = page
+    .locator('[data-board-column]')
+    .filter({ has: page.getByRole('heading', { name: 'To do', exact: true }) });
+  const targetColumn = page.locator('[data-board-column]').filter({
+    has: page.getByRole('heading', { name: 'In progress', exact: true }),
+  });
+  const targetStatusId = await targetColumn.getAttribute('data-board-column');
+  const sourceStatusId = await sourceColumn.getAttribute('data-board-column');
+  const movingCard = page
+    .getByRole('link', {
+      name: 'READ-1 Synthetic work issue 1',
+      exact: true,
+    })
+    .locator('xpath=ancestor::li[@data-board-card]');
+  const movingIssueId = await movingCard.getAttribute('data-board-card');
+  assert.ok(targetStatusId);
+  assert.ok(sourceStatusId);
+  assert.ok(movingIssueId);
+  const issueResponse = await page.request.get(
+    `${origin}/api/v1/projects/${fixture.project_id}/issues/1`,
+  );
+  assert.equal(issueResponse.status(), 200);
+  const issueState = await issueResponse.json();
+  const moveEndpoint = `${origin}/api/v1/projects/${fixture.project_id}/issues/1/move`;
+  const moveCommands = [];
+  const replayHeaders = [];
+  await page.route(moveEndpoint, async (route) => {
+    moveCommands.push({
+      key: route.request().headers()['idempotency-key'],
+      body: route.request().postData(),
+    });
+    if (moveCommands.length === 1) {
+      const committed = await route.fetch();
+      assert.equal(committed.status(), 200);
+      assert.equal(committed.headers()['idempotency-replayed'], 'false');
+      await route.fulfill({ response: committed, body: '{' });
+      return;
+    }
+    await route.continue();
+  });
+  page.on('response', (moveResponse) => {
+    if (moveResponse.url() === moveEndpoint) {
+      replayHeaders.push(moveResponse.headers()['idempotency-replayed']);
+    }
+  });
+  await movingCard.getByText('Movimentar', { exact: true }).click();
+  await movingCard.getByLabel('Coluna de destino').selectOption(targetStatusId);
+  await movingCard.getByRole('button', { name: 'Mover para o topo' }).click();
+  await expect(page.getByRole('alert')).toContainText(
+    'Não foi possível confirmar o movimento',
+  );
+  await page
+    .getByRole('button', { name: 'Repetir o mesmo comando com a mesma chave' })
+    .click();
+  await expect(
+    page
+      .getByRole('status')
+      .filter({ hasText: 'Movimento de READ-1 confirmado.' }),
+  ).toBeVisible();
+  assert.equal(moveCommands.length, 2);
+  assert.deepEqual(moveCommands[0], moveCommands[1]);
+  assert.deepEqual(replayHeaders, ['false', 'true']);
+  const submittedMove = JSON.parse(moveCommands[0].body);
+  assert.deepEqual(submittedMove, {
+    expected_version: issueState.version,
+    target_status_id: targetStatusId,
+  });
+  await expect(sourceColumn.locator('[data-board-card]')).toHaveCount(20);
+  await expect(targetColumn.locator('[data-board-card]')).toHaveCount(1);
+  await expect(
+    targetColumn.locator(`[data-board-card="${movingIssueId}"]`),
+  ).toHaveCount(1);
+  await expect(
+    sourceColumn.locator(`[data-board-card="${movingIssueId}"]`),
+  ).toHaveCount(0);
+  const movedCard = targetColumn.locator(
+    `[data-board-card="${movingIssueId}"]`,
+  );
+  const restoredIssueResponse = await page.request.get(
+    `${origin}/api/v1/projects/${fixture.project_id}/issues/1`,
+  );
+  assert.equal(restoredIssueResponse.status(), 200);
+  const movedIssueState = await restoredIssueResponse.json();
+  const restoreNeighborId = await sourceColumn
+    .locator('[data-board-card]')
+    .first()
+    .getAttribute('data-board-card');
+  assert.ok(restoreNeighborId);
+  await movedCard.getByText('Movimentar', { exact: true }).click();
+  await movedCard.getByLabel('Coluna de destino').selectOption(sourceStatusId);
+  const commandCountBeforeRestore = moveCommands.length;
+  await movedCard.getByRole('button', { name: 'Mover para o topo' }).click();
+  await expect(sourceColumn.locator('[data-board-card]')).toHaveCount(20);
+  await expect(sourceColumn.getByText('21 issues fora da lixeira')).toHaveCount(
+    1,
+  );
+  await expect(targetColumn.locator('[data-board-card]')).toHaveCount(0);
+  assert.equal(moveCommands.length, commandCountBeforeRestore + 1);
+  assert.deepEqual(replayHeaders, ['false', 'true', 'false']);
+  assert.notEqual(moveCommands[0].key, moveCommands[2].key);
+  assert.deepEqual(JSON.parse(moveCommands[commandCountBeforeRestore].body), {
+    expected_version: movedIssueState.version,
+    target_status_id: sourceStatusId,
+    next_issue_id: restoreNeighborId,
+  });
   await page
     .getByRole('link', { name: 'Continuar nesta coluna', exact: true })
     .click();

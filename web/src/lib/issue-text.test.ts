@@ -5,6 +5,7 @@ import {
   serializeIssueTextInput,
 } from './issue-text';
 import { IssueRequestError } from './issue-transport';
+import { onSessionEnded } from './session-lifecycle';
 
 const id = '019a0000-0000-7000-8000-000000000001';
 const other = '019a0000-0000-7000-8000-000000000002';
@@ -227,6 +228,34 @@ it('does not send for changed identity, aborted input or failed CSRF lookup', as
     replaceIssueText(id, target, id, key, input, signal()),
   ).rejects.not.toThrow('PRIVATE');
   expect(fetcher).toHaveBeenCalledTimes(1);
+});
+
+it('notifies the session lifecycle when an issue request observes an expired session', async () => {
+  let ended = 0;
+  const unsubscribe = onSessionEnded(() => {
+    ended += 1;
+  });
+  const fetcher = vi
+    .fn<typeof fetch>()
+    .mockResolvedValueOnce(json(session))
+    .mockResolvedValueOnce(
+      json(
+        {
+          code: 'unauthenticated',
+          message: 'safe',
+          request_id: id,
+          field_errors: {},
+          retryable: false,
+        },
+        401,
+      ),
+    );
+  vi.stubGlobal('fetch', fetcher);
+  await expect(
+    replaceIssueText(id, target, id, key, input, signal()),
+  ).rejects.toBeInstanceOf(IssueRequestError);
+  expect(ended).toBe(1);
+  unsubscribe();
 });
 
 it('treats lost network or malformed success/headers as unconfirmed without resending', async () => {

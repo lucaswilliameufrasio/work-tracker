@@ -228,6 +228,21 @@ it('composes only the server-ordered visible statuses in a bounded page', async 
     if (typeof path !== 'string') {
       throw new Error('Expected relative URL');
     }
+    if (path === `/api/v1/projects/${id}/capabilities`) {
+      return Response.json({
+        project_id: id,
+        can_create_issues: true,
+        can_replace_issue_text: true,
+        can_move_issues: true,
+      });
+    }
+    if (path === '/api/v1/auth/session') {
+      return Response.json({
+        user_id: id,
+        session_id: other,
+        csrf_token: 'A'.repeat(43),
+      });
+    }
     if (path.includes('/board?')) {
       return Response.json({ data: statuses, has_more: false });
     }
@@ -243,7 +258,9 @@ it('composes only the server-ordered visible statuses in a bounded page', async 
     third,
     other,
   ]);
-  expect(fetcher).toHaveBeenCalledTimes(3);
+  expect(data.actorId).toBe(id);
+  expect(data.canMoveIssues).toBe(true);
+  expect(fetcher).toHaveBeenCalledTimes(5);
   expect(fetcher.mock.calls[0]?.[0]).toContain('page_size=4');
 });
 

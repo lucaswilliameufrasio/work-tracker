@@ -5,6 +5,8 @@
   import WorkPage from './lib/WorkPage.svelte';
   import IssueCreationPage from './lib/IssueCreationPage.svelte';
   import IssueTextPage from './lib/IssueTextPage.svelte';
+  import { issueTextDraftStore } from './lib/issue-text-drafts';
+  import { onSessionEnded } from './lib/session-lifecycle';
 
   const sessionsPage = globalThis.location.pathname === '/settings/sessions';
   const creationPage =
@@ -19,6 +21,13 @@
 
   let status = $state<Readiness | 'checking' | 'unavailable'>('checking');
   const controller = new AbortController();
+  const unsubscribeSessionEnded = onSessionEnded(() => {
+    try {
+      issueTextDraftStore.clearAll();
+    } catch {
+      globalThis.console.warn('Could not clear this tab’s private drafts.');
+    }
+  });
 
   async function refresh() {
     status = 'checking';
@@ -36,7 +45,10 @@
     if (!sessionsPage && !workPage) {
       void refresh();
     }
-    return () => controller.abort();
+    return () => {
+      unsubscribeSessionEnded();
+      controller.abort();
+    };
   });
 </script>
 

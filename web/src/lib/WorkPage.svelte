@@ -2,13 +2,45 @@
   import { flushSync, onMount, tick } from 'svelte';
   import { SvelteURLSearchParams } from 'svelte/reactivity';
   import BoardColumn from './BoardColumn.svelte';
-  import { WorkScreen, workRoute, type WorkState } from './issue-navigation';
+  import { IssueRequestError } from './issue-transport.ts';
+  import {
+    WorkScreen,
+    workRoute,
+    type WorkData,
+    type WorkState,
+  } from './issue-navigation';
+  import {
+    IssueMoveIdentityChanged,
+    moveIssue,
+    type IssueMoveInput,
+    type IssueMoveTarget,
+  } from './issue-move.ts';
+  import type { BoardCard } from './board.ts';
+  import { onSessionEnded } from './session-lifecycle.ts';
 
   const route = workRoute(
     globalThis.location.pathname,
     globalThis.location.search,
   );
+  type BoardWorkData = Extract<WorkData, { type: 'board' }>;
+  type MoveCommand = {
+    projectId: string;
+    actorId: string;
+    issue: IssueMoveTarget & { issue_key: string };
+    idempotencyKey: string;
+    input: IssueMoveInput;
+  };
+  type MoveState =
+    | { type: 'idle' }
+    | { type: 'pending'; command: MoveCommand }
+    | { type: 'uncertain'; command: MoveCommand }
+    | { type: 'confirmed'; issueKey: string }
+    | { type: 'conflict' }
+    | { type: 'error' };
   let view = $state<WorkState>({ type: 'idle' });
+  let moveState = $state<MoveState>({ type: 'idle' });
+  let moveOperation = new AbortController();
+  let moveGeneration = 0;
   let heading: HTMLElement | undefined;
   const screen = new WorkScreen(route, (state) => {
     view = state;
@@ -26,6 +58,7 @@
     'issue.title_updated': 'Título alterado',
     'issue.description_updated': 'Descrição alterada',
     'issue.text_updated': 'Título e descrição alterados',
+    'issue.moved': 'Issue movida',
   };
   const date = (value: string) =>
     `${new Intl.DateTimeFormat('pt-BR', { dateStyle: 'medium', timeStyle: 'short', timeZone: 'UTC' }).format(new Date(value))} UTC`;
@@ -73,8 +106,132 @@
     heading?.focus();
   }
 
+  async function sendMove(command: MoveCommand): Promise<void> {
+    if (moveState.type === 'pending') {
+      return;
+    }
+    const generation = ++moveGeneration;
+    moveState = { type: 'pending', command };
+    try {
+      const result = await moveIssue(
+        command.projectId,
+        command.issue,
+        command.actorId,
+        command.idempotencyKey,
+        command.input,
+        moveOperation.signal,
+      );
+      moveState = { type: 'confirmed', issueKey: result.receipt.issue_key };
+      await screen.refresh();
+    } catch (error) {
+      if (generation !== moveGeneration) {
+        return;
+      }
+      if (error instanceof IssueMoveIdentityChanged) {
+        moveState = { type: 'idle' };
+        screen.suspend();
+        if (document.visibilityState === 'visible') {
+          void screen.start();
+        }
+        return;
+      }
+      if (error instanceof IssueRequestError) {
+        if (error.status === 401) {
+          moveState = { type: 'idle' };
+          return;
+        }
+        if (error.status === 409) {
+          moveState = { type: 'conflict' };
+          await screen.refresh();
+          return;
+        }
+        if (error.status >= 500) {
+          moveState = { type: 'uncertain', command };
+          return;
+        }
+        moveState = { type: 'error' };
+        if (error.status === 403 || error.status === 404) {
+          await screen.refresh();
+        }
+        return;
+      }
+      moveState = { type: 'uncertain', command };
+    }
+  }
+
+  function moveToColumn(
+    board: BoardWorkData,
+    issue: BoardCard,
+    targetStatusId: string,
+  ): void {
+    if (
+      !board.canMoveIssues ||
+      moveState.type === 'pending' ||
+      moveState.type === 'uncertain'
+    ) {
+      return;
+    }
+    const targetColumn = board.columns.find(
+      (column) => column.status.id === targetStatusId,
+    );
+    if (targetColumn === undefined) {
+      moveState = { type: 'error' };
+      return;
+    }
+    const firstRemaining = targetColumn.page.data.find(
+      (candidate) => candidate.id !== issue.id,
+    );
+    if (
+      targetColumn.page.total_count !== '0' &&
+      firstRemaining === undefined &&
+      !(
+        targetColumn.page.total_count === '1' &&
+        targetColumn.page.data[0]?.id === issue.id
+      )
+    ) {
+      moveState = { type: 'conflict' };
+      void screen.refresh();
+      return;
+    }
+    const command: MoveCommand = {
+      projectId: board.projectId,
+      actorId: board.actorId,
+      issue: {
+        id: issue.id,
+        issue_number: issue.issue_number,
+        issue_key: issue.issue_key,
+      },
+      idempotencyKey: globalThis.crypto.randomUUID(),
+      input: {
+        expected_version: issue.version,
+        target_status_id: targetStatusId,
+        ...(firstRemaining === undefined
+          ? {}
+          : { next_issue_id: firstRemaining.id }),
+      },
+    };
+    void sendMove(command);
+  }
+
+  function replayMove(): void {
+    if (moveState.type === 'uncertain') {
+      void sendMove(moveState.command);
+    }
+  }
+
   onMount(() => {
-    const conceal = () => flushSync(() => screen.suspend());
+    const unsubscribeSession = onSessionEnded(() => {
+      moveGeneration += 1;
+      moveOperation.abort();
+      moveOperation = new AbortController();
+      moveState = { type: 'idle' };
+      flushSync(() => screen.sessionEnded());
+    });
+    const conceal = () => {
+      moveOperation.abort();
+      moveOperation = new AbortController();
+      flushSync(() => screen.suspend());
+    };
     const restore = () => {
       if (document.visibilityState === 'visible') {
         void screen.start();
@@ -108,6 +265,9 @@
       globalThis.removeEventListener('focus', restore);
       globalThis.removeEventListener('pageshow', pageShow);
       document.removeEventListener('visibilitychange', visibility);
+      unsubscribeSession();
+      moveGeneration += 1;
+      moveOperation.abort();
       screen.dispose();
     };
   });
@@ -124,7 +284,8 @@
           : 'Issues do projeto'}
   </h1>
   <p class="intro">
-    Leitura em desenvolvimento. Edição, filtros e atualização ao vivo ainda não
+    Leitura em desenvolvimento. O board permite mover cards para o topo das
+    colunas visíveis; outras edições, filtros e atualização ao vivo ainda não
     estão disponíveis.
   </p>
   <nav class="work-links" aria-label="Navegação do trabalho">
@@ -231,10 +392,32 @@
             >Próxima página de issues</a
           >{/if}
       {:else if data.type === 'board'}
+        {@const statuses = data.columns.map((column) => column.status)}
         <p class="hint">
-          Colunas desta página do board, ordenadas por posição. Apenas leitura;
-          cards não podem ser movidos.
+          Colunas desta página do board, ordenadas por posição. Mover um card
+          exige permissão e coloca-o no topo da coluna escolhida.
         </p>
+        {#if moveState.type === 'pending'}<p role="status">
+            Salvando movimento…
+          </p>{/if}
+        {#if moveState.type === 'uncertain'}<div role="alert">
+            <p>
+              Não foi possível confirmar o movimento. Não crie outro comando.
+            </p>
+            <button onclick={replayMove}
+              >Repetir o mesmo comando com a mesma chave</button
+            >
+          </div>{/if}
+        {#if moveState.type === 'conflict'}<p role="alert">
+            O board mudou. Os dados foram atualizados; escolha o destino
+            novamente.
+          </p>{/if}
+        {#if moveState.type === 'error'}<p role="alert">
+            O movimento não foi aplicado. Verifique o acesso e tente novamente.
+          </p>{/if}
+        {#if moveState.type === 'confirmed'}<p role="status">
+            Movimento de {moveState.issueKey} confirmado.
+          </p>{/if}
         {#if data.columns.length === 0}<p role="status">
             Nenhuma coluna visível nesta página do board.
           </p>{/if}
@@ -242,6 +425,11 @@
           {#each data.columns as column (column.status.id)}<BoardColumn
               status={column.status}
               page={column.page}
+              canMove={data.canMoveIssues}
+              moveStatuses={statuses}
+              moveBusy={moveState.type === 'pending' ||
+                moveState.type === 'uncertain'}
+              onMove={(issue, statusId) => moveToColumn(data, issue, statusId)}
             />{/each}
         </div>
         {#if data.nextStatusCursor !== undefined && route.type === 'board'}<a

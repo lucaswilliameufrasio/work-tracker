@@ -1,6 +1,7 @@
 <script lang="ts">
   import { flushSync, onMount, tick } from 'svelte';
   import IssueTextForm from './IssueTextForm.svelte';
+  import { onSessionEnded } from './session-lifecycle';
   import {
     editorRoute,
     IssueTextScreen,
@@ -16,7 +17,7 @@
     view = state;
   });
   async function action(
-    kind: 'save' | 'retry' | 'review' | 'check',
+    kind: 'save' | 'retry' | 'review' | 'check' | 'storage',
   ): Promise<void> {
     if (kind === 'save') {
       await screen.save();
@@ -24,6 +25,8 @@
       await screen.retry();
     } else if (kind === 'review') {
       await screen.review();
+    } else if (kind === 'storage') {
+      await screen.retryStorage();
     } else {
       await screen.start();
     }
@@ -36,6 +39,9 @@
     heading?.focus();
   }
   onMount(() => {
+    const unsubscribeSessionEnded = onSessionEnded(() =>
+      flushSync(() => screen.sessionEnded()),
+    );
     const conceal = () => flushSync(() => screen.suspend());
     const restore = () => {
       if (document.visibilityState === 'visible') {
@@ -70,6 +76,7 @@
       globalThis.removeEventListener('focus', restore);
       globalThis.removeEventListener('pageshow', pageShow);
       document.removeEventListener('visibilitychange', visibility);
+      unsubscribeSessionEnded();
       screen.dispose();
     };
   });
@@ -115,12 +122,22 @@
       envio, até revalidar esta sessão.
     </p>
     <button onclick={() => void action('check')}>Consultar novamente</button>
+  {:else if view.type === 'storage-unavailable'}
+    <h2>Rascunho local indisponível</h2>
+    <p role="status">
+      O navegador não permitiu ler, salvar ou limpar o rascunho desta aba. A
+      edição está pausada e nenhum novo PUT será enviado até a persistência
+      local funcionar.
+    </p>
+    <button onclick={() => void action('storage')}>Tentar novamente</button>
   {:else if view.type === 'editing'}
     <section data-private-editor>
       <p class="hint">
-        Versão de base {view.version}. Rascunho apenas em memória: oculto ao
-        sair do foco e perdido ao recarregar ou navegar. Não use dados reais
-        nesta versão.
+        Versão de base {view.version}. O rascunho fica no armazenamento de
+        sessão desta aba para sobreviver a reload; é texto sem criptografia,
+        acessível a scripts desta origem. Evite dispositivo compartilhado ou não
+        confiável. Ocultamos o DOM ao sair do foco e limpamos ao detectar
+        logout, expiração ou perda de acesso.
       </p>
       <IssueTextForm
         draft={view.draft}
@@ -141,8 +158,9 @@
         chave. Confirme reenviando somente a mesma solicitação.
       </p>
       <p class="hint">
-        Não recarregue nem navegue antes de confirmar: a chave não é guardada
-        fora desta página.
+        O pedido e a chave ficam no armazenamento de sessão desta aba para
+        permitir recuperação explícita após reload. Não feche a aba antes de
+        confirmar; fechar a sessão da aba pode apagar a única cópia da chave.
       </p>
       <button onclick={() => void action('retry')}
         >Reenviar a mesma edição</button

@@ -31,7 +31,8 @@ export type IssueHistoryEvent = {
     | 'issue.created'
     | 'issue.title_updated'
     | 'issue.description_updated'
-    | 'issue.text_updated';
+    | 'issue.text_updated'
+    | 'issue.moved';
   occurred_at: string;
 };
 export type IssuePage<T> = {
@@ -301,7 +302,8 @@ export function parseIssueHistoryPage(
       (kind !== 'issue.created' &&
         kind !== 'issue.title_updated' &&
         kind !== 'issue.description_updated' &&
-        kind !== 'issue.text_updated') ||
+        kind !== 'issue.text_updated' &&
+        kind !== 'issue.moved') ||
       boundary <= previous ||
       ids.has(id)
     ) {

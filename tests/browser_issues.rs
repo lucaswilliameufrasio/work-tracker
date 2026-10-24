@@ -36,6 +36,9 @@ mod capabilities;
 #[path = "browser_issues/text.rs"]
 mod text;
 
+#[path = "browser_issues/movement.rs"]
+mod movement;
+
 #[tokio::test]
 async fn history_serializes_repeated_typed_text_changes_without_content_snapshots() {
     let f = Fixture::new().await;

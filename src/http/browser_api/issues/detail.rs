@@ -170,6 +170,7 @@ async fn history(
                 IssueEventKind::TitleUpdated => "issue.title_updated",
                 IssueEventKind::DescriptionUpdated => "issue.description_updated",
                 IssueEventKind::TextUpdated => "issue.text_updated",
+                IssueEventKind::Moved => "issue.moved",
             },
             occurred_at: format_timestamp(event.occurred_at),
         });

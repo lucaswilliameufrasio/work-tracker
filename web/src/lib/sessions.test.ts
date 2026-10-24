@@ -9,6 +9,7 @@ import {
   revokeSession,
   SessionRequestError,
 } from './sessions';
+import { onSessionEnded } from './session-lifecycle';
 
 const id = '019a0000-0000-7000-8000-000000000001';
 const older = '019a0000-0000-7000-8000-000000000000';
@@ -166,6 +167,64 @@ describe('same-origin session transport', () => {
       expect(new Headers(options?.headers).has('origin')).toBe(false);
       expect(options?.body).toBeUndefined();
     }
+  });
+
+  it('announces only confirmed current/global session termination and observed expiry', async () => {
+    let ended = 0;
+    const unsubscribe = onSessionEnded(() => {
+      ended += 1;
+    });
+    const fetcher = vi.fn<typeof fetch>();
+    vi.stubGlobal('fetch', fetcher);
+    fetcher.mockResolvedValueOnce(
+      Response.json(
+        {
+          code: 'unauthenticated',
+          message: 'safe',
+          request_id: id,
+          field_errors: {},
+          retryable: false,
+        },
+        { status: 401 },
+      ),
+    );
+    await expect(getCurrentSession(signal())).rejects.toBeInstanceOf(
+      SessionRequestError,
+    );
+    expect(ended).toBe(1);
+    fetcher.mockResolvedValueOnce(
+      Response.json(
+        {
+          code: 'unauthenticated',
+          message: 'safe',
+          request_id: id,
+          field_errors: {},
+          retryable: false,
+        },
+        { status: 401 },
+      ),
+    );
+    await expect(getSessionPage({}, signal())).rejects.toBeInstanceOf(
+      SessionRequestError,
+    );
+    expect(ended).toBe(2);
+    for (const command of [
+      () => revokeSession(id, signal()),
+      () => revokeAllSessions(signal()),
+      () => logoutCurrentSession(signal()),
+    ]) {
+      fetcher
+        .mockResolvedValueOnce(Response.json(current))
+        .mockResolvedValueOnce(new Response(undefined, { status: 204 }));
+      await command();
+    }
+    expect(ended).toBe(5);
+    fetcher
+      .mockResolvedValueOnce(Response.json(current))
+      .mockResolvedValueOnce(new Response(undefined, { status: 204 }));
+    await revokeSession(older, signal());
+    expect(ended).toBe(5);
+    unsubscribe();
   });
 
   it('keeps safe errors but never raw messages or automatic mutation retries', async () => {

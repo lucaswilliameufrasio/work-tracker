@@ -152,6 +152,29 @@ it('synchronously suspends private data, ignores obsolete results and coalesces 
   expect(api).toHaveBeenCalledTimes(2);
 });
 
+it('synchronously signs out on a shared session-ended signal and ignores pending private reads', async () => {
+  let finish: ((value: WorkData) => void) | undefined;
+  const api = vi.fn<typeof loadWork>().mockImplementation(
+    async () =>
+      new Promise<WorkData>((resolve) => {
+        finish = resolve;
+      }),
+  );
+  const screen = new WorkScreen(
+    { type: 'projects', includeArchived: false },
+    () => undefined,
+    api,
+  );
+  const pending = screen.start();
+  const signal = api.mock.calls[0]?.[1];
+  screen.sessionEnded();
+  expect(signal?.aborted).toBe(true);
+  expect(screen.state).toEqual({ type: 'signed-out' });
+  finish?.(empty);
+  await pending;
+  expect(screen.state).toEqual({ type: 'signed-out' });
+});
+
 it('dispose cancels pending work and stale callbacks cannot repopulate private state', async () => {
   let finish: ((value: WorkData) => void) | undefined;
   const api = vi.fn<typeof loadWork>().mockImplementation(

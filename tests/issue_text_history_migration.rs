@@ -175,6 +175,62 @@ async fn migration_preserves_existing_receipts_and_envelopes_and_supports_repeat
         assert!(sqlx::query("INSERT INTO outbox_events (id, event_kind, payload_version, project_id, issue_id, actor_user_id, issue_version, occurred_at) VALUES (?, ?, 1, ?, ?, ?, ?, 'now')").bind(Uuid::now_v7().to_string()).bind(kind).bind(&project.id).bind(issue).bind(&actor).bind(version).execute(&pool).await.is_err());
     }
     assert!(sqlx::query("INSERT INTO issue_events (id, project_id, issue_id, actor_user_id, event_kind, occurred_at) VALUES (?, ?, ?, ?, 'issue.created', 'now')").bind(Uuid::now_v7().to_string()).bind(&project.id).bind(issue).bind(&actor).execute(&pool).await.is_err());
+
+    let events_sql = "SELECT id, project_id, issue_id, actor_user_id, event_kind, occurred_at FROM issue_events ORDER BY id";
+    let events_before: Vec<(String, String, String, String, String, String)> =
+        sqlx::query_as(events_sql).fetch_all(&pool).await.unwrap();
+    let outbox_before_moves: Vec<OutboxSnapshot> =
+        sqlx::query_as(outbox_sql).fetch_all(&pool).await.unwrap();
+    let mut transaction = pool.begin().await.unwrap();
+    sqlx::raw_sql(include_str!("../migrations/0034_issue_moves.sql"))
+        .execute(&mut *transaction)
+        .await
+        .unwrap();
+    transaction.commit().await.unwrap();
+    assert_eq!(
+        events_before,
+        sqlx::query_as(events_sql).fetch_all(&pool).await.unwrap()
+    );
+    assert_eq!(
+        outbox_before_moves,
+        sqlx::query_as(outbox_sql).fetch_all(&pool).await.unwrap()
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM issue_move_receipts")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        0
+    );
+    let moved_at =
+        (Utc::now() + TimeDelta::seconds(10)).to_rfc3339_opts(chrono::SecondsFormat::Nanos, true);
+    sqlx::query("INSERT INTO issue_events (id, project_id, issue_id, actor_user_id, event_kind, occurred_at) VALUES (?, ?, ?, ?, 'issue.moved', ?)")
+        .bind(Uuid::now_v7().to_string())
+        .bind(&project.id)
+        .bind(issue)
+        .bind(&actor)
+        .bind(&moved_at)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO outbox_events (id, event_kind, payload_version, project_id, issue_id, actor_user_id, issue_version, occurred_at) VALUES (?, 'issue.moved', 1, ?, ?, ?, 6, ?)")
+        .bind(Uuid::now_v7().to_string())
+        .bind(&project.id)
+        .bind(issue)
+        .bind(&actor)
+        .bind(&moved_at)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .get_project_issue(&actor, &project.id, 1)
+            .await
+            .unwrap()
+            .history
+            .len(),
+        6
+    );
     assert!(
         sqlx::query("UPDATE outbox_events SET issue_version = issue_version")
             .execute(&pool)

@@ -41,6 +41,7 @@ struct BrowserState {
     catalogs: crate::projects::catalog::SessionProjectCatalogReader,
     writer: crate::issues::creation::SessionIssueWriter,
     text_writer: crate::issues::text::SessionIssueTextWriter,
+    mover: crate::issues::movement::SessionIssueMover,
 }
 
 mod catalogs;
@@ -61,6 +62,11 @@ pub(super) fn routes(
     );
     let state = Arc::new(BrowserState {
         text_writer: crate::issues::text::SessionIssueTextWriter::new(
+            database.pool().clone(),
+            policy,
+            security.master_key(),
+        ),
+        mover: crate::issues::movement::SessionIssueMover::new(
             database.pool().clone(),
             policy,
             security.master_key(),
@@ -104,6 +110,7 @@ struct ProjectCapabilities {
     project_id: String,
     can_create_issues: bool,
     can_replace_issue_text: bool,
+    can_move_issues: bool,
 }
 
 async fn project_capabilities(
@@ -148,6 +155,7 @@ async fn project_capabilities(
             project_id,
             can_create_issues,
             can_replace_issue_text: can_create_issues,
+            can_move_issues: can_create_issues,
         }),
     )
         .into_response())
@@ -497,6 +505,14 @@ async fn method_not_allowed(request: Request) -> Response {
                 })
             {
                 "PUT"
+            } else if request
+                .extensions()
+                .get::<axum::extract::MatchedPath>()
+                .is_some_and(|path| {
+                    path.as_str() == "/api/v1/projects/{project_id}/issues/{issue_number}/move"
+                })
+            {
+                "POST"
             } else if request.uri().path().starts_with("/api/v1/auth/sessions/") {
                 "DELETE"
             } else if matches!(

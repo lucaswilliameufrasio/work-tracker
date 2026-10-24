@@ -13,6 +13,7 @@ export type ProjectCapabilities = {
   project_id: string;
   can_create_issues: boolean;
   can_replace_issue_text: boolean;
+  can_move_issues: boolean;
 };
 
 export function parseProjectCapabilities(
@@ -23,13 +24,16 @@ export function parseProjectCapabilities(
     'project_id',
     'can_create_issues',
     'can_replace_issue_text',
+    'can_move_issues',
   ]);
   const project = uuid(item.project_id);
   if (
     project !== uuid(projectId) ||
     typeof item.can_create_issues !== 'boolean' ||
     (item.can_replace_issue_text !== undefined &&
-      typeof item.can_replace_issue_text !== 'boolean')
+      typeof item.can_replace_issue_text !== 'boolean') ||
+    (item.can_move_issues !== undefined &&
+      typeof item.can_move_issues !== 'boolean')
   ) {
     return invalid();
   }
@@ -37,6 +41,7 @@ export function parseProjectCapabilities(
     project_id: project,
     can_create_issues: item.can_create_issues,
     can_replace_issue_text: item.can_replace_issue_text === true,
+    can_move_issues: item.can_move_issues === true,
   };
 }
 

@@ -1,3 +1,5 @@
+import { notifySessionEnded } from './session-lifecycle.ts';
+
 export class IssueRequestError extends Error {
   readonly status: number;
   readonly code: string;
@@ -146,6 +148,9 @@ export async function issueFailure(
   response: Response,
   signal: AbortSignal,
 ): Promise<never> {
+  if (response.status === 401) {
+    notifySessionEnded();
+  }
   const error = fields(await issueJson(response, signal, 64 * 1024), [
     'code',
     'message',

@@ -1,3 +1,5 @@
+import { notifySessionEnded } from './session-lifecycle.ts';
+
 export type CurrentSession = {
   user_id: string;
   session_id: string;
@@ -231,6 +233,9 @@ async function failure(
   response: Response,
   signal: AbortSignal,
 ): Promise<never> {
+  if (response.status === 401) {
+    notifySessionEnded();
+  }
   const error = fields(await json(response, signal), [
     'code',
     'message',
@@ -326,6 +331,13 @@ async function terminate(path: string, signal: AbortSignal): Promise<void> {
   const response = await send(path, deadline, current.csrf_token);
   if (response.status !== 204) {
     return failure(response, deadline);
+  }
+  if (
+    path === '/api/v1/auth/session' ||
+    path === '/api/v1/auth/sessions' ||
+    path === `/api/v1/auth/sessions/${current.session_id}`
+  ) {
+    notifySessionEnded();
   }
 }
 

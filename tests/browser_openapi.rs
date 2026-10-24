@@ -63,6 +63,10 @@ fn generated_contract_has_unique_operations_resolved_refs_and_only_implemented_r
             "/api/v1/projects/{project_id}/issues/{issue_number}/text",
             "put",
         ),
+        (
+            "/api/v1/projects/{project_id}/issues/{issue_number}/move",
+            "post",
+        ),
         ("/api/v1/projects/{project_id}/statuses", "get"),
         ("/api/v1/projects/{project_id}/statuses", "head"),
         ("/api/v1/projects/{project_id}/issue-types", "get"),
@@ -104,8 +108,9 @@ fn generated_contract_has_unique_operations_resolved_refs_and_only_implemented_r
                 method == "post" || method == "put"
             );
             if method == "post" {
-                assert!(operation["responses"].get("201").is_some());
-                assert!(operation["responses"].get("200").is_none());
+                let is_create = operation["operationId"] == "createProjectIssue";
+                assert_eq!(operation["responses"].get("201").is_some(), is_create);
+                assert_eq!(operation["responses"].get("200").is_some(), !is_create);
                 for status in ["409", "415", "422", "503"] {
                     assert!(operation["responses"].get(status).is_some());
                 }

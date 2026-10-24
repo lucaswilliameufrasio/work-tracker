@@ -1,9 +1,11 @@
 import { invalid, uuid } from './issue-transport.ts';
 import {
   getProjectPage,
+  getProjectCapabilities,
   projectKey,
   type AccessibleProject,
 } from './projects.ts';
+import { getCurrentSession } from './sessions.ts';
 import {
   getIssueDetail,
   getIssueHistoryPage,
@@ -171,7 +173,10 @@ export function workRoute(path: string, search: string): WorkRoute {
 export type WorkData =
   | {
       type: 'board';
+      projectId: string;
       columns: { status: ProjectStatus; page: BoardPage }[];
+      actorId: string;
+      canMoveIssues: boolean;
       nextStatusCursor?: string;
     }
   | { type: 'column'; status: ProjectStatus; page: BoardPage }
@@ -190,11 +195,15 @@ export async function loadWork(
   signal: AbortSignal,
 ): Promise<WorkData> {
   if (route.type === 'board') {
-    const statuses = await getBoardStatusPage(
-      route.projectId,
-      { page_size: 4, cursor: route.statusCursor },
-      signal,
-    );
+    const [statuses, capability, session] = await Promise.all([
+      getBoardStatusPage(
+        route.projectId,
+        { page_size: 4, cursor: route.statusCursor },
+        signal,
+      ),
+      getProjectCapabilities(route.projectId, signal),
+      getCurrentSession(signal),
+    ]);
     const columns = await Promise.all(
       statuses.data.map(async (status) => ({
         status,
@@ -208,7 +217,10 @@ export async function loadWork(
     );
     return {
       type: 'board',
+      projectId: route.projectId,
       columns,
+      actorId: session.user_id,
+      canMoveIssues: capability.can_move_issues,
       ...(statuses.next_cursor === undefined
         ? {}
         : { nextStatusCursor: statuses.next_cursor }),
@@ -310,6 +322,15 @@ export class WorkScreen {
     this.operation.abort();
     this.generation += 1;
     this.set({ type: 'suspended' });
+  }
+
+  sessionEnded(): void {
+    if (this.lifetime.signal.aborted) {
+      return;
+    }
+    this.operation.abort();
+    this.generation += 1;
+    this.set({ type: 'signed-out' });
   }
 
   async start(): Promise<void> {

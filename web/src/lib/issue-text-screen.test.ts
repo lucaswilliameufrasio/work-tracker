@@ -8,6 +8,13 @@ import {
 import { IssueRequestError } from './issue-transport';
 import { SessionRequestError } from './sessions';
 import type { IssueDetail } from './issues';
+import type {
+  IssueTextDraftIdentity,
+  IssueTextDraftRepository,
+  IssueTextDraftTarget,
+  PersistedIssueTextDraft,
+} from './issue-text-drafts';
+import { IssueTextDraftStorageError } from './issue-text-drafts';
 
 const id = '019a0000-0000-7000-8000-000000000001';
 const other = '019a0000-0000-7000-8000-000000000002';
@@ -44,18 +51,60 @@ const draft = { title: 'My draft', description: 'Private draft text' };
 const route = { project: id, number: '1' };
 const conflict = () =>
   new IssueRequestError(409, 'issue_version_conflict', id, false);
+class MemoryDrafts implements IssueTextDraftRepository {
+  private readonly entries = new Map<string, PersistedIssueTextDraft>();
+  save(value: PersistedIssueTextDraft): void {
+    this.entries.set(this.key(value, value), structuredClone(value));
+  }
+  load(
+    identity: IssueTextDraftIdentity,
+    target: IssueTextDraftTarget,
+  ): PersistedIssueTextDraft | undefined {
+    for (const [key, value] of this.entries) {
+      if (
+        value.actor_id !== identity.actor_id ||
+        value.session_id !== identity.session_id
+      ) {
+        this.entries.delete(key);
+      }
+    }
+    const value = this.entries.get(this.key(identity, target));
+    return value === undefined ? undefined : structuredClone(value);
+  }
+  remove(identity: IssueTextDraftIdentity, target: IssueTextDraftTarget): void {
+    this.entries.delete(this.key(identity, target));
+  }
+  clearProject(projectId: string): void {
+    for (const [key, value] of this.entries) {
+      if (value.project_id === projectId) {
+        this.entries.delete(key);
+      }
+    }
+  }
+  clearAll(): void {
+    this.entries.clear();
+  }
+  private key(
+    identity: IssueTextDraftIdentity,
+    target: IssueTextDraftTarget,
+  ): string {
+    return `${identity.actor_id}:${identity.session_id}:${target.project_id}:${target.issue_id}:${target.issue_number}`;
+  }
+}
 function fixture() {
   const load = vi
     .fn<typeof loadEditor>()
-    .mockResolvedValue({ actor: id, issue });
+    .mockResolvedValue({ actor: id, session_id: other, issue });
   const send = vi.fn<typeof replaceIssueText>().mockResolvedValue(result);
   const makeKey = vi.fn(() => key);
+  const drafts = new MemoryDrafts();
   const screen = new IssueTextScreen(route, () => undefined, {
     load,
     send,
     key: makeKey,
+    drafts,
   });
-  return { screen, load, send, makeKey };
+  return { screen, load, send, makeKey, drafts };
 }
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -116,6 +165,7 @@ it('refuses identity changes during the editor read and never restores a trashed
       load: loadEditor,
       send: f.send,
       key: f.makeKey,
+      drafts: f.drafts,
     });
     await screen.start();
     expect(screen.state.type).toBe(
@@ -169,8 +219,15 @@ it('uses the explicit edit flag, same actor checks and strict detail reads', asy
       ),
   );
   vi.stubGlobal('fetch', fetcher);
-  expect(await loadEditor(route, id, new AbortController().signal)).toEqual({
+  expect(
+    await loadEditor(
+      route,
+      { actor_id: id, session_id: other },
+      new AbortController().signal,
+    ),
+  ).toEqual({
     actor: id,
+    session_id: other,
     issue,
   });
   expect(fetcher).toHaveBeenCalledTimes(4);
@@ -202,6 +259,7 @@ it('fails closed for older capability responses without the edit flag', async ()
     load: loadEditor,
     send: f.send,
     key: f.makeKey,
+    drafts: f.drafts,
   });
   await screen.start();
   expect(screen.state.type).toBe('read-only');
@@ -220,7 +278,10 @@ it('preserves edited values across concealment and same-actor access revalidatio
   expect(f.screen.state).toEqual({ type: 'suspended' });
   await f.screen.start();
   expect(f.screen.state).toEqual({ type: 'editing', draft, version: '1' });
-  expect(f.load.mock.calls[1]?.[1]).toBe(id);
+  expect(f.load.mock.calls[1]?.[1]).toEqual({
+    actor_id: id,
+    session_id: other,
+  });
   expect(f.send).not.toHaveBeenCalled();
   f.screen.dispose();
 });
@@ -241,7 +302,7 @@ it('preserves conflict drafts and requires read/review/explicit choice before an
   expect(f.load).toHaveBeenCalledTimes(1);
   expect(f.send).toHaveBeenCalledTimes(1);
   const latest = { ...issue, title: 'Concurrent text', version: '2' };
-  f.load.mockResolvedValueOnce({ actor: id, issue: latest });
+  f.load.mockResolvedValueOnce({ actor: id, session_id: other, issue: latest });
   await f.screen.review();
   expect(f.screen.state).toEqual({
     type: 'review',
@@ -271,6 +332,7 @@ it('supports repeated conflicts and explicit discard without sending on review s
   for (const version of ['2', '3']) {
     f.load.mockResolvedValueOnce({
       actor: id,
+      session_id: other,
       issue: { ...issue, version, title: `Current ${version}` },
     });
     await f.screen.review();
@@ -280,6 +342,7 @@ it('supports repeated conflicts and explicit discard without sending on review s
   }
   f.load.mockResolvedValueOnce({
     actor: id,
+    session_id: other,
     issue: { ...issue, version: '4', title: 'Reviewed current' },
   });
   await f.screen.review();
@@ -307,6 +370,7 @@ it('locks uncertain commands to the original key/version and never infers succes
   f.screen.suspend();
   f.load.mockResolvedValueOnce({
     actor: id,
+    session_id: other,
     issue: { ...issue, ...draft, version: '2' },
   });
   await f.screen.start();
@@ -376,7 +440,12 @@ it('ignores late save/read completions after suspension and disposal', async () 
   f.screen.dispose();
   const g = fixture();
   let read:
-    ((value: { actor: string; issue: IssueDetail }) => void) | undefined;
+    | ((value: {
+        actor: string;
+        session_id: string;
+        issue: IssueDetail;
+      }) => void)
+    | undefined;
   g.load.mockImplementation(
     () =>
       new Promise((resolve) => {
@@ -385,7 +454,7 @@ it('ignores late save/read completions after suspension and disposal', async () 
   );
   const starting = g.screen.start();
   g.screen.dispose();
-  read?.({ actor: id, issue });
+  read?.({ actor: id, session_id: other, issue });
   await starting;
   expect(g.screen.state.type).toBe('suspended');
 });
@@ -397,6 +466,7 @@ it('detects a changed server version on return and keeps draft rather than silen
   f.screen.suspend();
   f.load.mockResolvedValueOnce({
     actor: id,
+    session_id: other,
     issue: { ...issue, version: '2' },
   });
   await f.screen.start();
@@ -404,4 +474,173 @@ it('detects a changed server version on return and keeps draft rather than silen
   expect(f.makeKey).not.toHaveBeenCalled();
   expect(f.send).not.toHaveBeenCalled();
   f.screen.dispose();
+});
+
+it('restores the same-session draft after reload only after fresh access reads', async () => {
+  const f = fixture();
+  await f.screen.start();
+  f.screen.change(draft);
+  f.screen.dispose();
+  const reloaded = new IssueTextScreen(route, () => undefined, {
+    load: f.load,
+    send: f.send,
+    key: f.makeKey,
+    drafts: f.drafts,
+  });
+  await reloaded.start();
+  expect(f.load).toHaveBeenCalledTimes(2);
+  expect(reloaded.state).toEqual({ type: 'editing', draft, version: '1' });
+  reloaded.dispose();
+});
+
+it('restores a version conflict after reload without rebasing or creating a new command', async () => {
+  const f = fixture();
+  await f.screen.start();
+  f.screen.change(draft);
+  f.screen.dispose();
+  f.load.mockResolvedValueOnce({
+    actor: id,
+    session_id: other,
+    issue: { ...issue, version: '2', title: 'Concurrent server edit' },
+  });
+  const reloaded = new IssueTextScreen(route, () => undefined, {
+    load: f.load,
+    send: f.send,
+    key: f.makeKey,
+    drafts: f.drafts,
+  });
+  await reloaded.start();
+  expect(reloaded.state).toEqual({ type: 'conflict', draft, version: '1' });
+  expect(f.makeKey).not.toHaveBeenCalled();
+  expect(f.send).not.toHaveBeenCalled();
+  reloaded.dispose();
+});
+
+it('restores only an uncertain same-key command after reload and removes it after replay', async () => {
+  const f = fixture();
+  let finish: ((value: IssueTextResult) => void) | undefined;
+  f.send.mockImplementationOnce(
+    () =>
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+  );
+  await f.screen.start();
+  f.screen.change(draft);
+  const first = f.screen.save();
+  expect(f.send).toHaveBeenCalledTimes(1);
+  f.screen.dispose();
+  finish?.(result);
+  await first;
+  const reloaded = new IssueTextScreen(route, () => undefined, {
+    load: f.load,
+    send: f.send,
+    key: f.makeKey,
+    drafts: f.drafts,
+  });
+  await reloaded.start();
+  expect(reloaded.state.type).toBe('uncertain');
+  expect(f.send).toHaveBeenCalledTimes(1);
+  await reloaded.retry();
+  expect(f.send).toHaveBeenCalledTimes(2);
+  expect(f.send.mock.calls[0]?.slice(0, 5)).toEqual(
+    f.send.mock.calls[1]?.slice(0, 5),
+  );
+  expect(reloaded.state.type).toBe('saved');
+  reloaded.dispose();
+});
+
+it('clears stored drafts on session expiry, identity change and detected project access loss', async () => {
+  const f = fixture();
+  await f.screen.start();
+  f.screen.change(draft);
+  f.screen.suspend();
+  f.load.mockRejectedValueOnce(
+    new SessionRequestError(401, 'unauthenticated', id, false),
+  );
+  await f.screen.start();
+  expect(f.screen.state.type).toBe('signed-out');
+  expect(
+    f.drafts.load(
+      { actor_id: id, session_id: other },
+      { project_id: id, issue_id: other, issue_number: '1' },
+    ),
+  ).toBeUndefined();
+  f.screen.dispose();
+
+  const changed = fixture();
+  await changed.screen.start();
+  changed.screen.change(draft);
+  changed.screen.suspend();
+  changed.load.mockResolvedValueOnce({ actor: other, session_id: key, issue });
+  await changed.screen.start();
+  expect(changed.screen.state.type).toBe('unavailable');
+  expect(
+    changed.drafts.load(
+      { actor_id: id, session_id: other },
+      { project_id: id, issue_id: other, issue_number: '1' },
+    ),
+  ).toBeUndefined();
+  changed.screen.dispose();
+
+  const lost = fixture();
+  await lost.screen.start();
+  lost.screen.change(draft);
+  lost.screen.suspend();
+  lost.load.mockRejectedValueOnce(
+    new IssueRequestError(404, 'not_found', id, false),
+  );
+  await lost.screen.start();
+  expect(lost.screen.state.type).toBe('unavailable');
+  expect(
+    lost.drafts.load(
+      { actor_id: id, session_id: other },
+      { project_id: id, issue_id: other, issue_number: '1' },
+    ),
+  ).toBeUndefined();
+  lost.screen.dispose();
+});
+
+it('immediately clears in-memory editor state when session lifecycle reports termination', async () => {
+  const f = fixture();
+  await f.screen.start();
+  f.screen.change(draft);
+  f.screen.sessionEnded();
+  expect(f.screen.state.type).toBe('signed-out');
+  await f.screen.save();
+  expect(f.send).not.toHaveBeenCalled();
+  expect(
+    f.drafts.load(
+      { actor_id: id, session_id: other },
+      { project_id: id, issue_id: other, issue_number: '1' },
+    ),
+  ).toBeUndefined();
+  f.screen.dispose();
+});
+
+it('does not enable Save when storage cannot persist the exact draft or idempotency command', async () => {
+  const f = fixture();
+  const unavailable: IssueTextDraftRepository = {
+    save: () => {
+      throw new IssueTextDraftStorageError();
+    },
+    load: () => undefined,
+    remove: () => {
+      throw new IssueTextDraftStorageError();
+    },
+    clearProject: () => undefined,
+    clearAll: () => undefined,
+  };
+  const screen = new IssueTextScreen(route, () => undefined, {
+    load: f.load,
+    send: f.send,
+    key: f.makeKey,
+    drafts: unavailable,
+  });
+  await screen.start();
+  screen.change(draft);
+  expect(screen.state.type).toBe('storage-unavailable');
+  await screen.save();
+  expect(f.send).not.toHaveBeenCalled();
+  screen.dispose();
 });
