@@ -191,6 +191,10 @@ pub(super) fn field_error(error: IssueFieldError) -> ApiError {
             "expected_version",
             "Use a positive canonical decimal string",
         ),
+        IssueFieldError::AssigneeUnavailable => ApiError::invalid_field(
+            "assignee_user_id",
+            "Choose an active project manager/member or explicit null",
+        ),
         IssueFieldError::InvalidIdempotencyKey => {
             ApiError::invalid_field("idempotency_key", "Use a canonical UUID")
         }

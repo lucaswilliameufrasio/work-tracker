@@ -38,7 +38,12 @@ export type IssueHistoryEvent = {
     | 'issue.field_updated';
   change?:
     | { field: 'priority'; before: IssuePriority; after: IssuePriority }
-    | { field: 'due_date'; before: string | null; after: string | null };
+    | { field: 'due_date'; before: string | null; after: string | null }
+    | {
+        field: 'assignee_user_id';
+        before: string | null;
+        after: string | null;
+      };
   occurred_at: string;
 };
 export type IssuePage<T> = {
@@ -330,6 +335,14 @@ export function parseIssueHistoryPage(
           return invalid();
         }
         change = { field: 'due_date', before, after };
+      } else if (rawChange.field === 'assignee_user_id') {
+        const before =
+          rawChange.before === null ? null : uuid(rawChange.before);
+        const after = rawChange.after === null ? null : uuid(rawChange.after);
+        if (before === after) {
+          return invalid();
+        }
+        change = { field: 'assignee_user_id', before, after };
       } else {
         return invalid();
       }

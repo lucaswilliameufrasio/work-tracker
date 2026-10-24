@@ -391,6 +391,94 @@ async fn migration_preserves_existing_receipts_and_envelopes_and_supports_repeat
             .await
             .is_err());
     }
+    let structured_events_before_assignee: Vec<StructuredEventSnapshot> =
+        sqlx::query_as(structured_events_sql)
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    let outbox_before_assignee: Vec<OutboxSnapshot> =
+        sqlx::query_as(outbox_sql).fetch_all(&pool).await.unwrap();
+    let mut transaction = pool.begin().await.unwrap();
+    sqlx::raw_sql(include_str!("../migrations/0037_issue_assignees.sql"))
+        .execute(&mut *transaction)
+        .await
+        .unwrap();
+    transaction.commit().await.unwrap();
+    assert_eq!(
+        structured_events_before_assignee,
+        sqlx::query_as(structured_events_sql)
+            .fetch_all(&pool)
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        outbox_before_assignee,
+        sqlx::query_as(outbox_sql).fetch_all(&pool).await.unwrap()
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM issue_assignee_receipts")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        0
+    );
+    let assignee_at =
+        (Utc::now() + TimeDelta::seconds(13)).to_rfc3339_opts(chrono::SecondsFormat::Nanos, true);
+    sqlx::query(
+        "INSERT INTO issue_events \
+         (id, project_id, issue_id, actor_user_id, event_kind, occurred_at, \
+          field_key, before_value_json, after_value_json) \
+         VALUES (?, ?, ?, ?, 'issue.field_updated', ?, 'assignee_user_id', 'null', ?)",
+    )
+    .bind(Uuid::now_v7().to_string())
+    .bind(&project.id)
+    .bind(issue)
+    .bind(&actor)
+    .bind(&assignee_at)
+    .bind(serde_json::to_string(&actor).unwrap())
+    .execute(&pool)
+    .await
+    .unwrap();
+    let history = store
+        .get_project_issue(&actor, &project.id, 1)
+        .await
+        .unwrap()
+        .history;
+    assert_eq!(history.len(), 9);
+    assert_eq!(
+        history.last().unwrap().change,
+        Some(puxiri::issues::IssueFieldChange::Assignee {
+            before: None,
+            after: Some(actor.clone()),
+        })
+    );
+    let uppercase_assignee = actor.to_ascii_uppercase();
+    for (before, after) in [
+        ("null", "\"not-a-uuid\""),
+        ("null", "\"019a0000-0000-7000-8000-0000000000AA\""),
+        ("[]", "\"019a0000-0000-7000-8000-000000000001\""),
+        ("null", "null"),
+    ] {
+        assert!(sqlx::query("INSERT INTO issue_events (id, project_id, issue_id, actor_user_id, event_kind, occurred_at, field_key, before_value_json, after_value_json) VALUES (?, ?, ?, ?, 'issue.field_updated', 'now', 'assignee_user_id', ?, ?)")
+            .bind(Uuid::now_v7().to_string())
+            .bind(&project.id)
+            .bind(issue)
+            .bind(&actor)
+            .bind(before)
+            .bind(after)
+            .execute(&pool)
+            .await
+            .is_err());
+    }
+    assert!(sqlx::query("INSERT INTO issue_events (id, project_id, issue_id, actor_user_id, event_kind, occurred_at, field_key, before_value_json, after_value_json) VALUES (?, ?, ?, ?, 'issue.field_updated', 'now', 'assignee_user_id', 'null', ?)")
+        .bind(Uuid::now_v7().to_string())
+        .bind(&project.id)
+        .bind(issue)
+        .bind(&actor)
+        .bind(serde_json::to_string(&uppercase_assignee).unwrap())
+        .execute(&pool)
+        .await
+        .is_err());
     assert!(
         sqlx::query("PRAGMA foreign_key_check")
             .fetch_all(&pool)

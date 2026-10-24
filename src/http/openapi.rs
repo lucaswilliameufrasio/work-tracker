@@ -97,6 +97,31 @@ pub fn browser_document() -> Value {
         });
         paths.entry(path).or_insert_with(|| json!({}))["delete"] = delete;
     }
+    let project_member_query = vec![
+        json!({"name": "project_id", "in": "path", "required": true, "schema": uuid.clone()}),
+        json!({"name": "page_size", "in": "query", "schema": {"type": "integer", "minimum": 1, "maximum": 100, "default": 50}}),
+        json!({"name": "cursor", "in": "query", "schema": uuid.clone(), "description": "Exclusive canonical UUID user_id boundary in ascending order; does not grant access. Traversal is not a frozen snapshot."}),
+    ];
+    let description = "Current session plus explicit project membership, or organization owner/admin operational authority, is checked in the same SQLite snapshot as the roster. Installation-admin status alone grants nothing. Archived project rosters remain readable; missing/inaccessible projects return generic404. UUID keyset order; page is bounded and not a cross-request snapshot. Confirmed primary email is omitted except for project managers and organization owners/admins. can_be_assigned is advisory only; assignment writes revalidate current eligibility.";
+    paths.insert(
+        "/api/v1/projects/{project_id}/members".into(),
+        json!({
+            "get": operation("listProjectMembers", Some("ProjectMemberPage"), project_member_query.clone(), description),
+            "head": operation("listProjectMembersHead", None, project_member_query, description)
+        }),
+    );
+    let member_parameters = vec![
+        json!({"name": "project_id", "in": "path", "required": true, "schema": uuid.clone()}),
+        json!({"name": "user_id", "in": "path", "required": true, "schema": uuid.clone()}),
+    ];
+    let description = "One current explicit project member, including a member no longer eligible for new assignment so existing assignments can be displayed. Session and roster authorization share a SQLite snapshot. Missing/inaccessible project or nonmember returns generic404. Confirmed primary email is omitted except for project managers and organization owners/admins. No query parameters.";
+    paths.insert(
+        "/api/v1/projects/{project_id}/members/{user_id}".into(),
+        json!({
+            "get": operation("getProjectMember", Some("ProjectMember"), member_parameters.clone(), description),
+            "head": operation("getProjectMemberHead", None, member_parameters, description)
+        }),
+    );
     let selectors = vec![
         json!({"name": "project_id", "in": "path", "required": true, "schema": uuid.clone()}),
         json!({"name": "issue_number", "in": "path", "required": true, "schema": decimal_i64()}),
@@ -309,6 +334,40 @@ pub fn browser_document() -> Value {
         "/api/v1/projects/{project_id}/issues/{issue_number}/due-date".into(),
         json!({"put": set_due_date}),
     );
+    let mut set_assignee = create.clone();
+    set_assignee["operationId"] = json!("setProjectIssueAssignee");
+    set_assignee["description"] = json!(
+        "Set or clear one nontrashed issue's assignee with the current expected version. The selected user must be an active project manager/member at commit; eligible guests with explicit member role are included. The roster can_be_assigned flag is advisory only. Session, MutateIssues authority, target eligibility, issue version, structured history, content-free outbox envelope and immutable idempotency receipt are checked or written transactionally. Exact replay returns the original receipt and never reapplies the mutation. A stale version returns409. No query options, omitted assignee_user_id, unknown or duplicate fields."
+    );
+    set_assignee["parameters"].as_array_mut().unwrap().push(
+        json!({"name": "issue_number", "in": "path", "required": true, "schema": decimal_i64()}),
+    );
+    set_assignee["requestBody"] = json!({"required": true, "description": "Uncompressed JSON <=524288 bytes/one-second pre-handler deadline. Required expected_version positive i64 decimal string and assignee_user_id, a canonical lowercase UUID or explicit null to clear. This updates exactly one field.", "content": {"application/json": {"schema": object(json!({"expected_version": decimal_i64(), "assignee_user_id": {"anyOf": [uuid.clone(), {"type": "null"}]}}), &["expected_version", "assignee_user_id"])}}});
+    let mut assignee_success = set_assignee["responses"]["201"].clone();
+    assignee_success["description"] = json!(
+        "Committed assignment change, effective no-op or exact replay; changed/assignee_user_id/result_version describe the original command, and assignee_user_id is null when cleared."
+    );
+    assignee_success["content"]["application/json"]["schema"] =
+        json!({"$ref": "#/components/schemas/IssueAssigneeReceipt"});
+    set_assignee["responses"]
+        .as_object_mut()
+        .unwrap()
+        .remove("201");
+    set_assignee["responses"]["200"] = assignee_success;
+    set_assignee["responses"]["409"] = error_response(
+        "issue_version_conflict/idempotency_conflict/issue_capacity_exhausted/issue_clock_conflict; retryable=false",
+        true,
+    );
+    set_assignee["responses"]["413"] =
+        error_response("payload_too_large: assignee JSON exceeds524288 bytes", true);
+    set_assignee["responses"]["422"] = error_response(
+        "invalid_params: invalid assignee_user_id or target is not currently eligible",
+        true,
+    );
+    paths.insert(
+        "/api/v1/projects/{project_id}/issues/{issue_number}/assignee".into(),
+        json!({"put": set_assignee}),
+    );
     let mut move_issue = create.clone();
     move_issue["operationId"] = json!("moveProjectIssue");
     move_issue["description"] = json!(
@@ -356,9 +415,11 @@ pub fn browser_document() -> Value {
                 "Session": object(json!({"id": uuid.clone(), "created_at": timestamp.clone(), "last_activity_at": timestamp.clone(), "expires_at": timestamp.clone(), "is_current": {"type": "boolean"}}), &["id", "created_at", "last_activity_at", "expires_at", "is_current"]),
                 "Project": object(json!({"id": uuid.clone(), "project_key": {"type": "string"}, "name": {"type": "string"}, "role": {"type": "string", "enum": ["manager", "member", "viewer"]}, "archived_at": timestamp.clone()}), &["id", "project_key", "name", "role"]),
                 "OperationalProject": object(json!({"id": uuid, "project_key": {"type": "string"}, "name": {"type": "string"}, "archived_at": timestamp, "membership_count": {"type": "integer", "minimum": 0}, "issue_count": {"type": "integer", "minimum": 0}}), &["id", "project_key", "name", "membership_count", "issue_count"]),
+                "ProjectMember": object(json!({"user_id": uuid.clone(), "display_name": {"type": "string", "minLength": 1}, "role": {"type": "string", "enum": ["manager", "member", "viewer"]}, "primary_email": {"type": "string"}, "can_be_assigned": {"type": "boolean"}}), &["user_id", "display_name", "role", "can_be_assigned"]),
                 "SessionPage": page("Session"),
                 "ProjectPage": page("Project"),
                 "OperationalProjectPage": page("OperationalProject"),
+                "ProjectMemberPage": page("ProjectMember"),
                 "Issue": object(json!({
                     "id": uuid.clone(), "project_id": uuid.clone(), "issue_number": decimal_i64(),
                     "issue_key": {"type": "string"}, "issue_type_id": uuid.clone(), "status_id": uuid.clone(),
@@ -372,6 +433,7 @@ pub fn browser_document() -> Value {
                 "IssueTextReceipt": object(json!({"id": uuid.clone(), "project_id": uuid.clone(), "issue_number": decimal_i64(), "issue_key": {"type": "string"}, "result_version": decimal_i64(), "changed": {"type": "boolean"}}), &["id", "project_id", "issue_number", "issue_key", "result_version", "changed"]),
                 "IssuePriorityReceipt": object(json!({"id": uuid.clone(), "project_id": uuid.clone(), "issue_number": decimal_i64(), "issue_key": {"type": "string"}, "priority": {"type": "string", "enum": ["none", "low", "medium", "high", "urgent"]}, "result_version": decimal_i64(), "changed": {"type": "boolean"}}), &["id", "project_id", "issue_number", "issue_key", "priority", "result_version", "changed"]),
                 "IssueDueDateReceipt": object(json!({"id": uuid.clone(), "project_id": uuid.clone(), "issue_number": decimal_i64(), "issue_key": {"type": "string"}, "due_date": {"anyOf": [{"type": "string", "format": "date"}, {"type": "null"}]}, "result_version": decimal_i64(), "changed": {"type": "boolean"}}), &["id", "project_id", "issue_number", "issue_key", "due_date", "result_version", "changed"]),
+                "IssueAssigneeReceipt": object(json!({"id": uuid.clone(), "project_id": uuid.clone(), "issue_number": decimal_i64(), "issue_key": {"type": "string"}, "assignee_user_id": {"anyOf": [uuid.clone(), {"type": "null"}]}, "result_version": decimal_i64(), "changed": {"type": "boolean"}}), &["id", "project_id", "issue_number", "issue_key", "assignee_user_id", "result_version", "changed"]),
                 "ProjectCapabilities": object(json!({"project_id": uuid.clone(), "can_create_issues": {"type": "boolean"}, "can_update_issue_fields": {"type": "boolean"}, "can_replace_issue_text": {"type": "boolean"}, "can_move_issues": {"type": "boolean"}}), &["project_id", "can_create_issues", "can_update_issue_fields", "can_replace_issue_text", "can_move_issues"]),
                 "IssueCreationReceipt": object(json!({"id": uuid.clone(), "project_id": uuid.clone(), "issue_number": decimal_i64(), "issue_key": {"type": "string"}, "created_version": {"type": "string", "enum": ["1"]}}), &["id", "project_id", "issue_number", "issue_key", "created_version"]),
                 "IssueMoveReceipt": object(json!({"id": uuid.clone(), "project_id": uuid.clone(), "issue_number": decimal_i64(), "issue_key": {"type": "string"}, "status_id": uuid.clone(), "result_version": decimal_i64(), "changed": {"type": "boolean"}}), &["id", "project_id", "issue_number", "issue_key", "status_id", "result_version", "changed"]),
@@ -411,6 +473,14 @@ pub fn browser_document() -> Value {
         }),
         &["field", "before", "after"],
     );
+    let assignee_change = object(
+        json!({
+            "field": {"type": "string", "const": "assignee_user_id"},
+            "before": {"anyOf": [uuid.clone(), {"type": "null"}]},
+            "after": {"anyOf": [uuid.clone(), {"type": "null"}]}
+        }),
+        &["field", "before", "after"],
+    );
     let mut history_event = object(
         json!({
             "id": uuid.clone(),
@@ -418,7 +488,7 @@ pub fn browser_document() -> Value {
             "issue_id": uuid.clone(),
             "actor_user_id": uuid,
             "event_kind": {"type": "string", "enum": ["issue.created", "issue.title_updated", "issue.description_updated", "issue.text_updated", "issue.moved", "issue.field_updated"]},
-            "change": {"oneOf": [priority_change, due_date_change]},
+            "change": {"oneOf": [priority_change, due_date_change, assignee_change]},
             "occurred_at": {"type": "string", "format": "date-time"}
         }),
         &[

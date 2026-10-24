@@ -206,6 +206,14 @@ async fn history(
                     after: date_value(after),
                 }),
             ),
+            (IssueEventKind::FieldUpdated, Some(IssueFieldChange::Assignee { before, after })) => (
+                "issue.field_updated",
+                Some(HistoryChange {
+                    field: "assignee_user_id",
+                    before: assignee_value(before)?,
+                    after: assignee_value(after)?,
+                }),
+            ),
             _ => return Err(read_error(IssueReadError::CorruptData.into())),
         };
         data.push(HistoryEvent {
@@ -229,5 +237,13 @@ fn date_value(value: Option<NaiveDate>) -> Value {
     match value {
         Some(date) => Value::String(date.format("%Y-%m-%d").to_string()),
         None => Value::Null,
+    }
+}
+
+fn assignee_value(value: Option<String>) -> Result<Value, ApiError> {
+    match value {
+        Some(user_id) if canonical_uuid(&user_id) => Ok(Value::String(user_id)),
+        None => Ok(Value::Null),
+        Some(_) => Err(read_error(IssueReadError::CorruptData.into())),
     }
 }

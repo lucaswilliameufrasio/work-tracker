@@ -1,6 +1,7 @@
 use chrono::{DateTime, Utc};
-use sqlx::{Row, SqlitePool, Transaction};
+use sqlx::{Row, Sqlite, SqlitePool, Transaction};
 use thiserror::Error;
+use uuid::Uuid;
 
 use crate::{
     access::{
@@ -25,6 +26,13 @@ pub struct ProjectMembershipRecord {
     pub display_name: String,
     pub role: ProjectRole,
     pub primary_email: Option<String>,
+    pub can_be_assigned: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectMembershipPage {
+    pub items: Vec<ProjectMembershipRecord>,
+    pub next_after_user_id: Option<String>,
 }
 
 #[derive(Debug, Error)]
@@ -45,6 +53,12 @@ pub enum ProjectMembershipError {
     ActiveManagerRequired,
     #[error("persisted project membership role is invalid")]
     CorruptMembership,
+    #[error("project member cursor must be a canonical UUID")]
+    InvalidCursor,
+    #[error("project member id must be a canonical UUID")]
+    InvalidMemberId,
+    #[error("project member page size must be between 1 and 100")]
+    InvalidPageSize,
     #[error("authorization context could not be loaded: {0}")]
     Access(#[from] AccessStoreError),
     #[error("project membership persistence failed: {0}")]
@@ -75,26 +89,13 @@ impl ProjectMembershipStore {
         project_id: &str,
     ) -> Result<Vec<ProjectMembershipRecord>, ProjectMembershipError> {
         let mut transaction = self.pool.begin().await?;
-        let context = AccessStore::load_project_context_in_transaction(
-            &mut transaction,
-            actor_user_id,
-            project_id,
-            false,
-        )
-        .await?
-        .ok_or(ProjectMembershipError::Forbidden)?;
-        if authorize(&context, AccessCapability::ReadProjectMembership).is_err() {
-            transaction.rollback().await?;
-            return Err(ProjectMembershipError::Forbidden);
-        }
-
-        let can_read_email = context.project_role() == Some(ProjectRole::Manager)
-            || matches!(
-                context.organization_role(),
-                Some(OrganizationRole::Owner | OrganizationRole::Admin)
-            );
+        let can_read_email =
+            can_read_project_member_emails(&mut transaction, actor_user_id, project_id).await?;
         let rows = sqlx::query(
             "SELECT project_members.user_id, users.display_name, project_members.role, \
+                    users.state, \
+                    users.state = 'active' AND project_members.role IN ('manager', 'member') \
+                        AS can_be_assigned, \
                     CASE WHEN ? = 1 THEN ( \
                         SELECT user_emails.address FROM user_emails \
                         WHERE user_emails.user_id = project_members.user_id \
@@ -114,17 +115,99 @@ impl ProjectMembershipStore {
 
         let mut members = Vec::with_capacity(rows.len());
         for row in rows {
-            let role = row.try_get::<String, _>("role")?;
-            members.push(ProjectMembershipRecord {
-                user_id: row.try_get("user_id")?,
-                display_name: row.try_get("display_name")?,
-                role: parse_project_role(&role)?,
-                primary_email: row.try_get("primary_email")?,
-            });
+            members.push(project_membership_from_row(&row)?);
         }
 
         transaction.commit().await?;
         Ok(members)
+    }
+
+    pub(crate) async fn list_page_in_transaction(
+        transaction: &mut Transaction<'_, Sqlite>,
+        actor_user_id: &str,
+        project_id: &str,
+        after_user_id: Option<&str>,
+        page_size: u16,
+    ) -> Result<ProjectMembershipPage, ProjectMembershipError> {
+        validate_member_page_options(after_user_id, page_size)?;
+        let can_read_email =
+            can_read_project_member_emails(transaction, actor_user_id, project_id).await?;
+        let rows = sqlx::query(
+            "SELECT project_members.user_id, users.display_name, project_members.role, \
+                    users.state, \
+                    users.state = 'active' AND project_members.role IN ('manager', 'member') \
+                        AS can_be_assigned, \
+                    CASE WHEN ? = 1 THEN ( \
+                        SELECT user_emails.address FROM user_emails \
+                        WHERE user_emails.user_id = project_members.user_id \
+                          AND user_emails.is_primary = 1 \
+                          AND user_emails.confirmed_at IS NOT NULL \
+                        LIMIT 1 \
+                    ) ELSE NULL END AS primary_email \
+             FROM project_members \
+             JOIN users ON users.id = project_members.user_id \
+             WHERE project_members.project_id = ? \
+               AND (? IS NULL OR project_members.user_id > ?) \
+             ORDER BY project_members.user_id ASC \
+             LIMIT ?",
+        )
+        .bind(if can_read_email { 1_i64 } else { 0_i64 })
+        .bind(project_id)
+        .bind(after_user_id)
+        .bind(after_user_id)
+        .bind(i64::from(page_size) + 1)
+        .fetch_all(&mut **transaction)
+        .await?;
+
+        let has_more = rows.len() > usize::from(page_size);
+        let mut items = Vec::with_capacity(rows.len().min(usize::from(page_size)));
+        for row in rows.into_iter().take(usize::from(page_size)) {
+            items.push(project_membership_from_row(&row)?);
+        }
+        let next_after_user_id = if has_more {
+            items.last().map(|member| member.user_id.clone())
+        } else {
+            None
+        };
+        Ok(ProjectMembershipPage {
+            items,
+            next_after_user_id,
+        })
+    }
+
+    pub(crate) async fn get_in_transaction(
+        transaction: &mut Transaction<'_, Sqlite>,
+        actor_user_id: &str,
+        project_id: &str,
+        user_id: &str,
+    ) -> Result<Option<ProjectMembershipRecord>, ProjectMembershipError> {
+        if !canonical_uuid(user_id) {
+            return Err(ProjectMembershipError::InvalidMemberId);
+        }
+        let can_read_email =
+            can_read_project_member_emails(transaction, actor_user_id, project_id).await?;
+        let row = sqlx::query(
+            "SELECT project_members.user_id, users.display_name, project_members.role, \
+                    users.state, \
+                    users.state = 'active' AND project_members.role IN ('manager', 'member') \
+                        AS can_be_assigned, \
+                    CASE WHEN ? = 1 THEN ( \
+                        SELECT user_emails.address FROM user_emails \
+                        WHERE user_emails.user_id = project_members.user_id \
+                          AND user_emails.is_primary = 1 \
+                          AND user_emails.confirmed_at IS NOT NULL \
+                        LIMIT 1 \
+                    ) ELSE NULL END AS primary_email \
+             FROM project_members \
+             JOIN users ON users.id = project_members.user_id \
+             WHERE project_members.project_id = ? AND project_members.user_id = ?",
+        )
+        .bind(if can_read_email { 1_i64 } else { 0_i64 })
+        .bind(project_id)
+        .bind(user_id)
+        .fetch_optional(&mut **transaction)
+        .await?;
+        row.as_ref().map(project_membership_from_row).transpose()
     }
 
     /// Adds an active organization member or changes their project role.
@@ -395,6 +478,77 @@ impl ProjectMembershipStore {
 
         Ok(ProjectMembershipChange::Removed)
     }
+}
+
+async fn can_read_project_member_emails(
+    transaction: &mut Transaction<'_, Sqlite>,
+    actor_user_id: &str,
+    project_id: &str,
+) -> Result<bool, ProjectMembershipError> {
+    let context = AccessStore::load_project_context_in_transaction(
+        transaction,
+        actor_user_id,
+        project_id,
+        false,
+    )
+    .await?
+    .ok_or(ProjectMembershipError::Forbidden)?;
+    if authorize(&context, AccessCapability::ReadProjectMembership).is_err() {
+        return Err(ProjectMembershipError::Forbidden);
+    }
+    Ok(context.project_role() == Some(ProjectRole::Manager)
+        || matches!(
+            context.organization_role(),
+            Some(OrganizationRole::Owner | OrganizationRole::Admin)
+        ))
+}
+
+fn validate_member_page_options(
+    after_user_id: Option<&str>,
+    page_size: u16,
+) -> Result<(), ProjectMembershipError> {
+    if !(1..=100).contains(&page_size) {
+        return Err(ProjectMembershipError::InvalidPageSize);
+    }
+    if after_user_id.is_some_and(|user_id| !canonical_uuid(user_id)) {
+        return Err(ProjectMembershipError::InvalidCursor);
+    }
+    Ok(())
+}
+
+fn canonical_uuid(value: &str) -> bool {
+    value.len() == 36
+        && Uuid::parse_str(value)
+            .map(|id| id.to_string() == value)
+            .unwrap_or(false)
+}
+
+fn project_membership_from_row(
+    row: &sqlx::sqlite::SqliteRow,
+) -> Result<ProjectMembershipRecord, ProjectMembershipError> {
+    let user_id: String = row.try_get("user_id")?;
+    let display_name: String = row.try_get("display_name")?;
+    let role = parse_project_role(&row.try_get::<String, _>("role")?)?;
+    let can_be_assigned: bool = row.try_get("can_be_assigned")?;
+    if !canonical_uuid(&user_id) || display_name.trim().is_empty() {
+        return Err(ProjectMembershipError::CorruptMembership);
+    }
+    let expected_assignable =
+        can_be_assigned_role(role) && row.try_get::<String, _>("state")? == "active";
+    if can_be_assigned != expected_assignable {
+        return Err(ProjectMembershipError::CorruptMembership);
+    }
+    Ok(ProjectMembershipRecord {
+        user_id,
+        display_name,
+        role,
+        primary_email: row.try_get("primary_email")?,
+        can_be_assigned,
+    })
+}
+
+fn can_be_assigned_role(role: ProjectRole) -> bool {
+    matches!(role, ProjectRole::Manager | ProjectRole::Member)
 }
 
 async fn load_actor_context(

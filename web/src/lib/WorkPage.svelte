@@ -16,6 +16,7 @@
     type IssueMoveTarget,
   } from './issue-move.ts';
   import type { BoardCard } from './board.ts';
+  import IssueAssigneeEditor from './IssueAssigneeEditor.svelte';
   import { onSessionEnded } from './session-lifecycle.ts';
   import {
     IssuePriorityIdentityChanged,
@@ -78,10 +79,18 @@
     | { type: 'confirmed'; dueDate: string | null }
     | { type: 'conflict' }
     | { type: 'error' };
+  type AssigneeNotice =
+    | {
+        type: 'confirmed';
+        issueId: string;
+        assigneeUserId: string | null;
+      }
+    | { type: 'conflict'; issueId: string };
   let view = $state<WorkState>({ type: 'idle' });
   let moveState = $state<MoveState>({ type: 'idle' });
   let priorityState = $state<PriorityState>({ type: 'idle' });
   let dueDateState = $state<DueDateState>({ type: 'idle' });
+  let assigneeNotice = $state<AssigneeNotice | undefined>(undefined);
   let selectedPriority = $state<IssuePriority>('none');
   let selectedDueDate = $state('');
   let selectedPriorityIssueId = '';
@@ -166,7 +175,10 @@
     return `/projects/${project}/issues/${number}${query.size === 0 ? '' : `?${query}`}`;
   }
 
-  async function refresh(): Promise<void> {
+  async function refresh(preserveAssigneeNotice = false): Promise<void> {
+    if (!preserveAssigneeNotice) {
+      assigneeNotice = undefined;
+    }
     await screen.refresh();
     await tick();
     heading?.focus();
@@ -482,6 +494,7 @@
 
   onMount(() => {
     const unsubscribeSession = onSessionEnded(() => {
+      assigneeNotice = undefined;
       moveGeneration += 1;
       moveOperation.abort();
       moveOperation = new AbortController();
@@ -499,6 +512,7 @@
       flushSync(() => screen.sessionEnded());
     });
     const conceal = () => {
+      assigneeNotice = undefined;
       moveOperation.abort();
       moveOperation = new AbortController();
       priorityOperation.abort();
@@ -562,8 +576,8 @@
   </h1>
   <p class="intro">
     Leitura em desenvolvimento. O board permite mover cards para o topo das
-    colunas visíveis; prioridade e prazo podem ser alterados no detalhe.
-    Atribuição, filtros e atualização ao vivo ainda não estão disponíveis.
+    colunas visíveis; prioridade, prazo e responsável podem ser alterados no
+    detalhe. Filtros e atualização ao vivo ainda não estão disponíveis.
   </p>
   <nav class="work-links" aria-label="Navegação do trabalho">
     <a href="/projects">Meus projetos</a>
@@ -766,6 +780,29 @@
               </dd>
             </div>
           </dl>
+          <IssueAssigneeEditor
+            projectId={issue.project_id}
+            actorId={data.actorId}
+            {issue}
+            canEdit={data.canUpdateIssueFields}
+            onRefresh={async () => {
+              await refresh(true);
+            }}
+            onNotice={(notice) => {
+              assigneeNotice = notice;
+            }}
+          />
+          {#if assigneeNotice?.issueId === issue.id}
+            {#if assigneeNotice.type === 'confirmed'}<p role="status">
+                {assigneeNotice.assigneeUserId === null
+                  ? 'Responsável removido.'
+                  : 'Responsável atualizado.'}
+              </p>
+            {:else}<p role="alert">
+                A issue mudou. Os dados foram atualizados; revise a pessoa
+                escolhida antes de salvar novamente.
+              </p>{/if}
+          {/if}
           {#if data.canUpdateIssueFields && issue.trashed_at === undefined}<section
               aria-labelledby="priority-update-title"
             >
@@ -906,9 +943,13 @@
                       {#if event.change.field === 'priority'}Prioridade:
                         {priorities[event.change.before]} →
                         {priorities[event.change.after]}
-                      {:else}
+                      {:else if event.change.field === 'due_date'}
                         Prazo: {event.change.before ?? 'Sem prazo'} →
                         {event.change.after ?? 'Sem prazo'}
+                      {:else}
+                        Responsável:
+                        {event.change.before ?? 'Sem responsável'} →
+                        {event.change.after ?? 'Sem responsável'}
                       {/if}
                     </span>{/if}
                 </li>{/each}

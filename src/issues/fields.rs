@@ -42,6 +42,8 @@ pub enum IssueFieldError {
     TimeRegression,
     #[error("organization timezone is unavailable")]
     OrganizationTimezoneUnavailable,
+    #[error("selected user is not currently eligible for issue assignment")]
+    AssigneeUnavailable,
     #[error("session validation failed: {0}")]
     Session(#[from] SessionError),
     #[error("persisted access failed: {0}")]
@@ -95,6 +97,29 @@ pub struct IssueDueDateReceipt {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IssueDueDateOutcome {
     pub receipt: IssueDueDateReceipt,
+    pub replayed: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct SetIssueAssignee {
+    pub expected_version: i64,
+    pub assignee_user_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IssueAssigneeReceipt {
+    pub issue_id: String,
+    pub project_id: String,
+    pub issue_number: i64,
+    pub issue_key: String,
+    pub assignee_user_id: Option<String>,
+    pub result_version: i64,
+    pub changed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IssueAssigneeOutcome {
+    pub receipt: IssueAssigneeReceipt,
     pub replayed: bool,
 }
 
@@ -651,6 +676,293 @@ impl SessionIssueFieldWriter {
                 issue_number,
                 issue_key: format!("{project_key}-{issue_number}"),
                 due_date: input.due_date,
+                result_version,
+                changed,
+            },
+            replayed: false,
+        })
+    }
+
+    pub async fn set_assignee(
+        &self,
+        token: &SessionToken,
+        project_id: &str,
+        issue_number: i64,
+        idempotency_key: &str,
+        input: SetIssueAssignee,
+        now: DateTime<Utc>,
+    ) -> Result<IssueAssigneeOutcome, IssueFieldError> {
+        if input.expected_version < 1 {
+            return Err(IssueFieldError::InvalidVersion);
+        }
+        if issue_number < 1 || !canonical_uuid(project_id) {
+            return Err(IssueFieldError::Unavailable);
+        }
+        if input
+            .assignee_user_id
+            .as_deref()
+            .is_some_and(|user_id| !canonical_uuid(user_id))
+        {
+            return Err(IssueFieldError::AssigneeUnavailable);
+        }
+        let parsed_key =
+            Uuid::parse_str(idempotency_key).map_err(|_| IssueFieldError::InvalidIdempotencyKey)?;
+        if parsed_key.to_string() != idempotency_key {
+            return Err(IssueFieldError::InvalidIdempotencyKey);
+        }
+
+        let mut encoded = RequestDigest(Sha256::new());
+        serde_json::to_writer(
+            &mut encoded,
+            &(
+                project_id,
+                issue_number,
+                input.expected_version,
+                input.assignee_user_id.as_deref(),
+            ),
+        )?;
+        let digest: [u8; 32] = encoded.0.finalize().into();
+        let digest = Zeroizing::new(digest);
+        let fingerprint = self.master_key.keyed_digest(
+            b"issue.set_assignee request sha256-json v1",
+            digest.as_slice(),
+        );
+        let key_id = self.master_key.key_id();
+
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let principal = self
+            .sessions
+            .authenticate_in_transaction(&mut transaction, token, now)
+            .await?
+            .ok_or(IssueFieldError::Unauthenticated)?;
+        let actor = principal.user_id();
+        let context = AccessStore::load_project_context_in_transaction(
+            &mut transaction,
+            actor,
+            project_id,
+            false,
+        )
+        .await?
+        .ok_or(IssueFieldError::Unavailable)?;
+        if authorize(&context, AccessCapability::MutateIssues).is_err() {
+            return Err(IssueFieldError::Unavailable);
+        }
+
+        let row = sqlx::query(
+            "SELECT issues.id, issues.issue_number, issues.assignee_user_id, \
+                    issues.version, issues.trashed_at, issues.updated_at, projects.project_key \
+             FROM issues \
+             JOIN projects ON projects.id = issues.project_id \
+             WHERE issues.project_id = ? AND issues.issue_number = ?",
+        )
+        .bind(project_id)
+        .bind(issue_number)
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or(IssueFieldError::Unavailable)?;
+        if row.try_get::<Option<String>, _>("trashed_at")?.is_some() {
+            return Err(IssueFieldError::Unavailable);
+        }
+        let issue_id: String = row.try_get("id")?;
+        let current_assignee: Option<String> = row.try_get("assignee_user_id")?;
+        let current_version: i64 = row.try_get("version")?;
+        let project_key: String = row.try_get("project_key")?;
+        if !canonical_uuid(&issue_id)
+            || current_assignee
+                .as_deref()
+                .is_some_and(|user_id| !canonical_uuid(user_id))
+            || row.try_get::<i64, _>("issue_number")? != issue_number
+            || current_version < 1
+            || !(2..=6).contains(&project_key.len())
+            || !project_key.bytes().all(|byte| byte.is_ascii_uppercase())
+        {
+            return Err(IssueFieldError::CorruptData);
+        }
+
+        let mut key_hash = Sha256::new();
+        key_hash.update(b"puxiri issue.set_assignee idempotency key v1\0");
+        key_hash.update((actor.len() as u64).to_be_bytes());
+        key_hash.update(actor.as_bytes());
+        key_hash.update(parsed_key.as_bytes());
+        let key_digest: [u8; 32] = key_hash.finalize().into();
+
+        let prior = sqlx::query(
+            "SELECT request_fingerprint, master_key_id, project_id, issue_id, \
+                    issue_number, result_assignee_user_id, result_version, changed \
+             FROM issue_assignee_receipts \
+             WHERE actor_user_id = ? AND operation = 'issue.set_assignee' \
+               AND key_digest = ?",
+        )
+        .bind(actor)
+        .bind(key_digest.as_slice())
+        .fetch_optional(&mut *transaction)
+        .await?;
+        if let Some(prior) = prior {
+            let stored_key: Vec<u8> = prior.try_get("master_key_id")?;
+            if stored_key.as_slice() != key_id {
+                return Err(IssueFieldError::FingerprintKeyUnavailable);
+            }
+            let stored_fingerprint: Vec<u8> = prior.try_get("request_fingerprint")?;
+            if stored_fingerprint.len() != 32 {
+                return Err(IssueFieldError::CorruptData);
+            }
+            if !bool::from(stored_fingerprint.as_slice().ct_eq(&fingerprint)) {
+                return Err(IssueFieldError::IdempotencyConflict);
+            }
+            let result_assignee: Option<String> = prior.try_get("result_assignee_user_id")?;
+            if result_assignee
+                .as_deref()
+                .is_some_and(|user_id| !canonical_uuid(user_id))
+            {
+                return Err(IssueFieldError::CorruptData);
+            }
+            let result_version: i64 = prior.try_get("result_version")?;
+            let changed: bool = prior.try_get("changed")?;
+            let expected_result = if changed {
+                input.expected_version.checked_add(1)
+            } else {
+                Some(input.expected_version)
+            };
+            if prior.try_get::<String, _>("project_id")? != project_id
+                || prior.try_get::<String, _>("issue_id")? != issue_id
+                || prior.try_get::<i64, _>("issue_number")? != issue_number
+                || result_assignee != input.assignee_user_id
+                || expected_result != Some(result_version)
+                || result_version > current_version
+            {
+                return Err(IssueFieldError::CorruptData);
+            }
+            let receipt = IssueAssigneeReceipt {
+                issue_id,
+                project_id: project_id.to_owned(),
+                issue_number,
+                issue_key: format!("{project_key}-{issue_number}"),
+                assignee_user_id: result_assignee,
+                result_version,
+                changed,
+            };
+            transaction.commit().await?;
+            return Ok(IssueAssigneeOutcome {
+                receipt,
+                replayed: true,
+            });
+        }
+
+        if input.expected_version != current_version {
+            return Err(IssueFieldError::VersionConflict);
+        }
+
+        let changed = current_assignee != input.assignee_user_id;
+        if changed && let Some(assignee_user_id) = input.assignee_user_id.as_deref() {
+            let target_context = AccessStore::load_project_context_in_transaction(
+                &mut transaction,
+                assignee_user_id,
+                project_id,
+                false,
+            )
+            .await?
+            .ok_or(IssueFieldError::AssigneeUnavailable)?;
+            if authorize(&target_context, AccessCapability::MutateIssues).is_err() {
+                return Err(IssueFieldError::AssigneeUnavailable);
+            }
+        }
+
+        let result_version = if changed {
+            current_version
+                .checked_add(1)
+                .ok_or(IssueFieldError::VersionExhausted)?
+        } else {
+            current_version
+        };
+        let timestamp = format_timestamp(now);
+        if changed {
+            let updated_at: String = row.try_get("updated_at")?;
+            let updated_at = DateTime::parse_from_rfc3339(&updated_at)
+                .map_err(|_| IssueFieldError::CorruptData)?
+                .with_timezone(&Utc);
+            if format_timestamp(updated_at) != row.try_get::<String, _>("updated_at")? {
+                return Err(IssueFieldError::CorruptData);
+            }
+            if now < updated_at {
+                return Err(IssueFieldError::TimeRegression);
+            }
+
+            let updated = sqlx::query(
+                "UPDATE issues SET assignee_user_id = ?, version = ?, updated_at = ? \
+                 WHERE project_id = ? AND id = ? AND version = ? AND trashed_at IS NULL",
+            )
+            .bind(&input.assignee_user_id)
+            .bind(result_version)
+            .bind(&timestamp)
+            .bind(project_id)
+            .bind(&issue_id)
+            .bind(current_version)
+            .execute(&mut *transaction)
+            .await?;
+            if updated.rows_affected() != 1 {
+                return Err(IssueFieldError::VersionConflict);
+            }
+
+            sqlx::query(
+                "INSERT INTO issue_events \
+                 (id, project_id, issue_id, actor_user_id, event_kind, occurred_at, \
+                  field_key, before_value_json, after_value_json) \
+                 VALUES (?, ?, ?, ?, 'issue.field_updated', ?, 'assignee_user_id', ?, ?)",
+            )
+            .bind(Uuid::now_v7().to_string())
+            .bind(project_id)
+            .bind(&issue_id)
+            .bind(actor)
+            .bind(&timestamp)
+            .bind(serde_json::to_string(&current_assignee)?)
+            .bind(serde_json::to_string(&input.assignee_user_id)?)
+            .execute(&mut *transaction)
+            .await?;
+            sqlx::query(
+                "INSERT INTO outbox_events \
+                 (id, event_kind, payload_version, project_id, issue_id, actor_user_id, \
+                  issue_version, occurred_at) \
+                 VALUES (?, 'issue.field_updated', 1, ?, ?, ?, ?, ?)",
+            )
+            .bind(Uuid::now_v7().to_string())
+            .bind(project_id)
+            .bind(&issue_id)
+            .bind(actor)
+            .bind(result_version)
+            .bind(&timestamp)
+            .execute(&mut *transaction)
+            .await?;
+        }
+
+        sqlx::query(
+            "INSERT INTO issue_assignee_receipts \
+             (actor_user_id, operation, key_digest, request_fingerprint, master_key_id, \
+              project_id, issue_id, issue_number, result_assignee_user_id, result_version, \
+              changed, created_at) \
+             VALUES (?, 'issue.set_assignee', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(actor)
+        .bind(key_digest.as_slice())
+        .bind(fingerprint.as_slice())
+        .bind(key_id.as_slice())
+        .bind(project_id)
+        .bind(&issue_id)
+        .bind(issue_number)
+        .bind(&input.assignee_user_id)
+        .bind(result_version)
+        .bind(changed)
+        .bind(&timestamp)
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+
+        Ok(IssueAssigneeOutcome {
+            receipt: IssueAssigneeReceipt {
+                issue_id,
+                project_id: project_id.to_owned(),
+                issue_number,
+                issue_key: format!("{project_key}-{issue_number}"),
+                assignee_user_id: input.assignee_user_id,
                 result_version,
                 changed,
             },

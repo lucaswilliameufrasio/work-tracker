@@ -47,6 +47,7 @@ struct BrowserState {
 
 mod catalogs;
 mod issues;
+mod project_members;
 
 pub(super) fn routes(
     database: Arc<Database>,
@@ -101,6 +102,7 @@ pub(super) fn routes(
             get(project_capabilities),
         )
         .route("/api/v1/admin/projects", get(operational_projects))
+        .merge(project_members::routes())
         .merge(issues::routes())
         .merge(catalogs::routes())
         .method_not_allowed_fallback(method_not_allowed)

@@ -46,11 +46,16 @@ pub(super) fn routes() -> Router<Arc<BrowserState>> {
             put(due_date::set_due_date),
         )
         .route(
+            "/api/v1/projects/{project_id}/issues/{issue_number}/assignee",
+            put(assignee::set_assignee),
+        )
+        .route(
             "/api/v1/projects/{project_id}/issues/{issue_number}/move",
             post(movement::move_issue),
         )
 }
 
+mod assignee;
 mod board;
 mod create;
 mod detail;

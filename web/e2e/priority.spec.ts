@@ -167,9 +167,9 @@ test('issue detail updates priority through the versioned one-field command', as
   await expect(page.getByText('Priority fixture')).toBeVisible();
   await page.getByLabel('Prioridade', { exact: true }).selectOption('high');
   await page.getByRole('button', { name: 'Salvar prioridade' }).click();
-  await expect(page.getByRole('status')).toContainText(
-    'Prioridade alterada para Alta.',
-  );
+  await expect(
+    page.getByText('Prioridade alterada para Alta.', { exact: true }),
+  ).toBeVisible();
   await expect(
     page.getByText('Prioridade: Sem prioridade → Alta', { exact: true }),
   ).toBeVisible();

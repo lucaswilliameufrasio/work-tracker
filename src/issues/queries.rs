@@ -72,7 +72,7 @@ pub enum IssueEventKind {
     FieldUpdated,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IssueFieldChange {
     Priority {
         before: super::IssuePriority,
@@ -81,6 +81,10 @@ pub enum IssueFieldChange {
     DueDate {
         before: Option<NaiveDate>,
         after: Option<NaiveDate>,
+    },
+    Assignee {
+        before: Option<String>,
+        after: Option<String>,
     },
 }
 
@@ -505,6 +509,16 @@ fn issue_event_from_row(row: &SqliteRow) -> Result<IssueEvent, IssueReadError> {
             }
             Some(IssueFieldChange::DueDate { before, after })
         }
+        (IssueEventKind::FieldUpdated, Some(field_key), Some(before_value), Some(after_value))
+            if field_key == "assignee_user_id" =>
+        {
+            let before = parse_json_assignee(&before_value)?;
+            let after = parse_json_assignee(&after_value)?;
+            if before == after {
+                return Err(IssueReadError::CorruptData);
+            }
+            Some(IssueFieldChange::Assignee { before, after })
+        }
         (IssueEventKind::FieldUpdated, _, _, _) => return Err(IssueReadError::CorruptData),
         (_, None, None, None) => None,
         _ => return Err(IssueReadError::CorruptData),
@@ -555,6 +569,20 @@ fn parse_json_due_date(value: &str) -> Result<Option<NaiveDate>, IssueReadError>
     let date: Option<String> =
         serde_json::from_str(value).map_err(|_| IssueReadError::CorruptData)?;
     date.as_deref().map(parse_date).transpose()
+}
+
+fn parse_json_assignee(value: &str) -> Result<Option<String>, IssueReadError> {
+    let user_id: Option<String> =
+        serde_json::from_str(value).map_err(|_| IssueReadError::CorruptData)?;
+    if user_id.as_deref().is_some_and(|user_id| {
+        user_id.len() != 36
+            || uuid::Uuid::parse_str(user_id)
+                .map(|parsed| parsed.to_string() != user_id)
+                .unwrap_or(true)
+    }) {
+        return Err(IssueReadError::CorruptData);
+    }
+    Ok(user_id)
 }
 
 pub(super) async fn organization_local_today(

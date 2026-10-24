@@ -50,6 +50,10 @@ fn generated_contract_has_unique_operations_resolved_refs_and_only_implemented_r
         ("/api/v1/auth/sessions/{session_id}", "delete"),
         ("/api/v1/projects", "get"),
         ("/api/v1/projects", "head"),
+        ("/api/v1/projects/{project_id}/members", "get"),
+        ("/api/v1/projects/{project_id}/members", "head"),
+        ("/api/v1/projects/{project_id}/members/{user_id}", "get"),
+        ("/api/v1/projects/{project_id}/members/{user_id}", "head"),
         ("/api/v1/projects/{project_id}/capabilities", "get"),
         ("/api/v1/projects/{project_id}/capabilities", "head"),
         ("/api/v1/projects/{project_id}/board", "get"),
@@ -69,6 +73,10 @@ fn generated_contract_has_unique_operations_resolved_refs_and_only_implemented_r
         ),
         (
             "/api/v1/projects/{project_id}/issues/{issue_number}/due-date",
+            "put",
+        ),
+        (
+            "/api/v1/projects/{project_id}/issues/{issue_number}/assignee",
             "put",
         ),
         (
@@ -160,6 +168,33 @@ fn generated_contract_has_unique_operations_resolved_refs_and_only_implemented_r
             "issue_number",
             "issue_key",
             "due_date",
+            "result_version",
+            "changed"
+        ])
+    );
+    assert_eq!(
+        document["paths"]["/api/v1/projects/{project_id}/members"]["get"]["operationId"],
+        "listProjectMembers"
+    );
+    assert_eq!(
+        document["components"]["schemas"]["ProjectMember"]["required"],
+        serde_json::json!(["user_id", "display_name", "role", "can_be_assigned"])
+    );
+    let assignee =
+        &document["paths"]["/api/v1/projects/{project_id}/issues/{issue_number}/assignee"]["put"];
+    assert_eq!(assignee["operationId"], "setProjectIssueAssignee");
+    assert_eq!(
+        assignee["requestBody"]["content"]["application/json"]["schema"]["required"],
+        serde_json::json!(["expected_version", "assignee_user_id"])
+    );
+    assert_eq!(
+        document["components"]["schemas"]["IssueAssigneeReceipt"]["required"],
+        serde_json::json!([
+            "id",
+            "project_id",
+            "issue_number",
+            "issue_key",
+            "assignee_user_id",
             "result_version",
             "changed"
         ])

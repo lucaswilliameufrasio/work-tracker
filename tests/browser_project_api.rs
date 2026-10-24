@@ -303,7 +303,8 @@ async fn every_documented_browser_operation_matches_real_success_and_auth_error_
             let issued = sessions.issue(&actor, Utc::now()).await.unwrap();
             let uri = path
                 .replace("{session_id}", &issued.id)
-                .replace("{project_id}", &project.id);
+                .replace("{project_id}", &project.id)
+                .replace("{user_id}", &actor);
             let uri = uri.replace("{issue_number}", &contract_issue.issue_number.to_string());
             let uri = uri.replace("{status_id}", &contract_issue.status_id);
             let uri = uri.replace(
@@ -367,6 +368,19 @@ async fn every_documented_browser_operation_matches_real_success_and_auth_error_
                     serde_json::json!({
                         "expected_version": expected_version.to_string(),
                         "due_date": "2028-02-29",
+                    })
+                    .to_string()
+                } else if operation["operationId"] == "setProjectIssueAssignee" {
+                    let expected_version: i64 = sqlx::query_scalar(
+                        "SELECT version FROM issues WHERE project_id = ? AND issue_number = 1",
+                    )
+                    .bind(&project.id)
+                    .fetch_one(database.pool())
+                    .await
+                    .unwrap();
+                    serde_json::json!({
+                        "expected_version": expected_version.to_string(),
+                        "assignee_user_id": actor.clone(),
                     })
                     .to_string()
                 } else if operation["operationId"] == "moveProjectIssue" {

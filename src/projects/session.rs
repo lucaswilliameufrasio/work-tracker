@@ -10,6 +10,10 @@ use crate::auth::{
 
 use super::{
     ProjectListOptions, ProjectListPage, ProjectOperationalPage, ProjectReadError, ProjectStore,
+    membership::{
+        ProjectMembershipError, ProjectMembershipPage, ProjectMembershipRecord,
+        ProjectMembershipStore,
+    },
 };
 
 #[derive(Debug, Error)]
@@ -20,6 +24,8 @@ pub enum SessionProjectReadError {
     Session(#[from] SessionError),
     #[error("project query failed: {0}")]
     Project(#[from] ProjectReadError),
+    #[error("project membership query failed: {0}")]
+    Membership(#[from] ProjectMembershipError),
     #[error("session-bound query transaction failed: {0}")]
     Database(#[from] sqlx::Error),
 }
@@ -33,6 +39,66 @@ pub struct SessionProjectReader {
 }
 
 impl SessionProjectReader {
+    pub async fn list_project_members(
+        &self,
+        token: &SessionToken,
+        project_id: &str,
+        after_user_id: Option<&str>,
+        page_size: u16,
+        now: DateTime<Utc>,
+    ) -> Result<Option<ProjectMembershipPage>, SessionProjectReadError> {
+        let mut transaction = self.pool.begin().await?;
+        let principal = self
+            .sessions
+            .authenticate_in_transaction(&mut transaction, token, now)
+            .await?
+            .ok_or(SessionProjectReadError::Unauthenticated)?;
+        let page = match ProjectMembershipStore::list_page_in_transaction(
+            &mut transaction,
+            principal.user_id(),
+            project_id,
+            after_user_id,
+            page_size,
+        )
+        .await
+        {
+            Ok(page) => Some(page),
+            Err(ProjectMembershipError::Forbidden) => None,
+            Err(error) => return Err(error.into()),
+        };
+        transaction.commit().await?;
+        Ok(page)
+    }
+
+    pub async fn get_project_member(
+        &self,
+        token: &SessionToken,
+        project_id: &str,
+        user_id: &str,
+        now: DateTime<Utc>,
+    ) -> Result<Option<ProjectMembershipRecord>, SessionProjectReadError> {
+        let mut transaction = self.pool.begin().await?;
+        let principal = self
+            .sessions
+            .authenticate_in_transaction(&mut transaction, token, now)
+            .await?
+            .ok_or(SessionProjectReadError::Unauthenticated)?;
+        let member = match ProjectMembershipStore::get_in_transaction(
+            &mut transaction,
+            principal.user_id(),
+            project_id,
+            user_id,
+        )
+        .await
+        {
+            Ok(member) => member,
+            Err(ProjectMembershipError::Forbidden) => None,
+            Err(error) => return Err(error.into()),
+        };
+        transaction.commit().await?;
+        Ok(member)
+    }
+
     pub async fn can_create_issues(
         &self,
         token: &SessionToken,
