@@ -1,4 +1,4 @@
-// Phase 0: real, disposable MinIO and Chromium. No production storage adapter.
+// Phase 0: real, disposable Floci and Chromium. No production storage adapter.
 // No operator credentials/endpoints: all configuration is generated locally.
 import assert from 'node:assert/strict';
 import { after, before, test } from 'node:test';
@@ -6,7 +6,7 @@ import { execFile, fork } from 'node:child_process';
 import { once } from 'node:events';
 import { promisify } from 'node:util';
 import { createServer } from 'node:http';
-import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -19,6 +19,7 @@ import {
   GetObjectCommand,
   HeadObjectCommand,
   ListObjectsV2Command,
+  PutBucketCorsCommand,
   PutObjectCommand,
   S3Client,
 } from '@aws-sdk/client-s3';
@@ -30,12 +31,12 @@ import { registerBundleJobTests } from './s3-bundle-job-contracts.mjs';
 import { registerSpoolBudgetTests } from './s3-spool-budget-contracts.mjs';
 
 const image =
-  'cgr.dev/chainguard/minio@sha256:dc8b7ba9bdd982d28af533121e5438239624460432e090a52f81b36e7bd5f7dd';
+  'floci/floci@sha256:e0b292df4dc9559b7b1bf4f51bdda4bb8e269276236438cd03cae661260ea8a9';
 const run = promisify(execFile);
 const bucket = `puxiri-spike-${randomUUID()}`;
 const credentials = {
-  accessKeyId: `spike${randomBytes(8).toString('hex')}`,
-  secretAccessKey: randomBytes(32).toString('hex'),
+  accessKeyId: 'test',
+  secretAccessKey: 'test',
 };
 const prefixes = ['images', 'avatars', 'backups', 'exports'];
 let container;
@@ -60,8 +61,8 @@ async function site() {
 before(async () => {
   allowedSite = await site();
   deniedSite = await site();
-  // Credentials are ephemeral and never printed. Container has no mounts,
-  // volumes or shared data; only one randomly assigned loopback API port.
+  // Floci receives only documented dummy credentials and keeps its S3 data in
+  // a private, bounded tmpfs. The API is published on loopback only.
   const created = await run(
     'docker',
     [
@@ -73,48 +74,41 @@ before(async () => {
       '--label',
       'puxiri.test=s3-spike',
       '--tmpfs',
-      '/data:rw,nosuid,nodev,size=128m,mode=1777',
+      '/app/data:rw,nosuid,nodev,size=128m,mode=1777',
       '-p',
-      '127.0.0.1::9000',
+      '127.0.0.1::4566',
       '-e',
-      'MINIO_ROOT_USER',
+      'FLOCI_STORAGE_MODE=persistent',
       '-e',
-      'MINIO_ROOT_PASSWORD',
+      'FLOCI_STORAGE_PERSISTENT_PATH=/app/data',
       '-e',
-      `MINIO_API_CORS_ALLOW_ORIGIN=${allowedSite.origin}`,
+      'FLOCI_AUTH_VALIDATE_SIGNATURES=true',
+      '-e',
+      'FLOCI_SERVICES_S3_ENFORCE_AUTH=true',
       image,
-      'server',
-      '/data',
-      '--address',
-      ':9000',
     ],
     {
-      env: {
-        ...process.env,
-        MINIO_ROOT_USER: credentials.accessKeyId,
-        MINIO_ROOT_PASSWORD: credentials.secretAccessKey,
-      },
       timeout: 60000,
     },
   ).catch((error) => {
-    const detail = String(error.stderr || error.code || 'unknown error')
-      .replaceAll(credentials.accessKeyId, '[redacted]')
-      .replaceAll(credentials.secretAccessKey, '[redacted]')
-      .slice(0, 1000);
-    throw new Error(`Could not start pinned disposable MinIO: ${detail}`);
+    const detail = String(error.stderr || error.code || 'unknown error').slice(
+      0,
+      1000,
+    );
+    throw new Error(`Could not start pinned disposable Floci: ${detail}`);
   });
   container = created.stdout.trim();
-  const published = await run('docker', ['port', container, '9000/tcp']);
+  const published = await run('docker', ['port', container, '4566/tcp']);
   endpoint = `http://${published.stdout.trim()}`;
   for (let attempt = 0; attempt < 100; attempt++) {
-    const response = await fetch(`${endpoint}/minio/health/ready`, {
+    const response = await fetch(`${endpoint}/_floci/health`, {
       signal: AbortSignal.timeout(1000),
     }).catch(() => null);
     if (response) {
       await response.arrayBuffer();
       if (response.ok) break;
     }
-    assert.notEqual(attempt, 99, 'MinIO readiness timed out');
+    assert.notEqual(attempt, 99, 'Floci readiness timed out');
     await delay(100);
   }
   client = new S3Client({
@@ -129,6 +123,22 @@ before(async () => {
   await client.send(new CreateBucketCommand({ Bucket: bucket }), {
     abortSignal: AbortSignal.timeout(10000),
   });
+  await client.send(
+    new PutBucketCorsCommand({
+      Bucket: bucket,
+      CORSConfiguration: {
+        CORSRules: [
+          {
+            AllowedHeaders: ['*'],
+            AllowedMethods: ['GET', 'PUT'],
+            AllowedOrigins: [allowedSite.origin],
+            ExposeHeaders: ['ETag', 'x-amz-checksum-sha256'],
+            MaxAgeSeconds: 300,
+          },
+        ],
+      },
+    }),
+  );
   browser = await chromium.launch();
 });
 
@@ -138,8 +148,11 @@ after(async () => {
   for (const origin of [allowedSite, deniedSite]) {
     if (origin) await new Promise((resolve) => origin.server.close(resolve));
   }
-  if (container)
-    await run('docker', ['rm', '-f', container], { timeout: 10000 });
+  if (container) {
+    // Rootless removal can outlive ten seconds on a shared test host. Bound
+    // this exact disposable container cleanup like startup; never hide errors.
+    await run('docker', ['rm', '-f', container], { timeout: 60000 });
+  }
 });
 
 async function http(url, options = {}) {
@@ -461,11 +474,11 @@ test('ordinary signed PUT is reusable and overwrites; signed conditional PUT pre
   );
   const stripped = { ...put.headers };
   delete stripped['if-none-match'];
-  // This MinIO release reports a missing signed header as malformed (400),
-  // rather than a signature mismatch (403); either must never authorize PUT.
+  // Floci verifies every header named by SignedHeaders and fails closed when
+  // the request omits one.
   assert.equal(
     (await http(put.url, { method: 'PUT', body, headers: stripped })).status,
-    400,
+    403,
   );
   assert.deepEqual((await http(await signedGet(protectedKey))).body, body);
 });
@@ -654,7 +667,7 @@ test('staging promotion protects final bytes even when the old upload URL recrea
   assert.deepEqual((await http(await signedGet(finalKey))).body, body);
 });
 
-test('this MinIO ignores a transmitted destination create-only condition on CopyObject', async () => {
+test('Floci enforces a transmitted destination create-only condition on CopyObject', async () => {
   const source = `images/_uploads/${randomUUID()}`;
   const destination = `images/objects/${randomUUID()}`;
   await client.send(
@@ -684,14 +697,16 @@ test('this MinIO ignores a transmitted destination create-only condition on Copy
     },
     { step: 'build', name: 'assertDestinationConditionTransmitted' },
   );
-  const result = await client.send(command);
-  assert.ok(result.CopyObjectResult.ETag);
+  await assert.rejects(
+    client.send(command),
+    (error) => error.$metadata?.httpStatusCode === 412,
+  );
   assert.equal(
     (await http(await signedGet(destination))).body.toString(),
-    'replacement',
+    'existing',
   );
-  // This is a compatibility finding, NOT the desired storage contract. The
-  // promotion tests use PutObject and fail if destination overwrites are allowed.
+  // Promotion still uses create-only PutObject; this assertion independently
+  // records Floci's CopyObject contract without broadening product support.
 });
 
 test('source changed after byte validation is rejected before a final object exists', async () => {

@@ -19,7 +19,7 @@ import {
 } from './s3-bundle-spike.mjs';
 import { prepareRemote } from './s3-lifecycle-spike.mjs';
 
-// Registered in the existing suite to use its isolated real MinIO lifecycle.
+// Registered in the existing suite to use its isolated real Floci lifecycle.
 export function registerBundleTests({ test, lifecycleFixture, context }) {
   async function availableFixture(t) {
     const { client, bucket } = context();

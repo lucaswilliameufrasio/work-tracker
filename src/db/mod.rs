@@ -57,6 +57,12 @@ impl Database {
             pool.close().await;
             return Err(error.into());
         }
+        if let Err(error) =
+            crate::jobs::JobStore::recover_abandoned_on_startup(&pool, chrono::Utc::now()).await
+        {
+            pool.close().await;
+            return Err(error.into());
+        }
         Ok(Self {
             pool,
             _directory_lock: directory_lock,
@@ -99,6 +105,7 @@ fn lock_directory(data_dir: &Path) -> Result<File, OpenError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sqlx::Row;
 
     #[tokio::test]
     async fn dropping_database_releases_lock_even_when_a_duplicate_descriptor_survives() {
@@ -124,6 +131,46 @@ mod tests {
             Database::open(directory.path()).await.err(),
             Some(OpenError::AlreadyRunning)
         ));
+        reopened.close().await;
+    }
+
+    #[tokio::test]
+    async fn committed_wal_data_survives_pool_close_and_database_reopen() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let database = Database::open(directory.path()).await.unwrap();
+
+        let journal_mode = sqlx::query("PRAGMA journal_mode")
+            .fetch_one(database.pool())
+            .await
+            .unwrap()
+            .try_get::<String, _>(0)
+            .unwrap();
+        assert_eq!(journal_mode.to_ascii_lowercase(), "wal");
+
+        sqlx::query("CREATE TABLE wal_lifecycle_probe (generation INTEGER NOT NULL)")
+            .execute(database.pool())
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO wal_lifecycle_probe (generation) VALUES (158)")
+            .execute(database.pool())
+            .await
+            .unwrap();
+
+        database.close().await;
+        assert!(matches!(
+            Database::open(directory.path()).await.err(),
+            Some(OpenError::AlreadyRunning)
+        ));
+        drop(database);
+
+        let reopened = Database::open(directory.path()).await.unwrap();
+        let generation = sqlx::query("SELECT generation FROM wal_lifecycle_probe")
+            .fetch_one(reopened.pool())
+            .await
+            .unwrap()
+            .try_get::<i64, _>(0)
+            .unwrap();
+        assert_eq!(generation, 158);
         reopened.close().await;
     }
 }

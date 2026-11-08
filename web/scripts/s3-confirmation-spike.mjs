@@ -56,8 +56,8 @@ export async function inspectStaging(
 export async function promoteValidated(client, bucket, validated, finalKey) {
   if (validated.key === finalKey)
     throw new Error('Final key must differ from staging');
-  // MinIO in this spike ignores destination If-None-Match on CopyObject.
-  // Spool and verify bounded bytes, then use the demonstrated create-only PUT.
+  // Keep the immutable destination guarantee explicit across providers: spool
+  // and verify bounded bytes, then use create-only PutObject rather than COPY.
   const root = fileURLToPath(new URL('../../.test-data/', import.meta.url));
   await mkdir(root, { recursive: true });
   const directory = await mkdtemp(join(root, 's3-confirmation-'));

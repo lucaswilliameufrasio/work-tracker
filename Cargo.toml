@@ -6,28 +6,40 @@ rust-version = "1.94"
 publish = false
 
 [dependencies]
+aws-lc-rs = { version = "=1.18.2", default-features = false, features = ["aws-lc-sys"] }
+argon2 = { version = "=0.5.3", features = ["zeroize"] }
 axum = "0.8.9"
+base32 = "=0.5.1"
+base64 = "0.22.1"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+chrono-tz = "=0.10.4"
 clap = { version = "4.6.7", features = ["derive", "env"] }
+hmac = "=0.13.0"
+http-body-util = "0.1"
+libc = "=0.2.190"
 mime_guess = "2.0.5"
+rustix = { version = "=1.1.5", default-features = false, features = ["process"] }
+rand_core = { version = "0.6.4", features = ["getrandom"] }
 rust-embed = { version = "8.12.0", features = ["debug-embed"] }
+sha2 = "0.11.0"
+sha1 = "=0.11.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+subtle = "=2.6.1"
 sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "sqlite", "migrate", "macros"] }
 thiserror = "2.0"
-tokio = { version = "1.53.2", features = ["macros", "rt-multi-thread", "net", "signal", "time"] }
+tokio = { version = "1.53.2", features = ["macros", "rt-multi-thread", "net", "signal", "sync", "time"] }
 tower-http = { version = "0.7.1", features = ["set-header"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
 uuid = { version = "1.0", features = ["v7"] }
+zeroize = "1.9.0"
 
 [dev-dependencies]
-argon2 = "=0.5.3"
 rmcp = { version = "=3.5.1", default-features = false, features = ["server", "transport-streamable-http-server"] }
 oauth2 = { version = "=5.0.0", default-features = false }
 openidconnect = { version = "=4.0.1", default-features = false, features = ["accept-string-booleans"] }
-chrono = { version = "0.4", default-features = false, features = ["clock"] }
 aws-sdk-sesv2 = { version = "=1.123.0", default-features = false, features = ["rt-tokio", "default-https-client"] }
-http-body-util = "0.1"
 base64 = "=0.22.1"
 openssl = "=0.10.81"
 time = { version = "=0.3.55", features = ["parsing"] }

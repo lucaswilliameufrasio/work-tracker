@@ -2,15 +2,16 @@
 
 Gestor de trabalho self hosted em desenvolvimento. Uma instalação, uma organização, SQLite local e frontend embutido no executável Rust.
 
-**Esta versão é um spike da Fase 0, não um produto pronto.** Apenas servidor, migrations, lock do diretório, saúde mínima e SPA funcionam. Login, setup protegido, Kanban, integrações e backup ainda não estão implementados. Não exponha na internet nem use dados reais.
+**Esta versão é um spike da Fase 0, não um produto pronto.** Por padrão serve apenas saúde mínima e SPA, com migrations e lock do diretório. Serviços internos e uma API read-only opt-in de projetos/sessão têm testes locais, mas login HTTP, wizard de setup protegido, Kanban, integrações e backup ainda não estão implementados. Não exponha na internet nem use dados reais.
 
 ## Desenvolvimento local
 
-Requisitos: Rust 1.94 ou superior, Node 24 e pnpm 11.21.0. Node é necessário para construir/testar a SPA, não para executar o binário pronto.
+As versões locais são fixadas em `.mise.toml`: Rust/Cargo 1.99.0, Node 24.21.0 e pnpm 11.21.0. Instale mise, rode `mise install` na raiz e use `mise exec -- ...` para que comandos diretos e `make` usem os pins do projeto. Node é necessário para construir/testar a SPA, não para executar o binário pronto.
 
 ```sh
-make install
-make serve
+mise install
+mise exec -- make install
+mise exec -- make serve
 ```
 
 Abra `http://127.0.0.1:3000`. Dados de desenvolvimento ficam em `./data`, ignorado pelo Git. Uma segunda instância no mesmo diretório é rejeitada.
@@ -18,7 +19,7 @@ Abra `http://127.0.0.1:3000`. Dados de desenvolvimento ficam em `./data`, ignora
 Para reconstruir e gerar o executável:
 
 ```sh
-make build
+mise exec -- make build
 ./target/release/puxiri serve --bind 127.0.0.1:3000 --data-dir ./data
 ```
 
@@ -26,16 +27,18 @@ O binário contém HTML, JS, CSS, fontes e migrations. Pode ser executado fora d
 
 Opções de bootstrap implementadas: `--bind`/`PUXIRI_BIND` e `--data-dir`/`PUXIRI_DATA_DIR`. `RUST_LOG` controla os logs estruturados. Não passar segredos em URLs/argumentos. Encerre com Ctrl+C ou SIGTERM para fechar conexões graciosamente.
 
+`--browser-origin`/`PUXIRI_BROWSER_ORIGIN` permite optar explicitamente pelas consultas `/api/v1/auth/session`, `/api/v1/projects` e `/api/v1/admin/projects`, além de logout por DELETE na sessão atual com Origin/CSRF. Exige origem HTTPS canônica, Host correspondente e sessão atual no cookie Secure/HttpOnly host-only; sem a opção, essas rotas retornam 404. O binário não termina TLS, não cria contas/sessões por HTTP e não deve ser exposto publicamente: os testes usam contas/sessões sintéticas em SQLite temporário. Login/signup, mutações de projeto/conta, onboarding e frontend autenticado continuam fechados. Não usar esse flag para contornar setup. Contrato e limites: [API browser de projetos](docs/browser-project-api-design.md).
+
 ## Validação
 
 ```sh
-(cd web && pnpm exec playwright install chromium)
-make check
+mise exec -- sh -c 'cd web && pnpm exec playwright install chromium'
+mise exec -- make check
 ```
 
-Integrações usam SQLite em arquivos temporários reais. E2E inicia o executável em um diretório isolado e verifica a SPA embutida no desktop e mobile escuro, sem servidor Node/Vite de produção. O gate também exige Docker para o spike S3: inicia MinIO descartável com dados em tmpfs e porta aleatória só no loopback, e remove apenas seu próprio container ao terminar. Nenhum endpoint, bucket ou credencial de outro ambiente é utilizado. O registry pode ser acessado para obter a imagem fixada.
+Integrações usam SQLite em arquivos temporários reais. E2E inicia o executável em um diretório isolado e verifica a SPA embutida no desktop e mobile escuro, sem servidor Node/Vite de produção. O gate também exige Docker para o spike S3: inicia Floci descartável com dados em tmpfs e porta aleatória só no loopback, e remove apenas seu próprio container ao terminar. Nenhum endpoint, bucket ou credencial de outro ambiente é utilizado. O registry pode ser acessado para obter a imagem fixada.
 
-`make test-s3` roda apenas os contratos de armazenamento/URLs/CORS em MinIO real e Chromium, com SDK S3 oficial usado só no harness Node de desenvolvimento. Não existe adaptador S3 do produto ainda. A imagem `cgr.dev/chainguard/minio` está fixada por digest em `web/scripts/s3-spike.test.mjs`; disponibilidade para pull precisa ser verificada no ambiente de CI. O teste falha, não pula a integração, se Docker/imagem/Chromium não estiverem disponíveis.
+`make test-s3` roda apenas os contratos de armazenamento/URLs/CORS em Floci e Chromium, com SDK S3 oficial usado só no harness Node de desenvolvimento. Não existe adaptador S3 do produto ainda. A imagem multiarch Floci 2.3.0 está fixada pelo digest OCI `sha256:e0b292df4dc9559b7b1bf4f51bdda4bb8e269276236438cd03cae661260ea8a9` em `web/scripts/s3-spike.test.mjs`. O teste habilita validação SigV4 e autorização S3 com as credenciais fictícias documentadas `test/test`, configura CORS no bucket e falha — sem pular ou substituir por mock — se Docker/imagem/Chromium não estiverem disponíveis.
 
 O mesmo spike usa SQLite em arquivo temporário via `node:sqlite` somente no harness para exercitar claims, fencing, rollback e pins remotos. Um processo filho exclusivo é interrompido por SIGKILL após PUT e antes do commit, verificando recuperação por readback sem staging. Isso não muda SQLx/Rust do servidor nem implementa o fluxo autenticado de uploads. Estado temporário fica em `.test-data` e é removido pelo teste.
 
@@ -99,7 +102,7 @@ O fake MCP testa TTL de metadata controlado por `Cache-Control` e capped em 300s
 
 A fixture separa também trust review administrativo do snapshot e do consentimento: sem review não há code; metadata/nome/domínio continuam dados não confiáveis, callback loopback recebe warning e projetos não são escolhidos implicitamente. É só um view-model de teste, sem UI/admin real ou encoder HTML.
 
-Endpoints públicos deste spike: `/health/live` e `/health/ready`. Readiness retorna apenas `ready`/`not_ready`; não expõe caminhos, versão, usuários ou conteúdo.
+Endpoints públicos de saúde deste spike: `/health/live` e `/health/ready`. Readiness retorna apenas `ready`/`not_ready`; não expõe caminhos, versão, usuários ou conteúdo. As três rotas browser opt-in acima exigem cookie válido e continuam sem login/issuance HTTP.
 
 ## Plano e distribuição
 

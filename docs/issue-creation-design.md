@@ -1,0 +1,36 @@
+# Issue creation — feature design
+
+**Status:** The original SQLite issue model/internal creation slice used `RUSTUP_TOOLCHAIN=1.99.0 PUXIRI_E2E_PORT=18495 make check`. Follow-up slices add [session-bound idempotent creation and durable outbox envelopes](idempotent-issue-creation-design.md), browser creation/client/form, and the separate [versioned due-date operation](issue-due-date-design.md). Browser creation and due-date editing have local verification in the canonical development plan. MCP creation and outbox workers remain pending.
+
+**Requirements:** `docs/development-plan.md`, sections 2, 4–6, and 11.
+
+## Actor and journey
+
+- An active project manager or member may create an issue in a project they explicitly belong to. A viewer, organization role without project membership, installation-admin role, inactive account, and archived project do not grant issue mutation.
+- The application boundary will supply the actor ID from a validated session. `IssueStore::create` is an internal use case, not an HTTP authorization boundary; it reloads current account, organization, project membership, and archive state inside `BEGIN IMMEDIATE` before authorization.
+- The caller supplies a required title, optional Markdown description, and optional assignee. Type/status are not client-selectable in this command: the use case resolves the active `task` and `todo` system keys, independent of localized/editable names. Priority starts at `none`; this command leaves due date unset, and the separate versioned field command edits or clears it.
+- Optional assignee must be an active project manager/member, including a guest with explicit project membership. Viewers and non-members cannot be assigned.
+- Under the same write transaction, allocate the next project issue number, choose a rank in the `todo` column, insert the issue and append content-free history and (since migration0031) a versioned outbox envelope. SessionIssueWriter additionally persists an idempotency receipt before commit. A failure at any step leaves no partial issue/event/receipt or consumed counter value.
+
+## Data and invariants
+
+- Issue IDs use UUIDv7. The public identifier is `<immutable project key>-<issue number>`; issue ID, project, number, and creator authorship are immutable. Allocation begins at 1 and increments transactionally. A uniqueness constraint prevents duplicate numbers, and no delete/purge path rewinds the counter.
+- Composite foreign keys bind issue type, status, and assignee to the same project. The creator is retained as authorship. The database checks title length (1–240 Unicode scalar values), Markdown description byte size (at most 64 KiB), priority enum, positive issue number/version, and integer rank.
+- Initial rank uses a 1,024-point stride after the current maximum rank in the active target column. This leaves integer gaps for later inserts; rebalance/move behavior remains a separate slice.
+- History records operation, actor, issue, project, and UTC time only. It has no free-text diff/payload, so create history cannot duplicate the title or description.
+- This creation command does not accept a due date. The separate due-date field command uses the configured IANA organization timezone to derive the overdue projection; any future creation-time date input must follow the same civil-date contract.
+
+## Transaction and module ownership
+
+- `src/access.rs` loads current authorization context and evaluates `MutateIssues`.
+- `src/issues/` owns title/description validation, default type/status resolution, assignment eligibility, number/rank allocation, issue persistence, and its initial history event.
+- SQLite migrations own same-project FKs, uniqueness, limits, and the project counter.
+- The caller owns HTTP/MCP serialization, cookie/session/CSRF and response codes. SessionIssueWriter owns token-derived transactional authentication/idempotency; the older ID-based API remains for trusted internal callers. Transaction-owned helpers never commit: callers must propagate errors and roll back rather than commit a partially failed command. No outbox consumer or automation is installed; issue creation does not yet trigger notifications/automations.
+
+## Deliberately deferred
+
+Slice235 implements the internal operation/principal-scoped receipt contract and atomic versioned outbox persistence; no expiry/reuse policy is enabled. MCP creation, production retention/quotas/key rotation, outbox job leases/delivery, arbitrary type/status selection, assignment editing, reopen/trash/purge, comments, FTS and real-time delivery remain separate. Due-date editing is a separate browser command and is not part of issue creation. Before triggering automations, implement durable claim/retry/recovery and current relevance/access checks, not an in-memory event queue.
+
+## Verification plan
+
+Use real file-backed SQLite migrations. Cover allowed/denied actors, active/default catalog resolution by system key after renaming, Unicode title and byte-bounded description, assignment role/state, atomic counter/rank under concurrent creates, same-project FKs, archived/default-schema failure, and rollback when history persistence fails. No provider, client account, or live external system is required.
