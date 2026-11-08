@@ -133,6 +133,18 @@ export function validateIssueSearchDueDate(value: unknown): string {
   return date(value);
 }
 
+export function validateIssueSearchIssueType(value: unknown): string {
+  return uuid(value);
+}
+
+export function validateIssueSearchStatus(value: unknown): string {
+  return uuid(value);
+}
+
+export function validateIssueSearchAssignee(value: unknown): string {
+  return uuid(value);
+}
+
 function text(value: unknown): string {
   if (typeof value !== 'string') {
     return invalid();
@@ -363,6 +375,9 @@ export function parseIssueSearchPage(
   after?: string,
   priorityFilter?: IssuePriority,
   dueDateFilter?: string,
+  issueTypeFilter?: string,
+  statusFilter?: string,
+  assigneeFilter?: string,
 ): IssuePage<IssueSummary> {
   uuid(projectId);
   if (query !== undefined) {
@@ -374,10 +389,22 @@ export function parseIssueSearchPage(
   if (dueDateFilter !== undefined) {
     date(dueDateFilter);
   }
+  if (issueTypeFilter !== undefined) {
+    uuid(issueTypeFilter);
+  }
+  if (statusFilter !== undefined) {
+    uuid(statusFilter);
+  }
+  if (assigneeFilter !== undefined) {
+    uuid(assigneeFilter);
+  }
   if (
     query === undefined &&
     priorityFilter === undefined &&
-    dueDateFilter === undefined
+    dueDateFilter === undefined &&
+    issueTypeFilter === undefined &&
+    statusFilter === undefined &&
+    assigneeFilter === undefined
   ) {
     return invalid();
   }
@@ -394,6 +421,21 @@ export function parseIssueSearchPage(
       return invalid();
     }
     if (dueDateFilter !== undefined && issue.due_date !== dueDateFilter) {
+      return invalid();
+    }
+    if (
+      issueTypeFilter !== undefined &&
+      issue.issue_type_id !== issueTypeFilter
+    ) {
+      return invalid();
+    }
+    if (statusFilter !== undefined && issue.status_id !== statusFilter) {
+      return invalid();
+    }
+    if (
+      assigneeFilter !== undefined &&
+      issue.assignee_user_id !== assigneeFilter
+    ) {
       return invalid();
     }
     const boundary = {
@@ -578,6 +620,9 @@ export async function getIssueSearchPage(
   signal: AbortSignal,
   priorityFilter?: IssuePriority,
   dueDateFilter?: string,
+  issueTypeFilter?: string,
+  statusFilter?: string,
+  assigneeFilter?: string,
 ): Promise<IssuePage<IssueSummary>> {
   uuid(projectId);
   const search = queryText === undefined ? undefined : searchText(queryText);
@@ -585,10 +630,19 @@ export async function getIssueSearchPage(
     priorityFilter === undefined ? undefined : priority(priorityFilter);
   const selectedDueDate =
     dueDateFilter === undefined ? undefined : date(dueDateFilter);
+  const selectedIssueType =
+    issueTypeFilter === undefined ? undefined : uuid(issueTypeFilter);
+  const selectedStatus =
+    statusFilter === undefined ? undefined : uuid(statusFilter);
+  const selectedAssignee =
+    assigneeFilter === undefined ? undefined : uuid(assigneeFilter);
   if (
     search === undefined &&
     selectedPriority === undefined &&
-    selectedDueDate === undefined
+    selectedDueDate === undefined &&
+    selectedIssueType === undefined &&
+    selectedStatus === undefined &&
+    selectedAssignee === undefined
   ) {
     return invalid();
   }
@@ -602,6 +656,15 @@ export async function getIssueSearchPage(
   }
   if (selectedDueDate !== undefined) {
     encoded.set('due_date', selectedDueDate);
+  }
+  if (selectedIssueType !== undefined) {
+    encoded.set('issue_type_id', selectedIssueType);
+  }
+  if (selectedStatus !== undefined) {
+    encoded.set('status_id', selectedStatus);
+  }
+  if (selectedAssignee !== undefined) {
+    encoded.set('assignee_user_id', selectedAssignee);
   }
   encoded.set('page_size', String(pageSize));
   if (options.cursor !== undefined) {
@@ -617,6 +680,9 @@ export async function getIssueSearchPage(
     options.cursor,
     selectedPriority,
     selectedDueDate,
+    selectedIssueType,
+    selectedStatus,
+    selectedAssignee,
   );
 }
 

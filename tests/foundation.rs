@@ -66,7 +66,7 @@ async fn all_four_connections_have_durable_sqlite_settings_and_real_migrations()
         .fetch_one(database.pool())
         .await
         .unwrap();
-    assert_eq!(rows, 41);
+    assert_eq!(rows, 44);
     let pending: Option<String> =
         sqlx::query_scalar("SELECT setup_completed_at FROM installation_state WHERE singleton = 1")
             .fetch_one(database.pool())

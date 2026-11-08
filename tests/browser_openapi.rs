@@ -177,6 +177,24 @@ fn generated_contract_has_unique_operations_resolved_refs_and_only_implemented_r
         .unwrap();
     assert_eq!(due_date_parameter["required"], false);
     assert_eq!(due_date_parameter["schema"]["format"], "date");
+    let issue_type_parameter = search_parameters
+        .iter()
+        .find(|parameter| parameter["name"] == "issue_type_id")
+        .unwrap();
+    assert_eq!(issue_type_parameter["required"], false);
+    assert_eq!(issue_type_parameter["schema"]["format"], "uuid");
+    let status_parameter = search_parameters
+        .iter()
+        .find(|parameter| parameter["name"] == "status_id")
+        .unwrap();
+    assert_eq!(status_parameter["required"], false);
+    assert_eq!(status_parameter["schema"]["format"], "uuid");
+    let assignee_parameter = search_parameters
+        .iter()
+        .find(|parameter| parameter["name"] == "assignee_user_id")
+        .unwrap();
+    assert_eq!(assignee_parameter["required"], false);
+    assert_eq!(assignee_parameter["schema"]["format"], "uuid");
     assert!(
         search["description"]
             .as_str()

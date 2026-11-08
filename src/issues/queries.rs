@@ -28,6 +28,12 @@ pub enum IssueReadError {
     InvalidSearchCursor,
     #[error("issue-search query is invalid")]
     InvalidSearchQuery,
+    #[error("issue-search type filter is invalid")]
+    InvalidIssueType,
+    #[error("issue-search status filter is invalid")]
+    InvalidIssueStatus,
+    #[error("issue-search assignee filter is invalid")]
+    InvalidIssueAssignee,
     #[error("issue-list page size must be between 1 and 100")]
     InvalidPageSize,
     #[error("persisted issue or history data is invalid")]

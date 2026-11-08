@@ -61,6 +61,9 @@ pub struct IssueSearchOptions<'a> {
     pub query: Option<&'a str>,
     pub priority: Option<IssuePriority>,
     pub due_date: Option<NaiveDate>,
+    pub issue_type_id: Option<&'a str>,
+    pub status_id: Option<&'a str>,
+    pub assignee_user_id: Option<&'a str>,
     pub after: Option<&'a IssueSearchCursor>,
     pub page_size: u16,
 }
@@ -87,6 +90,9 @@ impl IssueStore {
                 query: Some(query),
                 priority: None,
                 due_date: None,
+                issue_type_id: None,
+                status_id: None,
+                assignee_user_id: None,
                 after,
                 page_size,
             },
@@ -123,8 +129,39 @@ impl IssueStore {
         if !(1..=MAX_PAGE_SIZE).contains(&options.page_size) {
             return Err(IssueReadError::InvalidPageSize);
         }
-        let terms = search_terms(options.query, options.priority, options.due_date)?;
+        let terms = search_terms(
+            options.query,
+            options.priority,
+            options.due_date,
+            options.issue_type_id,
+            options.status_id,
+            options.assignee_user_id,
+        )?;
+        if let Some(issue_type_id) = options.issue_type_id
+            && !canonical_id(issue_type_id)
+        {
+            return Err(IssueReadError::InvalidIssueType);
+        }
+        if let Some(status_id) = options.status_id
+            && !canonical_id(status_id)
+        {
+            return Err(IssueReadError::InvalidIssueStatus);
+        }
+        if let Some(assignee_user_id) = options.assignee_user_id
+            && !canonical_id(assignee_user_id)
+        {
+            return Err(IssueReadError::InvalidIssueAssignee);
+        }
         authorize_project_read(transaction, actor_user_id, project_id).await?;
+        if let Some(issue_type_id) = options.issue_type_id {
+            require_project_issue_type(transaction, project_id, issue_type_id).await?;
+        }
+        if let Some(status_id) = options.status_id {
+            require_project_status(transaction, project_id, status_id).await?;
+        }
+        if let Some(assignee_user_id) = options.assignee_user_id {
+            require_project_assignee(transaction, project_id, assignee_user_id).await?;
+        }
         let local_today = organization_local_today(transaction, now).await?;
 
         let key_shaped = options.query.is_some_and(is_issue_key_shaped);
@@ -192,6 +229,21 @@ impl IssueStore {
                 .push(" AND issues.due_date = ")
                 .push_bind(due_date.format("%Y-%m-%d").to_string());
         }
+        if let Some(issue_type_id) = options.issue_type_id {
+            statement
+                .push(" AND issues.issue_type_id = ")
+                .push_bind(issue_type_id);
+        }
+        if let Some(status_id) = options.status_id {
+            statement
+                .push(" AND issues.status_id = ")
+                .push_bind(status_id);
+        }
+        if let Some(assignee_user_id) = options.assignee_user_id {
+            statement
+                .push(" AND issues.assignee_user_id = ")
+                .push_bind(assignee_user_id);
+        }
         statement
             .push(" AND (issues.issue_number, issues.id) > (")
             .push_bind(options.after.map(|cursor| cursor.issue_number).unwrap_or(0))
@@ -223,13 +275,21 @@ impl IssueStore {
     }
 }
 
-fn search_terms(
-    query: Option<&str>,
+fn search_terms<'a>(
+    query: Option<&'a str>,
     priority: Option<IssuePriority>,
     due_date: Option<NaiveDate>,
-) -> Result<Option<Vec<&str>>, IssueReadError> {
+    issue_type_id: Option<&str>,
+    status_id: Option<&str>,
+    assignee_user_id: Option<&str>,
+) -> Result<Option<Vec<&'a str>>, IssueReadError> {
     let Some(query) = query else {
-        if priority.is_none() && due_date.is_none() {
+        if priority.is_none()
+            && due_date.is_none()
+            && issue_type_id.is_none()
+            && status_id.is_none()
+            && assignee_user_id.is_none()
+        {
             return Err(IssueReadError::InvalidSearchQuery);
         }
         return Ok(None);
@@ -297,6 +357,65 @@ fn canonical_positive_i64(value: &str) -> Option<i64> {
         return None;
     }
     value.parse::<i64>().ok().filter(|number| *number > 0)
+}
+
+fn canonical_id(value: &str) -> bool {
+    uuid::Uuid::parse_str(value)
+        .map(|id| id.to_string() == value)
+        .unwrap_or(false)
+}
+
+async fn require_project_issue_type(
+    transaction: &mut Transaction<'_, Sqlite>,
+    project_id: &str,
+    issue_type_id: &str,
+) -> Result<(), IssueReadError> {
+    let exists: i64 = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM issue_types WHERE project_id = ? AND id = ?)",
+    )
+    .bind(project_id)
+    .bind(issue_type_id)
+    .fetch_one(&mut **transaction)
+    .await?;
+    if exists != 1 {
+        return Err(IssueReadError::InvalidIssueType);
+    }
+    Ok(())
+}
+
+async fn require_project_assignee(
+    transaction: &mut Transaction<'_, Sqlite>,
+    project_id: &str,
+    assignee_user_id: &str,
+) -> Result<(), IssueReadError> {
+    let exists: i64 = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM project_members WHERE project_id = ? AND user_id = ?)",
+    )
+    .bind(project_id)
+    .bind(assignee_user_id)
+    .fetch_one(&mut **transaction)
+    .await?;
+    if exists != 1 {
+        return Err(IssueReadError::InvalidIssueAssignee);
+    }
+    Ok(())
+}
+
+async fn require_project_status(
+    transaction: &mut Transaction<'_, Sqlite>,
+    project_id: &str,
+    status_id: &str,
+) -> Result<(), IssueReadError> {
+    let exists: i64 =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM statuses WHERE project_id = ? AND id = ?)")
+            .bind(project_id)
+            .bind(status_id)
+            .fetch_one(&mut **transaction)
+            .await?;
+    if exists != 1 {
+        return Err(IssueReadError::InvalidIssueStatus);
+    }
+    Ok(())
 }
 
 fn priority_name(priority: IssuePriority) -> &'static str {

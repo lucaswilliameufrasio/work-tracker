@@ -28,6 +28,9 @@ struct SearchQuery {
     q: Option<String>,
     priority: Option<String>,
     due_date: Option<String>,
+    issue_type_id: Option<String>,
+    status_id: Option<String>,
+    assignee_user_id: Option<String>,
     cursor: Option<String>,
     page_size: Option<u16>,
 }
@@ -52,7 +55,28 @@ async fn search(
         .0;
     let priority = query.priority.as_deref().map(parse_priority).transpose()?;
     let due_date = query.due_date.as_deref().map(parse_due_date).transpose()?;
-    if query.q.is_none() && priority.is_none() && due_date.is_none() {
+    let issue_type_id = query
+        .issue_type_id
+        .as_deref()
+        .map(parse_issue_type_id)
+        .transpose()?;
+    let status_id = query
+        .status_id
+        .as_deref()
+        .map(parse_status_id)
+        .transpose()?;
+    let assignee_user_id = query
+        .assignee_user_id
+        .as_deref()
+        .map(parse_assignee_user_id)
+        .transpose()?;
+    if query.q.is_none()
+        && priority.is_none()
+        && due_date.is_none()
+        && issue_type_id.is_none()
+        && status_id.is_none()
+        && assignee_user_id.is_none()
+    {
         return Err(ApiError::invalid_field(
             "q",
             "Provide a search query or at least one structured filter",
@@ -73,6 +97,9 @@ async fn search(
                 query: query.q.as_deref(),
                 priority,
                 due_date,
+                issue_type_id,
+                status_id,
+                assignee_user_id,
                 after: cursor.as_ref(),
                 page_size: query.page_size.unwrap_or(50),
             },
@@ -103,6 +130,36 @@ fn parse_priority(value: &str) -> Result<IssuePriority, ApiError> {
             "Use none, low, medium, high, or urgent",
         )),
     }
+}
+
+fn parse_issue_type_id(value: &str) -> Result<&str, ApiError> {
+    if !canonical_uuid(value) {
+        return Err(ApiError::invalid_field(
+            "issue_type_id",
+            "Use a canonical UUID of an issue type in this project",
+        ));
+    }
+    Ok(value)
+}
+
+fn parse_assignee_user_id(value: &str) -> Result<&str, ApiError> {
+    if !canonical_uuid(value) {
+        return Err(ApiError::invalid_field(
+            "assignee_user_id",
+            "Use a canonical UUID of a project member",
+        ));
+    }
+    Ok(value)
+}
+
+fn parse_status_id(value: &str) -> Result<&str, ApiError> {
+    if !canonical_uuid(value) {
+        return Err(ApiError::invalid_field(
+            "status_id",
+            "Use a canonical UUID of a status in this project",
+        ));
+    }
+    Ok(value)
 }
 
 fn parse_due_date(value: &str) -> Result<NaiveDate, ApiError> {

@@ -15,7 +15,10 @@ import {
   IssueRequestError,
   validateIssueSearchCursor,
   validateIssueSearchDueDate,
+  validateIssueSearchIssueType,
   validateIssueSearchPriority,
+  validateIssueSearchAssignee,
+  validateIssueSearchStatus,
   validateIssueSearchText,
   type IssueDetail,
   type IssueHistoryEvent,
@@ -24,11 +27,14 @@ import {
   type IssueSummary,
 } from './issues.ts';
 import {
+  getIssueTypePage,
   getIssueTypeRecord,
+  getStatusPage,
   getStatusRecord,
   type ProjectIssueType,
   type ProjectStatus,
 } from './project-catalogs.ts';
+import { getProjectMember, listProjectMembers } from './project-members.ts';
 import {
   boardBoundary,
   boardStatusBoundary,
@@ -48,6 +54,9 @@ export type WorkRoute =
       query?: string;
       priority?: IssuePriority;
       dueDate?: string;
+      issueTypeId?: string;
+      statusId?: string;
+      assigneeUserId?: string;
       cursor?: string;
     }
   | {
@@ -59,6 +68,9 @@ export type WorkRoute =
       fromSearchQuery?: string;
       fromSearchPriority?: IssuePriority;
       fromSearchDueDate?: string;
+      fromSearchIssueTypeId?: string;
+      fromSearchStatusId?: string;
+      fromSearchAssigneeUserId?: string;
       fromSearchCursor?: string;
     }
   | { type: 'invalid' };
@@ -145,7 +157,16 @@ export function workRoute(path: string, search: string): WorkRoute {
     if (parts.length === 4) {
       if (
         [...values.keys()].some(
-          (key) => !['cursor', 'q', 'priority', 'due_date'].includes(key),
+          (key) =>
+            ![
+              'cursor',
+              'q',
+              'priority',
+              'due_date',
+              'issue_type_id',
+              'status_id',
+              'assignee_user_id',
+            ].includes(key),
         )
       ) {
         return { type: 'invalid' };
@@ -154,6 +175,9 @@ export function workRoute(path: string, search: string): WorkRoute {
       const search = values.get('q');
       const searchPriority = values.get('priority');
       const searchDueDate = values.get('due_date');
+      const searchIssueType = values.get('issue_type_id');
+      const searchStatus = values.get('status_id');
+      const searchAssignee = values.get('assignee_user_id');
       const parsedPriority =
         searchPriority === undefined
           ? undefined
@@ -162,10 +186,25 @@ export function workRoute(path: string, search: string): WorkRoute {
         searchDueDate === undefined
           ? undefined
           : validateIssueSearchDueDate(searchDueDate);
+      const parsedIssueType =
+        searchIssueType === undefined
+          ? undefined
+          : validateIssueSearchIssueType(searchIssueType);
+      const parsedStatus =
+        searchStatus === undefined
+          ? undefined
+          : validateIssueSearchStatus(searchStatus);
+      const parsedAssignee =
+        searchAssignee === undefined
+          ? undefined
+          : validateIssueSearchAssignee(searchAssignee);
       if (
         search !== undefined ||
         searchPriority !== undefined ||
-        searchDueDate !== undefined
+        searchDueDate !== undefined ||
+        searchIssueType !== undefined ||
+        searchStatus !== undefined ||
+        searchAssignee !== undefined
       ) {
         if (search !== undefined) {
           validateIssueSearchText(search);
@@ -179,6 +218,13 @@ export function workRoute(path: string, search: string): WorkRoute {
           ...(search === undefined ? {} : { query: search }),
           ...(parsedPriority === undefined ? {} : { priority: parsedPriority }),
           ...(parsedDueDate === undefined ? {} : { dueDate: parsedDueDate }),
+          ...(parsedIssueType === undefined
+            ? {}
+            : { issueTypeId: parsedIssueType }),
+          ...(parsedStatus === undefined ? {} : { statusId: parsedStatus }),
+          ...(parsedAssignee === undefined
+            ? {}
+            : { assigneeUserId: parsedAssignee }),
           ...(cursor === undefined ? {} : { cursor }),
         };
       }
@@ -206,6 +252,9 @@ export function workRoute(path: string, search: string): WorkRoute {
             'from_cursor',
             'from_priority',
             'from_due_date',
+            'from_issue_type_id',
+            'from_status_id',
+            'from_assignee_user_id',
           ].includes(key),
       )
     ) {
@@ -228,11 +277,17 @@ export function workRoute(path: string, search: string): WorkRoute {
     const fromSearchQuery = values.get('from_q');
     const fromSearchPriority = values.get('from_priority');
     const fromSearchDueDate = values.get('from_due_date');
+    const fromSearchIssueType = values.get('from_issue_type_id');
+    const fromSearchStatus = values.get('from_status_id');
+    const fromSearchAssignee = values.get('from_assignee_user_id');
     const fromSearchCursor = values.get('from_cursor');
     const hasSearchContext =
       fromSearchQuery !== undefined ||
       fromSearchPriority !== undefined ||
-      fromSearchDueDate !== undefined;
+      fromSearchDueDate !== undefined ||
+      fromSearchIssueType !== undefined ||
+      fromSearchStatus !== undefined ||
+      fromSearchAssignee !== undefined;
     if (
       (from !== undefined && hasSearchContext) ||
       (fromSearchCursor !== undefined && !hasSearchContext)
@@ -247,6 +302,15 @@ export function workRoute(path: string, search: string): WorkRoute {
     }
     if (fromSearchDueDate !== undefined) {
       validateIssueSearchDueDate(fromSearchDueDate);
+    }
+    if (fromSearchIssueType !== undefined) {
+      validateIssueSearchIssueType(fromSearchIssueType);
+    }
+    if (fromSearchStatus !== undefined) {
+      validateIssueSearchStatus(fromSearchStatus);
+    }
+    if (fromSearchAssignee !== undefined) {
+      validateIssueSearchAssignee(fromSearchAssignee);
     }
     if (fromSearchCursor !== undefined) {
       validateIssueSearchCursor(fromSearchCursor);
@@ -266,12 +330,33 @@ export function workRoute(path: string, search: string): WorkRoute {
       ...(fromSearchDueDate === undefined
         ? {}
         : { fromSearchDueDate: validateIssueSearchDueDate(fromSearchDueDate) }),
+      ...(fromSearchIssueType === undefined
+        ? {}
+        : {
+            fromSearchIssueTypeId:
+              validateIssueSearchIssueType(fromSearchIssueType),
+          }),
+      ...(fromSearchStatus === undefined
+        ? {}
+        : { fromSearchStatusId: validateIssueSearchStatus(fromSearchStatus) }),
+      ...(fromSearchAssignee === undefined
+        ? {}
+        : {
+            fromSearchAssigneeUserId:
+              validateIssueSearchAssignee(fromSearchAssignee),
+          }),
       ...(fromSearchCursor === undefined ? {} : { fromSearchCursor }),
     };
   } catch {
     return { type: 'invalid' };
   }
 }
+
+export type AssigneeChoice = {
+  user_id: string;
+  display_name: string;
+  eligible: boolean;
+};
 
 export type WorkData =
   | {
@@ -284,14 +369,32 @@ export type WorkData =
     }
   | { type: 'column'; status: ProjectStatus; page: BoardPage }
   | { type: 'projects'; page: IssuePage<AccessibleProject> }
-  | { type: 'issues'; page: IssuePage<IssueSummary> }
+  | {
+      type: 'issues';
+      page: IssuePage<IssueSummary>;
+      issueTypes: ProjectIssueType[];
+      issueTypesIncomplete: boolean;
+      statuses: ProjectStatus[];
+      statusesIncomplete: boolean;
+      assignees: AssigneeChoice[];
+      assigneesIncomplete: boolean;
+    }
   | {
       type: 'search';
       projectId: string;
       query?: string;
       priority?: IssuePriority;
       dueDate?: string;
+      issueTypeId?: string;
+      statusId?: string;
+      assigneeUserId?: string;
       page: IssuePage<IssueSummary>;
+      issueTypes: ProjectIssueType[];
+      issueTypesIncomplete: boolean;
+      statuses: ProjectStatus[];
+      statusesIncomplete: boolean;
+      assignees: AssigneeChoice[];
+      assigneesIncomplete: boolean;
     }
   | {
       type: 'detail';
@@ -302,6 +405,131 @@ export type WorkData =
       actorId: string;
       canUpdateIssueFields: boolean;
     };
+
+async function loadIssueTypeChoices(
+  projectId: string,
+  selectedId: string | undefined,
+  signal: AbortSignal,
+): Promise<{ types: ProjectIssueType[]; incomplete: boolean }> {
+  const page = await getIssueTypePage(
+    projectId,
+    { page_size: 100, include_archived: false },
+    signal,
+  );
+  const types = [...page.data];
+  let selectedIsListed = selectedId === undefined;
+  if (selectedId !== undefined) {
+    for (const issueType of types) {
+      if (issueType.id === selectedId) {
+        selectedIsListed = true;
+        break;
+      }
+    }
+  }
+  if (selectedId !== undefined && !selectedIsListed) {
+    types.push(await getIssueTypeRecord(projectId, selectedId, signal));
+  }
+  return { types, incomplete: page.has_more };
+}
+
+async function loadStatusChoices(
+  projectId: string,
+  selectedId: string | undefined,
+  signal: AbortSignal,
+): Promise<{ statuses: ProjectStatus[]; incomplete: boolean }> {
+  const page = await getStatusPage(
+    projectId,
+    { page_size: 100, include_archived: false },
+    signal,
+  );
+  const statuses = [...page.data];
+  let selectedIsListed = selectedId === undefined;
+  if (selectedId !== undefined) {
+    for (const status of statuses) {
+      if (status.id === selectedId) {
+        selectedIsListed = true;
+        break;
+      }
+    }
+  }
+  if (selectedId !== undefined && !selectedIsListed) {
+    statuses.push(await getStatusRecord(projectId, selectedId, signal));
+  }
+  return { statuses, incomplete: page.has_more };
+}
+
+async function loadAssigneeChoices(
+  projectId: string,
+  selectedId: string | undefined,
+  signal: AbortSignal,
+): Promise<{ assignees: AssigneeChoice[]; incomplete: boolean }> {
+  const session = await getCurrentSession(signal);
+  const page = await listProjectMembers(
+    projectId,
+    session.user_id,
+    { page_size: 100 },
+    signal,
+  );
+  const assignees: AssigneeChoice[] = [];
+  for (const member of page.data) {
+    if (member.can_be_assigned) {
+      assignees.push({
+        user_id: member.user_id,
+        display_name: member.display_name,
+        eligible: true,
+      });
+    }
+  }
+  if (selectedId !== undefined) {
+    let selected: AssigneeChoice | undefined;
+    for (const member of page.data) {
+      if (member.user_id === selectedId) {
+        selected = {
+          user_id: member.user_id,
+          display_name: member.display_name,
+          eligible: member.can_be_assigned,
+        };
+        break;
+      }
+    }
+    if (selected === undefined) {
+      try {
+        const member = await getProjectMember(
+          projectId,
+          selectedId,
+          session.user_id,
+          signal,
+        );
+        selected = {
+          user_id: member.user_id,
+          display_name: member.display_name,
+          eligible: member.can_be_assigned,
+        };
+      } catch (error) {
+        if (error instanceof IssueRequestError && error.status === 404) {
+          selected = {
+            user_id: selectedId,
+            display_name: 'Cadastro indisponível',
+            eligible: false,
+          };
+        } else {
+          throw error;
+        }
+      }
+    }
+    let listed = false;
+    for (const assignee of assignees) {
+      if (assignee.user_id === selected.user_id) {
+        listed = true;
+        break;
+      }
+    }
+    if (!listed) {
+      assignees.push(selected);
+    }
+  }
+  return { assignees, incomplete: page.has_more };
+}
 
 export async function loadWork(
   route: WorkRoute,
@@ -358,30 +586,64 @@ export async function loadWork(
     };
   }
   if (route.type === 'issues') {
-    return {
-      type: 'issues',
-      page: await getIssuePage(
+    const [page, issueTypes, statuses, assignees] = await Promise.all([
+      getIssuePage(
         route.projectId,
         { cursor: route.cursor, page_size: 20 },
         signal,
       ),
+      loadIssueTypeChoices(route.projectId, undefined, signal),
+      loadStatusChoices(route.projectId, undefined, signal),
+      loadAssigneeChoices(route.projectId, undefined, signal),
+    ]);
+    return {
+      type: 'issues',
+      page,
+      issueTypes: issueTypes.types,
+      issueTypesIncomplete: issueTypes.incomplete,
+      statuses: statuses.statuses,
+      statusesIncomplete: statuses.incomplete,
+      assignees: assignees.assignees,
+      assigneesIncomplete: assignees.incomplete,
     };
   }
   if (route.type === 'search') {
-    return {
-      type: 'search',
-      projectId: route.projectId,
-      ...(route.query === undefined ? {} : { query: route.query }),
-      page: await getIssueSearchPage(
+    const [page, issueTypes, statuses, assignees] = await Promise.all([
+      getIssueSearchPage(
         route.projectId,
         route.query,
         { cursor: route.cursor, page_size: 20 },
         signal,
         route.priority,
         route.dueDate,
+        route.issueTypeId,
+        route.statusId,
+        route.assigneeUserId,
       ),
+      loadIssueTypeChoices(route.projectId, route.issueTypeId, signal),
+      loadStatusChoices(route.projectId, route.statusId, signal),
+      loadAssigneeChoices(route.projectId, route.assigneeUserId, signal),
+    ]);
+    return {
+      type: 'search',
+      projectId: route.projectId,
+      ...(route.query === undefined ? {} : { query: route.query }),
+      page,
+      issueTypes: issueTypes.types,
+      issueTypesIncomplete: issueTypes.incomplete,
+      statuses: statuses.statuses,
+      statusesIncomplete: statuses.incomplete,
+      assignees: assignees.assignees,
+      assigneesIncomplete: assignees.incomplete,
       ...(route.priority === undefined ? {} : { priority: route.priority }),
       ...(route.dueDate === undefined ? {} : { dueDate: route.dueDate }),
+      ...(route.issueTypeId === undefined
+        ? {}
+        : { issueTypeId: route.issueTypeId }),
+      ...(route.statusId === undefined ? {} : { statusId: route.statusId }),
+      ...(route.assigneeUserId === undefined
+        ? {}
+        : { assigneeUserId: route.assigneeUserId }),
     };
   }
   if (route.type === 'invalid') {

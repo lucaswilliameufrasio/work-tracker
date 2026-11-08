@@ -1,8 +1,11 @@
-import { expect, test } from '@playwright/test';
+import { expect, test, type Route } from '@playwright/test';
 
 const projectId = '019a0000-0000-7000-8000-000000000001';
 const statusId = '019a0000-0000-7000-8000-000000000002';
 const issueTypeId = '019a0000-0000-7000-8000-000000000003';
+const archivedTypeId = '019a0000-0000-7000-8000-000000000099';
+const archivedStatusId = '019a0000-0000-7000-8000-000000000097';
+const ineligibleAssigneeId = '019a0000-0000-7000-8000-000000000096';
 const actorId = '019a0000-0000-7000-8000-000000000004';
 const query = 'two literal terms';
 const dueDate = '2026-10-30';
@@ -32,6 +35,25 @@ function issue(number: number): Record<string, unknown> {
   };
 }
 
+async function fulfillMemberCatalog(route: Route): Promise<void> {
+  const url = new URL(route.request().url());
+  expect(url.searchParams.get('page_size')).toBe('100');
+  expect(url.searchParams.get('cursor')).toBeNull();
+  await route.fulfill({
+    json: {
+      data: [
+        {
+          user_id: actorId,
+          display_name: 'Ada',
+          role: 'member',
+          can_be_assigned: true,
+        },
+      ],
+      has_more: false,
+    },
+  });
+}
+
 function boundary(number: number): string {
   return btoa(`${number}/${issueId(number)}`)
     .replaceAll('+', '-')
@@ -54,6 +76,41 @@ test('project search paginates, opens detail, and returns to the same query and 
     const request = route.request();
     const url = new URL(request.url());
     const path = url.pathname;
+    if (path === `/api/v1/projects/${projectId}/statuses`) {
+      expect(url.searchParams.get('include_archived')).toBe('false');
+      expect(url.searchParams.get('page_size')).toBe('100');
+      expect(url.searchParams.get('cursor')).toBeNull();
+      await route.fulfill({
+        json: {
+          data: [
+            {
+              id: statusId,
+              project_id: projectId,
+              name: 'A fazer',
+              category: 'backlog',
+              position: '1',
+              board_visible: true,
+            },
+          ],
+          has_more: false,
+        },
+      });
+      return;
+    }
+    if (path === `/api/v1/projects/${projectId}/members`) {
+      await fulfillMemberCatalog(route);
+      return;
+    }
+    if (path === `/api/v1/projects/${projectId}/issue-types`) {
+      expect(url.searchParams.get('include_archived')).toBe('false');
+      await route.fulfill({
+        json: {
+          data: [{ id: issueTypeId, project_id: projectId, name: 'Tarefa' }],
+          has_more: false,
+        },
+      });
+      return;
+    }
     if (path === `/api/v1/projects/${projectId}/issues/search`) {
       searchRequests.push(url.search);
       expect(url.searchParams.get('q')).toBe(query);
@@ -226,6 +283,40 @@ test('submits a project search using only a selected priority', async ({
   await page.route('**/api/v1/**', async (route) => {
     const url = new URL(route.request().url());
     const path = url.pathname;
+    if (path === `/api/v1/projects/${projectId}/statuses`) {
+      expect(url.searchParams.get('include_archived')).toBe('false');
+      expect(url.searchParams.get('page_size')).toBe('100');
+      expect(url.searchParams.get('cursor')).toBeNull();
+      await route.fulfill({
+        json: {
+          data: [
+            {
+              id: statusId,
+              project_id: projectId,
+              name: 'A fazer',
+              category: 'backlog',
+              position: '1',
+              board_visible: true,
+            },
+          ],
+          has_more: false,
+        },
+      });
+      return;
+    }
+    if (path === `/api/v1/projects/${projectId}/members`) {
+      await fulfillMemberCatalog(route);
+      return;
+    }
+    if (path === `/api/v1/projects/${projectId}/issue-types`) {
+      await route.fulfill({
+        json: {
+          data: [{ id: issueTypeId, project_id: projectId, name: 'Tarefa' }],
+          has_more: false,
+        },
+      });
+      return;
+    }
     if (path === `/api/v1/projects/${projectId}/issues`) {
       await route.fulfill({ json: { data: [], has_more: false } });
       return;
@@ -272,6 +363,40 @@ test('submits a project search using only an exact due date', async ({
   await page.route('**/api/v1/**', async (route) => {
     const url = new URL(route.request().url());
     const path = url.pathname;
+    if (path === `/api/v1/projects/${projectId}/statuses`) {
+      expect(url.searchParams.get('include_archived')).toBe('false');
+      expect(url.searchParams.get('page_size')).toBe('100');
+      expect(url.searchParams.get('cursor')).toBeNull();
+      await route.fulfill({
+        json: {
+          data: [
+            {
+              id: statusId,
+              project_id: projectId,
+              name: 'A fazer',
+              category: 'backlog',
+              position: '1',
+              board_visible: true,
+            },
+          ],
+          has_more: false,
+        },
+      });
+      return;
+    }
+    if (path === `/api/v1/projects/${projectId}/members`) {
+      await fulfillMemberCatalog(route);
+      return;
+    }
+    if (path === `/api/v1/projects/${projectId}/issue-types`) {
+      await route.fulfill({
+        json: {
+          data: [{ id: issueTypeId, project_id: projectId, name: 'Tarefa' }],
+          has_more: false,
+        },
+      });
+      return;
+    }
     if (path === `/api/v1/projects/${projectId}/issues`) {
       await route.fulfill({ json: { data: [], has_more: false } });
       return;
@@ -312,4 +437,349 @@ test('submits a project search using only an exact due date', async ({
     page.getByRole('link', { name: 'DEV-1 Search result 1' }),
   ).toBeVisible();
   expect(searchRequests).toHaveLength(1);
+});
+
+test('filters by an active issue type and keeps only the active archived filter visible', async ({
+  page,
+}) => {
+  const searchRequests: string[] = [];
+  await page.route('**/api/v1/**', async (route) => {
+    const url = new URL(route.request().url());
+    const path = url.pathname;
+    if (path === `/api/v1/projects/${projectId}/statuses`) {
+      expect(url.searchParams.get('include_archived')).toBe('false');
+      expect(url.searchParams.get('page_size')).toBe('100');
+      expect(url.searchParams.get('cursor')).toBeNull();
+      await route.fulfill({
+        json: {
+          data: [
+            {
+              id: statusId,
+              project_id: projectId,
+              name: 'A fazer',
+              category: 'backlog',
+              position: '1',
+              board_visible: true,
+            },
+          ],
+          has_more: false,
+        },
+      });
+      return;
+    }
+    if (path === `/api/v1/projects/${projectId}/members`) {
+      await fulfillMemberCatalog(route);
+      return;
+    }
+    if (path === `/api/v1/projects/${projectId}/issue-types`) {
+      expect(url.searchParams.get('include_archived')).toBe('false');
+      await route.fulfill({
+        json: {
+          data: [{ id: issueTypeId, project_id: projectId, name: 'Tarefa' }],
+          has_more: false,
+        },
+      });
+      return;
+    }
+    if (
+      path === `/api/v1/projects/${projectId}/issue-types/${archivedTypeId}`
+    ) {
+      await route.fulfill({
+        json: {
+          id: archivedTypeId,
+          project_id: projectId,
+          name: 'Defeito',
+          archived_at: '2026-10-24T00:00:00.000000000Z',
+        },
+      });
+      return;
+    }
+    if (path === `/api/v1/projects/${projectId}/issues`) {
+      await route.fulfill({ json: { data: [], has_more: false } });
+      return;
+    }
+    if (path === `/api/v1/projects/${projectId}/issues/search`) {
+      searchRequests.push(url.search);
+      const selectedType = url.searchParams.get('issue_type_id');
+      expect(
+        selectedType === issueTypeId || selectedType === archivedTypeId,
+      ).toBe(true);
+      const result = issue(1);
+      if (selectedType === archivedTypeId) {
+        result.issue_type_id = archivedTypeId;
+      }
+      await route.fulfill({
+        json: { data: [result], has_more: false },
+      });
+      return;
+    }
+    if (path === '/api/v1/auth/session') {
+      await route.fulfill({
+        json: {
+          user_id: actorId,
+          session_id: actorId,
+          csrf_token: 'A'.repeat(43),
+        },
+      });
+      return;
+    }
+    await route.fulfill({ status: 404, json: { code: 'not_found' } });
+  });
+
+  await page.goto(`/projects/${projectId}/issues`);
+  const typeFilter = page.getByLabel('Filtrar por tipo');
+  await expect(typeFilter.getByRole('option', { name: 'Tarefa' })).toHaveCount(
+    1,
+  );
+  await expect(
+    typeFilter.getByRole('option', { name: /arquivado/ }),
+  ).toHaveCount(0);
+  await typeFilter.selectOption(issueTypeId);
+  await page.getByRole('button', { name: 'Buscar' }).click();
+  await expect(page).toHaveURL(
+    `/projects/${projectId}/issues?issue_type_id=${issueTypeId}`,
+  );
+  await expect(
+    page.getByRole('link', { name: /DEV-1 Search result 1/ }),
+  ).toBeVisible();
+
+  await page.goto(
+    `/projects/${projectId}/issues?issue_type_id=${archivedTypeId}`,
+  );
+  await expect(typeFilter).toHaveValue(archivedTypeId);
+  await expect(
+    typeFilter.getByRole('option', { name: 'Defeito (arquivado)' }),
+  ).toHaveCount(1);
+  await expect(typeFilter.getByRole('option', { name: 'Tarefa' })).toHaveCount(
+    1,
+  );
+  expect(searchRequests).toHaveLength(2);
+});
+
+test('filters by an active status and keeps only the active archived filter visible', async ({
+  page,
+}) => {
+  const searchRequests: string[] = [];
+  await page.route('**/api/v1/**', async (route) => {
+    const url = new URL(route.request().url());
+    const path = url.pathname;
+    if (path === `/api/v1/projects/${projectId}/statuses`) {
+      expect(url.searchParams.get('include_archived')).toBe('false');
+      expect(url.searchParams.get('cursor')).toBeNull();
+      await route.fulfill({
+        json: {
+          data: [
+            {
+              id: statusId,
+              project_id: projectId,
+              name: 'A fazer',
+              category: 'backlog',
+              position: '1',
+              board_visible: true,
+            },
+          ],
+          has_more: false,
+        },
+      });
+      return;
+    }
+    if (path === `/api/v1/projects/${projectId}/statuses/${archivedStatusId}`) {
+      await route.fulfill({
+        json: {
+          id: archivedStatusId,
+          project_id: projectId,
+          name: 'Em progresso',
+          category: 'active',
+          position: '2',
+          board_visible: true,
+          archived_at: '2026-10-24T00:00:00.000000000Z',
+        },
+      });
+      return;
+    }
+    if (path === `/api/v1/projects/${projectId}/members`) {
+      await fulfillMemberCatalog(route);
+      return;
+    }
+    if (path === `/api/v1/projects/${projectId}/issue-types`) {
+      await route.fulfill({
+        json: {
+          data: [{ id: issueTypeId, project_id: projectId, name: 'Tarefa' }],
+          has_more: false,
+        },
+      });
+      return;
+    }
+    if (path === `/api/v1/projects/${projectId}/issues`) {
+      await route.fulfill({ json: { data: [], has_more: false } });
+      return;
+    }
+    if (path === `/api/v1/projects/${projectId}/issues/search`) {
+      searchRequests.push(url.search);
+      const selectedStatus = url.searchParams.get('status_id');
+      expect(
+        selectedStatus === statusId || selectedStatus === archivedStatusId,
+      ).toBe(true);
+      const result = issue(1);
+      if (selectedStatus === archivedStatusId) {
+        result.status_id = archivedStatusId;
+      }
+      await route.fulfill({
+        json: { data: [result], has_more: false },
+      });
+      return;
+    }
+    if (path === '/api/v1/auth/session') {
+      await route.fulfill({
+        json: {
+          user_id: actorId,
+          session_id: actorId,
+          csrf_token: 'A'.repeat(43),
+        },
+      });
+      return;
+    }
+    await route.fulfill({ status: 404, json: { code: 'not_found' } });
+  });
+
+  await page.goto(`/projects/${projectId}/issues`);
+  const statusFilter = page.getByLabel('Filtrar por status');
+  await expect(
+    statusFilter.getByRole('option', { name: 'A fazer' }),
+  ).toHaveCount(1);
+  await expect(
+    statusFilter.getByRole('option', { name: /arquivado/ }),
+  ).toHaveCount(0);
+  await statusFilter.selectOption(statusId);
+  await page.getByRole('button', { name: 'Buscar' }).click();
+  await expect(page).toHaveURL(
+    `/projects/${projectId}/issues?status_id=${statusId}`,
+  );
+  await expect(
+    page.getByRole('link', { name: /DEV-1 Search result 1/ }),
+  ).toBeVisible();
+
+  await page.goto(
+    `/projects/${projectId}/issues?status_id=${archivedStatusId}`,
+  );
+  await expect(statusFilter).toHaveValue(archivedStatusId);
+  await expect(
+    statusFilter.getByRole('option', { name: 'Em progresso (arquivado)' }),
+  ).toHaveCount(1);
+  await expect(
+    statusFilter.getByRole('option', { name: 'A fazer' }),
+  ).toHaveCount(1);
+  expect(searchRequests).toHaveLength(2);
+});
+
+test('filters by an eligible assignee and keeps only the active ineligible filter visible', async ({
+  page,
+}) => {
+  const searchRequests: string[] = [];
+  await page.route('**/api/v1/**', async (route) => {
+    const url = new URL(route.request().url());
+    const path = url.pathname;
+    if (path === `/api/v1/projects/${projectId}/statuses`) {
+      await route.fulfill({
+        json: {
+          data: [
+            {
+              id: statusId,
+              project_id: projectId,
+              name: 'A fazer',
+              category: 'backlog',
+              position: '1',
+              board_visible: true,
+            },
+          ],
+          has_more: false,
+        },
+      });
+      return;
+    }
+    if (
+      path === `/api/v1/projects/${projectId}/members/${ineligibleAssigneeId}`
+    ) {
+      await route.fulfill({
+        json: {
+          user_id: ineligibleAssigneeId,
+          display_name: 'Nara',
+          role: 'viewer',
+          can_be_assigned: false,
+        },
+      });
+      return;
+    }
+    if (path === `/api/v1/projects/${projectId}/members`) {
+      await fulfillMemberCatalog(route);
+      return;
+    }
+    if (path === `/api/v1/projects/${projectId}/issue-types`) {
+      await route.fulfill({
+        json: {
+          data: [{ id: issueTypeId, project_id: projectId, name: 'Tarefa' }],
+          has_more: false,
+        },
+      });
+      return;
+    }
+    if (path === `/api/v1/projects/${projectId}/issues`) {
+      await route.fulfill({ json: { data: [], has_more: false } });
+      return;
+    }
+    if (path === `/api/v1/projects/${projectId}/issues/search`) {
+      searchRequests.push(url.search);
+      const selectedAssignee = url.searchParams.get('assignee_user_id');
+      expect(
+        selectedAssignee === actorId ||
+          selectedAssignee === ineligibleAssigneeId,
+      ).toBe(true);
+      const result = issue(1);
+      result.assignee_user_id = selectedAssignee;
+      await route.fulfill({
+        json: { data: [result], has_more: false },
+      });
+      return;
+    }
+    if (path === '/api/v1/auth/session') {
+      await route.fulfill({
+        json: {
+          user_id: actorId,
+          session_id: actorId,
+          csrf_token: 'A'.repeat(43),
+        },
+      });
+      return;
+    }
+    await route.fulfill({ status: 404, json: { code: 'not_found' } });
+  });
+
+  await page.goto(`/projects/${projectId}/issues`);
+  const assigneeFilter = page.getByLabel('Filtrar por responsável');
+  await expect(assigneeFilter.getByRole('option', { name: 'Ada' })).toHaveCount(
+    1,
+  );
+  await expect(
+    assigneeFilter.getByRole('option', { name: /não elegível/ }),
+  ).toHaveCount(0);
+  await assigneeFilter.selectOption(actorId);
+  await page.getByRole('button', { name: 'Buscar' }).click();
+  await expect(page).toHaveURL(
+    `/projects/${projectId}/issues?assignee_user_id=${actorId}`,
+  );
+  await expect(
+    page.getByRole('link', { name: /DEV-1 Search result 1/ }),
+  ).toBeVisible();
+
+  await page.goto(
+    `/projects/${projectId}/issues?assignee_user_id=${ineligibleAssigneeId}`,
+  );
+  await expect(assigneeFilter).toHaveValue(ineligibleAssigneeId);
+  await expect(
+    assigneeFilter.getByRole('option', { name: 'Nara (não elegível)' }),
+  ).toHaveCount(1);
+  await expect(assigneeFilter.getByRole('option', { name: 'Ada' })).toHaveCount(
+    1,
+  );
+  expect(searchRequests).toHaveLength(2);
 });

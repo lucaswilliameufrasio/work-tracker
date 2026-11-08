@@ -2,6 +2,38 @@ import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { expect } from '@playwright/test';
 
+// The issues/search selector reads one member page of 100. The detail editor
+// reads one roster page of 50. This journey must not continue either page.
+function boundedMemberCatalog(url) {
+  const pageSize = url.searchParams.get('page_size');
+  return (
+    url.pathname.endsWith('/members') &&
+    url.searchParams.get('cursor') === null &&
+    [...url.searchParams.keys()].length === 1 &&
+    (pageSize === '100' || pageSize === '50')
+  );
+}
+
+function boundedWorkCatalog(address) {
+  const url = new URL(address);
+  return (
+    /\/(statuses|issue-types)\/[0-9a-f-]{36}$/.test(url.pathname) ||
+    (url.pathname.endsWith('/statuses') &&
+      url.searchParams.get('page_size') === '4' &&
+      url.searchParams.get('include_archived') === 'false') ||
+    (url.pathname.endsWith('/issue-types') &&
+      url.searchParams.get('page_size') === '100' &&
+      url.searchParams.get('include_archived') === 'false' &&
+      url.searchParams.get('cursor') === null) ||
+    (url.pathname.endsWith('/statuses') &&
+      url.searchParams.get('page_size') === '100' &&
+      url.searchParams.get('include_archived') === 'false' &&
+      url.searchParams.get('cursor') === null) ||
+    boundedMemberCatalog(url) ||
+    /\/members\/[0-9a-f-]{36}$/.test(url.pathname)
+  );
+}
+
 // Called only by the synthetic loopback HTTPS/SQLite fixture.
 export async function readWork(context, origin, fixture, artifacts) {
   const page = await context.newPage();
@@ -9,7 +41,11 @@ export async function readWork(context, origin, fixture, artifacts) {
   const metadataRequests = [];
   page.on('request', (request) => {
     const path = new URL(request.url()).pathname;
-    if (path.includes('/statuses') || path.includes('/issue-types')) {
+    if (
+      path.includes('/statuses') ||
+      path.includes('/issue-types') ||
+      path.includes('/members')
+    ) {
       metadataRequests.push(request.url());
     }
   });
@@ -268,14 +304,42 @@ export async function readWork(context, origin, fixture, artifacts) {
   );
   assert.deepEqual(errors, []);
   assert.ok(metadataRequests.length > 0);
+  const unexpectedMetadata = [];
+  for (const address of metadataRequests) {
+    if (!boundedWorkCatalog(address)) {
+      unexpectedMetadata.push(address);
+    }
+  }
+  assert.deepEqual(unexpectedMetadata, []);
   assert.ok(
-    metadataRequests.every((address) => {
+    metadataRequests.some((address) => {
       const url = new URL(address);
       return (
-        /\/(statuses|issue-types)\/[0-9a-f-]{36}$/.test(url.pathname) ||
-        (url.pathname.endsWith('/statuses') &&
-          url.searchParams.get('page_size') === '4' &&
-          url.searchParams.get('include_archived') === 'false')
+        url.pathname.endsWith('/issue-types') &&
+        url.searchParams.get('page_size') === '100' &&
+        url.searchParams.get('include_archived') === 'false' &&
+        url.searchParams.get('cursor') === null
+      );
+    }),
+  );
+  assert.ok(
+    metadataRequests.some((address) => {
+      const url = new URL(address);
+      return (
+        url.pathname.endsWith('/statuses') &&
+        url.searchParams.get('page_size') === '100' &&
+        url.searchParams.get('include_archived') === 'false' &&
+        url.searchParams.get('cursor') === null
+      );
+    }),
+  );
+  assert.ok(
+    metadataRequests.some((address) => {
+      const url = new URL(address);
+      return (
+        url.pathname.endsWith('/members') &&
+        url.searchParams.get('page_size') === '100' &&
+        url.searchParams.get('cursor') === null
       );
     }),
   );

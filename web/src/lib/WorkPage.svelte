@@ -31,7 +31,10 @@
     type IssueDueDateTarget,
   } from './issue-due-date.ts';
   import {
+    validateIssueSearchAssignee,
     validateIssueSearchDueDate,
+    validateIssueSearchIssueType,
+    validateIssueSearchStatus,
     validateIssueSearchText,
     type IssuePriority,
   } from './issues.ts';
@@ -102,6 +105,15 @@
   let selectedSearchDueDate = $state(
     route.type === 'search' ? (route.dueDate ?? '') : '',
   );
+  let selectedSearchIssueType = $state(
+    route.type === 'search' ? (route.issueTypeId ?? '') : '',
+  );
+  let selectedSearchStatus = $state(
+    route.type === 'search' ? (route.statusId ?? '') : '',
+  );
+  let selectedSearchAssignee = $state(
+    route.type === 'search' ? (route.assigneeUserId ?? '') : '',
+  );
   let selectedPriority = $state<IssuePriority>('none');
   let selectedDueDate = $state('');
   let selectedPriorityIssueId = '';
@@ -170,6 +182,9 @@
     query: string | undefined,
     priority: IssuePriority | undefined,
     dueDate: string | undefined,
+    issueTypeId: string | undefined,
+    statusId: string | undefined,
+    assigneeUserId: string | undefined,
     cursor?: string,
   ): string {
     const params = new SvelteURLSearchParams();
@@ -183,6 +198,18 @@
     if (dueDate !== undefined) {
       validateIssueSearchDueDate(dueDate);
       params.set('due_date', dueDate);
+    }
+    if (issueTypeId !== undefined) {
+      validateIssueSearchIssueType(issueTypeId);
+      params.set('issue_type_id', issueTypeId);
+    }
+    if (statusId !== undefined) {
+      validateIssueSearchStatus(statusId);
+      params.set('status_id', statusId);
+    }
+    if (assigneeUserId !== undefined) {
+      validateIssueSearchAssignee(assigneeUserId);
+      params.set('assignee_user_id', assigneeUserId);
     }
     if (cursor !== undefined) {
       params.set('cursor', cursor);
@@ -209,16 +236,25 @@
             query: route.query,
             priority: route.priority,
             dueDate: route.dueDate,
+            issueTypeId: route.issueTypeId,
+            statusId: route.statusId,
+            assigneeUserId: route.assigneeUserId,
             cursor: route.cursor,
           }
         : route.type === 'detail' &&
             (route.fromSearchQuery !== undefined ||
               route.fromSearchPriority !== undefined ||
-              route.fromSearchDueDate !== undefined)
+              route.fromSearchDueDate !== undefined ||
+              route.fromSearchIssueTypeId !== undefined ||
+              route.fromSearchStatusId !== undefined ||
+              route.fromSearchAssigneeUserId !== undefined)
           ? {
               query: route.fromSearchQuery,
               priority: route.fromSearchPriority,
               dueDate: route.fromSearchDueDate,
+              issueTypeId: route.fromSearchIssueTypeId,
+              statusId: route.fromSearchStatusId,
+              assigneeUserId: route.fromSearchAssigneeUserId,
               cursor: route.fromSearchCursor,
             }
           : undefined;
@@ -237,6 +273,15 @@
       }
       if (fromSearch.dueDate !== undefined) {
         query.set('from_due_date', fromSearch.dueDate);
+      }
+      if (fromSearch.issueTypeId !== undefined) {
+        query.set('from_issue_type_id', fromSearch.issueTypeId);
+      }
+      if (fromSearch.statusId !== undefined) {
+        query.set('from_status_id', fromSearch.statusId);
+      }
+      if (fromSearch.assigneeUserId !== undefined) {
+        query.set('from_assignee_user_id', fromSearch.assigneeUserId);
       }
       if (fromSearch.cursor !== undefined) {
         query.set('from_cursor', fromSearch.cursor);
@@ -653,9 +698,14 @@
   </h1>
   <p class="intro">
     Leitura em desenvolvimento. Busque por termos no título/descrição ou por
-    chave exata; prioridade e data de prazo exata também podem ser filtradas.
-    Datas não representam intervalos, atrasos ou issues sem prazo. Outros
-    filtros estruturados e atualização ao vivo ainda não estão disponíveis.
+    chave exata; prioridade, data de prazo exata, tipo, status e responsável
+    também podem ser filtrados. Datas não representam intervalos, atrasos ou
+    issues sem prazo. O filtro de responsável não seleciona issues sem
+    responsável. Tipo ou status arquivado permanece filtrável, mas só aparece no
+    seletor quando já é o filtro ativo. Quem perdeu a elegibilidade de
+    atribuição continua filtrável e só aparece no seletor quando já é o filtro
+    ativo. Outros filtros estruturados e atualização ao vivo ainda não estão
+    disponíveis.
   </p>
   <nav class="work-links" aria-label="Navegação do trabalho">
     <a href="/projects">Meus projetos</a>
@@ -669,18 +719,27 @@
     {#if route.type === 'detail'}<a
         href={route.fromSearchQuery === undefined &&
         route.fromSearchPriority === undefined &&
-        route.fromSearchDueDate === undefined
+        route.fromSearchDueDate === undefined &&
+        route.fromSearchIssueTypeId === undefined &&
+        route.fromSearchStatusId === undefined &&
+        route.fromSearchAssigneeUserId === undefined
           ? listLink(route.projectId, route.from)
           : searchLink(
               route.projectId,
               route.fromSearchQuery,
               route.fromSearchPriority,
               route.fromSearchDueDate,
+              route.fromSearchIssueTypeId,
+              route.fromSearchStatusId,
+              route.fromSearchAssigneeUserId,
               route.fromSearchCursor,
             )}
         >{route.fromSearchQuery === undefined &&
         route.fromSearchPriority === undefined &&
-        route.fromSearchDueDate === undefined
+        route.fromSearchDueDate === undefined &&
+        route.fromSearchIssueTypeId === undefined &&
+        route.fromSearchStatusId === undefined &&
+        route.fromSearchAssigneeUserId === undefined
           ? 'Voltar à lista de issues'
           : 'Voltar aos resultados da busca'}</a
       >{/if}
@@ -788,6 +847,66 @@
             name={selectedSearchDueDate === '' ? undefined : 'due_date'}
             bind:value={selectedSearchDueDate}
           />
+          <label for="issue-search-type">Filtrar por tipo</label>
+          <select
+            id="issue-search-type"
+            name={selectedSearchIssueType === '' ? undefined : 'issue_type_id'}
+            bind:value={selectedSearchIssueType}
+          >
+            <option value="">Todos os tipos</option>
+            {#each data.issueTypes as issueType (issueType.id)}
+              <option value={issueType.id}>
+                {issueType.archived_at === undefined
+                  ? issueType.name
+                  : `${issueType.name} (arquivado)`}
+              </option>
+            {/each}
+          </select>
+          {#if data.issueTypesIncomplete}<p class="hint">
+              O seletor mostra os 100 primeiros tipos ativos. Um tipo arquivado
+              continua filtrável quando já está no endereço.
+            </p>{/if}
+          <label for="issue-search-status">Filtrar por status</label>
+          <select
+            id="issue-search-status"
+            name={selectedSearchStatus === '' ? undefined : 'status_id'}
+            bind:value={selectedSearchStatus}
+          >
+            <option value="">Todos os status</option>
+            {#each data.statuses as status (status.id)}
+              <option value={status.id}>
+                {status.archived_at === undefined
+                  ? status.name
+                  : `${status.name} (arquivado)`}
+              </option>
+            {/each}
+          </select>
+          {#if data.statusesIncomplete}<p class="hint">
+              O seletor mostra os 100 primeiros status ativos. Um status
+              arquivado continua filtrável quando já está no endereço.
+            </p>{/if}
+          <label for="issue-search-assignee">Filtrar por responsável</label>
+          <select
+            id="issue-search-assignee"
+            name={selectedSearchAssignee === ''
+              ? undefined
+              : 'assignee_user_id'}
+            bind:value={selectedSearchAssignee}
+          >
+            <option value="">Todos os responsáveis</option>
+            {#each data.assignees as assignee (assignee.user_id)}
+              <option value={assignee.user_id}>
+                {assignee.eligible
+                  ? assignee.display_name
+                  : `${assignee.display_name} (não elegível)`}
+              </option>
+            {/each}
+          </select>
+          {#if data.assigneesIncomplete}<p class="hint">
+              O seletor mostra os responsáveis elegíveis entre os 100 primeiros
+              participantes. Quem perdeu a elegibilidade continua filtrável
+              quando já está no endereço.
+            </p>{/if}
           {#if data.type === 'search'}<a href={listLink(data.projectId)}
               >Limpar busca e filtros</a
             >{/if}
@@ -825,6 +944,9 @@
                 data.query,
                 data.priority,
                 data.dueDate,
+                data.issueTypeId,
+                data.statusId,
+                data.assigneeUserId,
                 data.page.next_cursor,
               )}>Próxima página de resultados</a
             >{:else if route.type === 'issues'}<a

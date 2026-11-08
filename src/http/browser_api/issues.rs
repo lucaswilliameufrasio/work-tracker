@@ -258,6 +258,22 @@ fn read_error(error: SessionIssueReadError) -> ApiError {
                 "Use 1–16 terms, up to 256 characters and 512 UTF-8 bytes, without controls",
             )
         }
+        SessionIssueReadError::Issue(IssueReadError::InvalidIssueType) => ApiError::invalid_field(
+            "issue_type_id",
+            "Use a canonical UUID of an issue type in this project",
+        ),
+        SessionIssueReadError::Issue(IssueReadError::InvalidIssueStatus) => {
+            ApiError::invalid_field(
+                "status_id",
+                "Use a canonical UUID of a status in this project",
+            )
+        }
+        SessionIssueReadError::Issue(IssueReadError::InvalidIssueAssignee) => {
+            ApiError::invalid_field(
+                "assignee_user_id",
+                "Use a canonical UUID of a project member",
+            )
+        }
         _ => ApiError::new(
             StatusCode::INTERNAL_SERVER_ERROR,
             "unexpected_error",
