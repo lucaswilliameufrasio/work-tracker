@@ -1,6 +1,6 @@
 # Puxiri — Plano completo de desenvolvimento
 
-Versão: 1.1 · Atualizado: 14/10/2026 · Status: decisões de produto consolidadas; validação técnica pela Fase 0 ainda pendente.
+Versão: 1.1 · Atualizado: 07/11/2026 · Status: decisões de produto consolidadas; validação técnica pela Fase 0 ainda pendente.
 
 Esta revisão incorpora as decisões da sessão de definição de produto nas seções correspondentes, substituindo regras anteriores incompatíveis. Recursos acordados não estão implementados nem tecnicamente comprovados apenas por constarem neste plano.
 
@@ -2874,7 +2874,7 @@ Migration0041 adiciona índice parcial `(project_id, due_date, trashed_at, issue
 
 OpenAPI, parser de query, cliente TypeScript e formulário nativo de data foram estendidos. A URL preserva o prazo ao paginar e ao abrir/retornar do detalhe; limpar os filtros volta à lista comum. O parser reutiliza a validação canônica de data existente. Testes cobrem datas vazia, impossível, não canônica e duplicada; somente prazo e combinação AND (incluindo chave), mismatch e issue sem prazo/lixeira excluídas; paginação keyset e uso do índice por `EXPLAIN QUERY PLAN`; validação de resposta/rota/OpenAPI e jornadas Chromium desktop/mobile-dark com retorno ao mesmo cursor.
 
-Gate completo passou com `TMPDIR=/home/lucaseufrasio/projects/work-tracker/.test-data/quality-slice255-due-date-verified DOCKER_CONTEXT=rootless PUXIRI_E2E_PORT=18766 mise exec -- make check`: web build/Prettier/ESLint/Svelte sem erros ou warnings/Vitest151; Rust fmt/Clippy `-D warnings`/`cargo test --all-targets --locked` (75 unitários e todas as integrações)/build; Playwright20; Floci/S3 local38/38, sem skips. Log `.test-data/quality-slice255-due-date-verified/make-check.log`. A alteração textual posterior foi validada separadamente. Nenhum provider real, smoke externo ou deploy. Esta fatia entrega somente filtro por data exata; outros filtros, intervalos/atraso/ausência de prazo, facetas, busca entre projetos e vistas salvas continuam pendentes; plano global permanece aberto.
+Gate completo passou com `TMPDIR=/home/lucaseufrasio/projects/work-tracker/.test-data/quality-slice255-due-date-verified DOCKER_CONTEXT=rootless PUXIRI_E2E_PORT=18766 mise exec -- make check`: web build/Prettier/ESLint/Svelte sem erros ou warnings/Vitest151; Rust fmt/Clippy `-D warnings`/`cargo test --all-targets --locked` (75 unitários e todas as integrações)/build; Playwright20; Floci/S3 local38/38, sem skips. Log `.test-data/quality-slice255-due-date-verified/make-check.log`. A alteração textual posterior foi validada separadamente. A fatia foi commitada como `63a9fe5` (`feat(issues): add exact due-date filter to project search`) e enviada a `origin/feature/record-tmpfs-enospc-probe`; working tree limpo. Nenhum provider real, smoke externo ou deploy. Próxima fatia local selecionada, ainda não iniciada: filtro por tipo de issue; a semântica de tipos arquivados no filtro e no seletor deverá ser definida antes da implementação. Outros filtros, intervalos/atraso/ausência de prazo, facetas, busca entre projetos e vistas salvas continuam pendentes; plano global permanece aberto.
 
 #### Evidências da ducentésima quinquagésima fatia — roster de projeto e atribuição versionada
 
