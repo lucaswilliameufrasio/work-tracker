@@ -280,6 +280,10 @@ fn json_admission(method: &axum::http::Method, path: &str) -> JsonAdmission {
                 &axum::http::Method::POST,
                 "/api/v1/admin/replication/restore"
             )
+            | (
+                &axum::http::Method::POST,
+                "/api/v1/admin/replication/remote/restore"
+            )
     ) {
         return JsonAdmission::Authenticated;
     }

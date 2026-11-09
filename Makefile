@@ -1,4 +1,4 @@
-.PHONY: install web build serve check format test-s3 measure-snapshot measure-resources
+.PHONY: install web build serve check format test-s3 test-replication-s3 measure-snapshot measure-resources
 
 install:
 	cd web && pnpm install --frozen-lockfile
@@ -30,6 +30,10 @@ check: web
 
 test-s3:
 	cd web && pnpm test:s3
+
+# Disposable loopback RustFS; does not certify AWS S3, R2, or other providers.
+test-replication-s3:
+	./scripts/test-replication-s3.sh
 
 # Synthetic local evidence; does not assert product capacity or latency targets.
 measure-snapshot: web

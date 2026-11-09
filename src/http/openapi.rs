@@ -537,7 +537,7 @@ pub fn browser_document() -> Value {
         "info": {
             "title": "Puxiri opt-in browser API — partial development contract",
             "version": env!("CARGO_PKG_VERSION"),
-            "description": "Disabled (404) unless --browser-origin/PUXIRI_BROWSER_ORIGIN is configured. Listener does not terminate TLS; use an explicitly configured HTTPS origin. Cookie-only authentication; no Authorization fallback. Host must match; Origin and Fetch Metadata are checked when supplied, and mutations require exact Origin plus CSRF. Unknown/duplicate query fields are rejected. Every operation has no-store responses; HEAD has no body, including errors. Browser admission: eight in-flight requests per router instance, no admission queue; path+query <=2048 bytes, headers <=64 entries/16384 aggregate name+value bytes. Matched anonymous setup and login requests, project creation, POST issue creation/move, PUT issue text/priority/due-date/assignee, POST issue comments, PUT comment edits, POST invitations, PUT the mail sender, PUT the MCP grant, POST installation ban and unban, and POST replication capture and restore accept uncompressed JSON up to 524288 bytes. Setup and login start do not require a session. Project and issue mutations require the session cookie and CSRF. Every other operation requires an empty body. Bodies must finish within one second before any handler/transaction starts. There is no whole-handler timeout or per-client requests-per-second limit. Setup issues the initial administrator session. Later Muira login issues a Puxiri session only when that person already belongs to the installation or consumes a pending invitation; otherwise the callback stores no account and sends the browser to the invitation-required page. A Muira token never authorizes a Puxiri call. MCP accepts that token only as identity after an invitation and a separate Puxiri grant. Installation administration is separate from organization ownership. This contract issues no API token. Do not store bearer tokens in localStorage. This document is generated locally, not served as an endpoint or a production readiness claim."
+            "description": "Disabled (404) unless --browser-origin/PUXIRI_BROWSER_ORIGIN is configured. Listener does not terminate TLS; use an explicitly configured HTTPS origin. Cookie-only authentication; no Authorization fallback. Host must match; Origin and Fetch Metadata are checked when supplied, and mutations require exact Origin plus CSRF. Unknown/duplicate query fields are rejected. Every operation has no-store responses; HEAD has no body, including errors. Browser admission: eight in-flight requests per router instance, no admission queue; path+query <=2048 bytes, headers <=64 entries/16384 aggregate name+value bytes. Matched anonymous setup and login requests, project creation, POST issue creation/move, PUT issue text/priority/due-date/assignee, POST issue comments, PUT comment edits, POST invitations, PUT the mail sender, PUT the MCP grant, POST installation ban and unban, and POST replication capture, local restore, and remote restore accept uncompressed JSON up to 524288 bytes. Setup and login start do not require a session. Project and issue mutations require the session cookie and CSRF. Every other operation requires an empty body. Bodies must finish within one second before any handler/transaction starts. There is no whole-handler timeout or per-client requests-per-second limit. Setup issues the initial administrator session. Later Muira login issues a Puxiri session only when that person already belongs to the installation or consumes a pending invitation; otherwise the callback stores no account and sends the browser to the invitation-required page. A Muira token never authorizes a Puxiri call. MCP accepts that token only as identity after an invitation and a separate Puxiri grant. Installation administration is separate from organization ownership. This contract issues no API token. Do not store bearer tokens in localStorage. This document is generated locally, not served as an endpoint or a production readiness claim."
         },
         "security": [{"browserSession": []}],
         "paths": paths,
@@ -588,8 +588,15 @@ pub fn browser_document() -> Value {
         schemas.insert(
             "ReplicationStatus".into(),
             object(
-                json!({"snapshot": {"type": "boolean"}, "txid": {"type": "string", "minLength": 1}, "same_filesystem": {"type": "boolean"}}),
+                json!({"snapshot": {"type": "boolean"}, "txid": {"type": "string", "minLength": 1}, "same_filesystem": {"type": "boolean"}, "remote": {"$ref": "#/components/schemas/ReplicationRemoteStatus"}}),
                 &["snapshot", "same_filesystem"],
+            ),
+        );
+        schemas.insert(
+            "ReplicationRemoteStatus".into(),
+            object(
+                json!({"location": {"type": "string", "minLength": 1, "description": "s3://bucket/prefix. Never includes credentials."}, "acknowledged_txid": {"type": "string", "minLength": 1, "description": "Newest point this destination acknowledged after confirmed uploads. Omitted until the first successful upload."}}),
+                &["location"],
             ),
         );
         schemas.insert(
@@ -640,8 +647,15 @@ pub fn browser_document() -> Value {
         schemas.insert(
             "ReplicationCapture".into(),
             object(
-                json!({"txid": {"type": "string", "minLength": 1}, "transactions": {"type": "integer", "minimum": 0}, "wal_frames": {"type": "integer", "minimum": 0}, "snapshot_created": {"type": "boolean"}}),
+                json!({"txid": {"type": "string", "minLength": 1}, "transactions": {"type": "integer", "minimum": 0}, "wal_frames": {"type": "integer", "minimum": 0}, "snapshot_created": {"type": "boolean"}, "remote": {"$ref": "#/components/schemas/ReplicationRemoteSync"}}),
                 &["txid", "transactions", "wal_frames", "snapshot_created"],
+            ),
+        );
+        schemas.insert(
+            "ReplicationRemoteSync".into(),
+            object(
+                json!({"status": {"type": "string", "enum": ["synced", "failed"]}, "txid": {"type": "string", "minLength": 1}, "objects_confirmed": {"type": "integer", "minimum": 0}, "bytes_confirmed": {"type": "integer", "minimum": 0}}),
+                &["status"],
             ),
         );
         schemas.insert(
@@ -841,7 +855,7 @@ fn insert_admin_contract(paths: &mut serde_json::Map<String, Value>) {
         json!({"name": "person_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}}),
     ];
     person_parameters.extend(headers.clone());
-    let overview = "Installation administration only. Organization ownership is not enough. Shows the login source when setup has chosen one, whether an email sender is configured, and the local replication watermark. A replica on the same filesystem does not survive loss of that disk. This response has no issue text.";
+    let overview = "Installation administration only. Organization ownership is not enough. Shows the login source when setup has chosen one, whether an email sender is configured, the local replication watermark, and, when an S3-compatible destination is configured, its location and the newest point it acknowledged. A local replica on the same filesystem does not survive loss of that disk. This response has no issue text.";
     paths.insert(
         "/api/v1/admin/overview".into(),
         json!({
@@ -901,7 +915,7 @@ fn insert_admin_contract(paths: &mut serde_json::Map<String, Value>) {
             "captureReplication",
             "ReplicationCapture",
             "200",
-            "Create the initial snapshot when needed, then capture the WAL through sqlite-replication while application writers are paused. The repository is local. This does not upload to object storage and does not promise survival of power loss or of the disk that holds the repository.",
+            "Create the initial snapshot when needed, then capture the WAL through sqlite-replication while application writers are paused. When an S3-compatible destination is configured, the local chain is then uploaded with immutable keys and remote is reported; an upload failure leaves the local capture in place and the next capture retries it. Only a local RustFS endpoint has been tested; AWS S3, R2, and other providers are not certified. This does not promise survival of power loss.",
             object(json!({}), &[]),
             headers.clone(),
         )}),
@@ -913,6 +927,17 @@ fn insert_admin_contract(paths: &mut serde_json::Map<String, Value>) {
             "ReplicationRestore",
             "200",
             "Restore the newest verified local point into a new file under the data directory. The live database is not replaced. Stop Puxiri before substituting that file by hand.",
+            object(json!({}), &[]),
+            headers.clone(),
+        )}),
+    );
+    paths.insert(
+        "/api/v1/admin/replication/remote/restore".into(),
+        json!({"post": authenticated_mutation(
+            "restoreRemoteReplication",
+            "ReplicationRestore",
+            "200",
+            "Download and verify the chain from the configured S3-compatible destination in temporary space, then restore its newest point into a new file under the data directory. 409 replication_remote_not_configured when no destination is configured; 503 replication_remote_unavailable when the destination cannot be read. The live database is not replaced.",
             object(json!({}), &[]),
             headers,
         )}),
@@ -1127,7 +1152,10 @@ fn authenticated_mutation(
             "408",
             "request_timeout: body verification did not finish before any handler started; retryable=true",
         ),
-        ("409", "setup_unavailable/project_key_unavailable"),
+        (
+            "409",
+            "setup_unavailable/project_key_unavailable/replication_busy/replication_remote_not_configured",
+        ),
         ("413", "payload_too_large: JSON exceeds 524288 bytes"),
         ("414", "uri_too_long"),
         (
@@ -1140,7 +1168,10 @@ fn authenticated_mutation(
         ),
         ("431", "headers_too_large"),
         ("500", "unexpected_error"),
-        ("503", "storage_unavailable/service_busy; retryable=true"),
+        (
+            "503",
+            "storage_unavailable/service_busy/replication_remote_unavailable; retryable=true",
+        ),
     ] {
         responses.insert(status.into(), error_response(message, true));
     }

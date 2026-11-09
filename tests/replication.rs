@@ -140,3 +140,155 @@ fn labels(path: &Path) -> Vec<String> {
     }
     labels
 }
+
+fn remote_settings(endpoint: &str, bucket: &str) -> replication::RemoteSettings {
+    replication::RemoteSettings {
+        bucket: bucket.to_owned(),
+        prefix: "installations/test".to_owned(),
+        region: "us-east-1".to_owned(),
+        endpoint: Some(endpoint.to_owned()),
+        path_style: true,
+        access_key_id: std::env::var("PUXIRI_TEST_REPLICATION_S3_ACCESS_KEY_ID")
+            .unwrap_or_else(|_| "test".to_owned()),
+        secret_access_key: std::env::var("PUXIRI_TEST_REPLICATION_S3_SECRET_ACCESS_KEY")
+            .unwrap_or_else(|_| "test".to_owned()),
+    }
+}
+
+async fn insert_probe(database: &Database, id: i64, label: &str) {
+    let mut write = puxiri::db::admitted_write(database.pool()).await.unwrap();
+    if id == 1 {
+        sqlx::query("CREATE TABLE replication_probe (id INTEGER PRIMARY KEY, label TEXT NOT NULL)")
+            .execute(&mut **write)
+            .await
+            .unwrap();
+    }
+    sqlx::query("INSERT INTO replication_probe (id, label) VALUES (?, ?)")
+        .bind(id)
+        .bind(label)
+        .execute(&mut **write)
+        .await
+        .unwrap();
+    write.commit().await.unwrap();
+}
+
+#[tokio::test]
+async fn remote_restore_requires_a_configured_destination() {
+    let directory = TempDir::new().unwrap();
+    let database = Database::open(directory.path()).await.unwrap();
+    assert!(replication::status(&database).await.remote.is_none());
+    let error = replication::restore_latest_from_remote(&database)
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        replication::ReplicationError::RemoteNotConfigured
+    ));
+}
+
+#[tokio::test]
+async fn an_unreachable_destination_keeps_the_local_capture() {
+    // Port 1 on loopback refuses the connection without leaving the machine.
+    let remote =
+        replication::RemoteReplica::new(remote_settings("http://127.0.0.1:1", "unreachable"))
+            .unwrap();
+    let directory = TempDir::new().unwrap();
+    let database = Database::open(directory.path())
+        .await
+        .unwrap()
+        .with_remote_replica(remote);
+    insert_probe(&database, 1, "local").await;
+
+    let report = replication::capture(&database).await.unwrap();
+    assert!(report.snapshot_created);
+    assert!(matches!(
+        report.remote,
+        Some(replication::RemoteSync::Failed)
+    ));
+    let status = replication::status(&database).await;
+    assert!(status.snapshot);
+    let remote = status.remote.unwrap();
+    assert_eq!(remote.location, "s3://unreachable/installations/test");
+    assert!(remote.acknowledged_txid.is_none());
+
+    let restored = replication::restore_latest(&database).await.unwrap();
+    let path = directory.path().join("restores").join(restored.file_name);
+    assert_eq!(labels(&path), vec!["local".to_owned()]);
+    assert!(matches!(
+        replication::restore_latest_from_remote(&database)
+            .await
+            .unwrap_err(),
+        replication::ReplicationError::Remote(_)
+    ));
+}
+
+/// Runs only against a disposable S3-compatible server, for example
+/// `make test-replication-s3`, which starts a pinned local RustFS.
+#[tokio::test]
+async fn capture_uploads_to_s3_and_a_new_installation_restores_from_it() {
+    let Ok(endpoint) = std::env::var("PUXIRI_TEST_REPLICATION_S3_ENDPOINT") else {
+        eprintln!("skipped: PUXIRI_TEST_REPLICATION_S3_ENDPOINT is not set");
+        return;
+    };
+    let bucket = format!("puxiri-replication-{}", uuid::Uuid::now_v7());
+    let settings = remote_settings(&endpoint, &bucket);
+    let client = aws_sdk_s3::Client::from_conf(
+        aws_sdk_s3::Config::builder()
+            .behavior_version_latest()
+            .region(aws_sdk_s3::config::Region::new("us-east-1"))
+            .endpoint_url(&endpoint)
+            .force_path_style(true)
+            .credentials_provider(aws_credential_types::Credentials::new(
+                settings.access_key_id.clone(),
+                settings.secret_access_key.clone(),
+                None,
+                None,
+                "puxiri-test",
+            ))
+            .build(),
+    );
+    client.create_bucket().bucket(&bucket).send().await.unwrap();
+
+    let directory = TempDir::new().unwrap();
+    let database = Database::open(directory.path())
+        .await
+        .unwrap()
+        .with_remote_replica(replication::RemoteReplica::new(settings).unwrap());
+    insert_probe(&database, 1, "first").await;
+    let first = replication::capture(&database).await.unwrap();
+    let Some(replication::RemoteSync::Synced { txid, .. }) = first.remote else {
+        panic!("first upload was not confirmed: {:?}", first.remote);
+    };
+    assert_eq!(txid, first.txid);
+
+    insert_probe(&database, 2, "second").await;
+    let second = replication::capture(&database).await.unwrap();
+    let Some(replication::RemoteSync::Synced { txid, .. }) = second.remote else {
+        panic!("second upload was not confirmed: {:?}", second.remote);
+    };
+    assert_eq!(txid, second.txid);
+    let status = replication::status(&database).await;
+    assert_eq!(
+        status.remote.unwrap().acknowledged_txid.as_deref(),
+        Some(second.txid.as_str())
+    );
+    insert_probe(&database, 3, "not captured").await;
+
+    // A different data directory stands in for a replacement server.
+    let replacement = TempDir::new().unwrap();
+    let fresh = Database::open(replacement.path())
+        .await
+        .unwrap()
+        .with_remote_replica(
+            replication::RemoteReplica::new(remote_settings(&endpoint, &bucket)).unwrap(),
+        );
+    let restored = replication::restore_latest_from_remote(&fresh)
+        .await
+        .unwrap();
+    let path = replacement
+        .path()
+        .join("restores")
+        .join(&restored.file_name);
+    assert_ne!(path, fresh.database_path());
+    assert_eq!(labels(&path), vec!["first".to_owned(), "second".to_owned()]);
+}

@@ -25,11 +25,20 @@ async fn main() -> Result<(), Box<dyn Error>> {
             master_key_path,
             browser_origin,
             replication_dir,
+            replication_s3,
         } => {
+            let remote_replica = remote_replica(*replication_s3)?;
             let database = match replication_dir {
-                Some(path) => Arc::new(Database::open_with_replication(&data_dir, &path).await?),
-                None => Arc::new(Database::open(&data_dir).await?),
+                Some(path) => Database::open_with_replication(&data_dir, &path).await?,
+                None => Database::open(&data_dir).await?,
             };
+            let database = Arc::new(match remote_replica {
+                Some(remote) => {
+                    tracing::info!(location = %remote.location(), "replication uploads to S3");
+                    database.with_remote_replica(remote)
+                }
+                None => database,
+            });
             let master_key_path = master_key_path.unwrap_or_else(|| data_dir.join("master.key"));
             let master_key = MasterKeyStore::load_or_create(&master_key_path)?;
             let browser_entry = browser_origin.is_some();
@@ -89,4 +98,28 @@ async fn shutdown_signal() {
         () = ctrl_c => {},
         () = terminate => {},
     }
+}
+
+fn remote_replica(
+    args: puxiri::config::ReplicationS3Args,
+) -> Result<Option<puxiri::replication::RemoteReplica>, Box<dyn Error>> {
+    let Some(bucket) = args.bucket else {
+        return Ok(None);
+    };
+    let credential = |name: &str| {
+        std::env::var(name)
+            .ok()
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| format!("{name} is required when the replication S3 bucket is set"))
+    };
+    let settings = puxiri::replication::RemoteSettings {
+        bucket,
+        prefix: args.prefix,
+        region: args.region,
+        endpoint: args.endpoint,
+        path_style: args.path_style,
+        access_key_id: credential("PUXIRI_REPLICATION_S3_ACCESS_KEY_ID")?,
+        secret_access_key: credential("PUXIRI_REPLICATION_S3_SECRET_ACCESS_KEY")?,
+    };
+    Ok(Some(puxiri::replication::RemoteReplica::new(settings)?))
 }

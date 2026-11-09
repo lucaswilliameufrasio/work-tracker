@@ -32,6 +32,10 @@ pub(super) fn routes() -> Router<Arc<BrowserState>> {
         .route("/api/v1/admin/audit", get(audit))
         .route("/api/v1/admin/replication/capture", post(capture))
         .route("/api/v1/admin/replication/restore", post(restore))
+        .route(
+            "/api/v1/admin/replication/remote/restore",
+            post(restore_remote),
+        )
 }
 
 #[derive(Serialize)]
@@ -48,6 +52,15 @@ struct ReplicationBody {
     #[serde(skip_serializing_if = "Option::is_none")]
     txid: Option<String>,
     same_filesystem: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    remote: Option<RemoteStatusBody>,
+}
+
+#[derive(Serialize)]
+struct RemoteStatusBody {
+    location: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    acknowledged_txid: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -123,6 +136,19 @@ struct CaptureBody {
     transactions: u64,
     wal_frames: u64,
     snapshot_created: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    remote: Option<RemoteSyncBody>,
+}
+
+#[derive(Serialize)]
+struct RemoteSyncBody {
+    status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    txid: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    objects_confirmed: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    bytes_confirmed: Option<u64>,
 }
 
 #[derive(Serialize)]
@@ -154,6 +180,10 @@ async fn overview(
             snapshot: replication.snapshot,
             txid: replication.txid,
             same_filesystem: replication.same_filesystem,
+            remote: replication.remote.map(|remote| RemoteStatusBody {
+                location: remote.location,
+                acknowledged_txid: remote.acknowledged_txid,
+            }),
         },
     }))
 }
@@ -427,6 +457,38 @@ async fn capture(
         transactions: report.transactions,
         wal_frames: report.wal_frames,
         snapshot_created: report.snapshot_created,
+        remote: report.remote.map(|remote| match remote {
+            crate::replication::RemoteSync::Synced {
+                txid,
+                objects_confirmed,
+                bytes_confirmed,
+            } => RemoteSyncBody {
+                status: "synced",
+                txid: Some(txid),
+                objects_confirmed: Some(objects_confirmed),
+                bytes_confirmed: Some(bytes_confirmed),
+            },
+            crate::replication::RemoteSync::Failed => RemoteSyncBody {
+                status: "failed",
+                txid: None,
+                objects_confirmed: None,
+                bytes_confirmed: None,
+            },
+        }),
+    }))
+}
+
+async fn restore_remote(
+    State(state): State<Arc<BrowserState>>,
+    request: Request,
+) -> Result<Response, ApiError> {
+    let (parts, _) = request.into_parts();
+    let _actor = installation_admin(&state, &parts).await?;
+    let report = crate::replication::restore_latest_from_remote(&state.database)
+        .await
+        .map_err(replication_error)?;
+    Ok(no_store(RestoreBody {
+        file_name: report.file_name,
     }))
 }
 
@@ -561,6 +623,21 @@ fn replication_error(error: ReplicationError) -> ApiError {
             "Another capture already holds the database",
             false,
         ),
+        ReplicationError::RemoteNotConfigured => crate::http::error::ApiError::new(
+            StatusCode::CONFLICT,
+            "replication_remote_not_configured",
+            "No S3-compatible replication destination is configured",
+            false,
+        ),
+        ReplicationError::Remote(error) => {
+            tracing::warn!(%error, "remote replication request failed");
+            crate::http::error::ApiError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "replication_remote_unavailable",
+                "The S3-compatible replication destination could not be read",
+                true,
+            )
+        }
         ReplicationError::Unavailable(error) => {
             tracing::warn!(%error, "replication request failed");
             storage_unavailable()

@@ -466,6 +466,7 @@ async fn every_documented_browser_operation_matches_real_success_and_auth_error_
                 } else if operation_id == "unbanInstallationPerson"
                     || operation_id == "captureReplication"
                     || operation_id == "restoreReplication"
+                    || operation_id == "restoreRemoteReplication"
                 {
                     "{}".to_owned()
                 } else if operation_id == "createIssueComment" {
@@ -486,7 +487,18 @@ async fn every_documented_browser_operation_matches_real_success_and_auth_error_
             }
             let response = app.clone().oneshot(req).await.unwrap();
             let status = documented_success(operation);
-            assert_operation_success(&document, operation, response, status, method).await;
+            if operation_id == "restoreRemoteReplication" {
+                // This installation has no S3 destination; the documented conflict is the answer.
+                let error = json(response, StatusCode::CONFLICT).await;
+                assert_eq!(error["code"], "replication_remote_not_configured");
+                assert_contract_shape(
+                    &document,
+                    &operation["responses"]["409"]["content"]["application/json"]["schema"],
+                    &error,
+                );
+            } else {
+                assert_operation_success(&document, operation, response, status, method).await;
+            }
             let anonymous = operation
                 .get("security")
                 .is_some_and(|value| value.as_array().is_some_and(|items| items.is_empty()));

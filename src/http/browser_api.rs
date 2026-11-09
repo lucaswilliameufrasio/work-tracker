@@ -656,6 +656,7 @@ async fn method_not_allowed(request: Request) -> Response {
                             | "/api/v1/admin/people/{person_id}/unban"
                             | "/api/v1/admin/replication/capture"
                             | "/api/v1/admin/replication/restore"
+                            | "/api/v1/admin/replication/remote/restore"
                     )
                 })
             {

@@ -6,7 +6,16 @@
     snapshot: boolean;
     txid: string | undefined;
     sameFilesystem: boolean;
+    remote: Remote | undefined;
   };
+
+  type Remote = {
+    location: string;
+    acknowledgedTxid: string | undefined;
+  };
+
+  type Action =
+    'capture' | 'restore' | 'remote-restore' | 'mail' | 'ban' | 'unban';
 
   type Person = {
     userId: string;
@@ -57,7 +66,7 @@
     | {
         type: 'working';
         panel: Panel;
-        action: 'capture' | 'restore' | 'mail' | 'ban' | 'unban';
+        action: Action;
       };
 
   let view = $state<View>({ type: 'checking' });
@@ -178,6 +187,9 @@
       !record(overview.replication) ||
       typeof overview.replication.snapshot !== 'boolean' ||
       typeof overview.replication.same_filesystem !== 'boolean' ||
+      (overview.replication.remote !== undefined &&
+        (!record(overview.replication.remote) ||
+          typeof overview.replication.remote.location !== 'string')) ||
       !Array.isArray(people.data) ||
       typeof people.has_more !== 'boolean' ||
       !Array.isArray(catalog.data) ||
@@ -226,6 +238,14 @@
         snapshot: overview.replication.snapshot,
         txid: text(overview.replication.txid),
         sameFilesystem: overview.replication.same_filesystem,
+        remote: record(overview.replication.remote)
+          ? {
+              location: String(overview.replication.remote.location),
+              acknowledgedTxid: text(
+                overview.replication.remote.acknowledged_txid,
+              ),
+            }
+          : undefined,
       },
       people: parsedPeople,
       projects,
@@ -372,7 +392,7 @@
   }
 
   async function mutate(
-    action: 'capture' | 'restore' | 'mail' | 'ban' | 'unban',
+    action: Action,
     path: string,
     body: Record<string, string>,
     success: string,
@@ -408,7 +428,7 @@
       const payload: unknown = await response.json();
       let notice = success;
       if (
-        action === 'restore' &&
+        (action === 'restore' || action === 'remote-restore') &&
         record(payload) &&
         typeof payload.file_name === 'string'
       ) {
@@ -420,6 +440,15 @@
         typeof payload.txid === 'string'
       ) {
         notice = `Captura gravada no ponto ${payload.txid}.`;
+        if (record(payload.remote) && payload.remote.status === 'synced') {
+          notice += ' Enviada ao S3.';
+        } else if (
+          record(payload.remote) &&
+          payload.remote.status === 'failed'
+        ) {
+          notice +=
+            ' O envio ao S3 falhou; a cópia local foi mantida e a próxima captura tenta de novo.';
+        }
       }
       const loaded = await load();
       if (loaded.type === 'ready') {
@@ -585,17 +614,34 @@
           ainda sem snapshot
         {/if}
       </p>
-      {#if panel.replication.sameFilesystem}
-        <p class="hint">
-          A réplica está no mesmo sistema de arquivos do banco. Ela não
-          sobrevive à perda desse disco. Aponte
-          <code>PUXIRI_REPLICATION_DIR</code> para outro disco.
+      {#if panel.replication.remote === undefined}
+        <p>S3: não configurado</p>
+        {#if panel.replication.sameFilesystem}
+          <p class="hint">
+            A réplica está no mesmo sistema de arquivos do banco. Ela não
+            sobrevive à perda desse disco. Aponte
+            <code>PUXIRI_REPLICATION_DIR</code> para outro disco ou configure
+            <code>PUXIRI_REPLICATION_S3_BUCKET</code>.
+          </p>
+        {/if}
+      {:else}
+        <p>
+          S3: <code>{panel.replication.remote.location}</code>
+          {panel.replication.remote.acknowledgedTxid === undefined
+            ? '· nenhum envio confirmado'
+            : `· confirmado até o ponto ${panel.replication.remote.acknowledgedTxid}`}
         </p>
       {/if}
       <p class="hint">
-        A captura não envia o banco para um armazenamento remoto e não promete
-        resistir a queda de energia. A restauração grava um arquivo novo. Pare o
-        Puxiri antes de substituir o banco em uso por essa cópia.
+        {#if panel.replication.remote === undefined}
+          A captura fica só neste servidor.
+        {:else}
+          Cada captura também é enviada ao S3. Só um RustFS local foi testado;
+          AWS S3, R2 e outros provedores ainda não foram homologados.
+        {/if}
+        A replicação não promete resistir a queda de energia. A restauração grava
+        um arquivo novo. Pare o Puxiri antes de substituir o banco em uso por essa
+        cópia.
       </p>
       <button
         type="button"
@@ -623,6 +669,21 @@
       >
         Restaurar em arquivo novo
       </button>
+      {#if panel.replication.remote !== undefined}
+        <button
+          type="button"
+          disabled={busy}
+          onclick={() =>
+            void mutate(
+              'remote-restore',
+              '/api/v1/admin/replication/remote/restore',
+              {},
+              'Cópia do S3 gravada.',
+            )}
+        >
+          Restaurar do S3 em arquivo novo
+        </button>
+      {/if}
     </section>
 
     <section aria-labelledby="people-title">

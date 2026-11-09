@@ -1,6 +1,7 @@
 # ADR 0007: Local disaster recovery and installation administration
 
 - **Status:** Accepted
+- **Superseded in part on 2026-11-09 by [ADR 0008](0008-replication-to-s3-compatible-storage.md):** each capture can also be uploaded to an S3-compatible destination and restored from it. The statement that Puxiri never calls the library's S3 client no longer holds.
 - **Date:** 2026-11-09
 - **Context:** [ADR 0006](0006-optional-muira-login-and-usable-v1.md), [ADR 0002](0002-backup-archive-format-deferred.md), `docs/development-plan.md` section 13
 

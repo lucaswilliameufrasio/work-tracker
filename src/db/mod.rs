@@ -33,6 +33,7 @@ pub struct Database {
     data_dir: PathBuf,
     database_file: PathBuf,
     replication_dir: PathBuf,
+    remote_replica: Option<Arc<crate::replication::RemoteReplica>>,
     admission: Arc<WriteAdmission>,
     _directory_lock: File,
 }
@@ -103,6 +104,7 @@ impl Database {
             data_dir: data_dir.to_path_buf(),
             database_file: PathBuf::from(file),
             replication_dir: replication_dir.to_path_buf(),
+            remote_replica: None,
             admission,
             _directory_lock: directory_lock,
         })
@@ -122,6 +124,16 @@ impl Database {
 
     pub fn replication_dir(&self) -> &Path {
         &self.replication_dir
+    }
+
+    /// Uploads each capture to this S3-compatible destination as well.
+    pub fn with_remote_replica(mut self, remote: crate::replication::RemoteReplica) -> Self {
+        self.remote_replica = Some(Arc::new(remote));
+        self
+    }
+
+    pub fn remote_replica(&self) -> Option<Arc<crate::replication::RemoteReplica>> {
+        self.remote_replica.clone()
     }
 
     pub fn admission(&self) -> Arc<WriteAdmission> {
