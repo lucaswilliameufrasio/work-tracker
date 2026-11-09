@@ -59,11 +59,11 @@ impl CredentialStore {
 
         let password_hash = self.password_service.hash(password).await?;
         let changed_at = format_timestamp(now);
-        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut transaction = crate::db::admitted_write(&self.pool).await?;
 
         let state = sqlx::query_scalar::<_, String>("SELECT state FROM users WHERE id = ?")
             .bind(user_id)
-            .fetch_optional(&mut *transaction)
+            .fetch_optional(&mut **transaction)
             .await?;
         if state.as_deref() != Some("active") {
             return Err(CredentialError::UserNotActive);
@@ -79,7 +79,7 @@ impl CredentialStore {
         .bind(user_id)
         .bind(password_hash)
         .bind(&changed_at)
-        .execute(&mut *transaction)
+        .execute(&mut **transaction)
         .await?;
 
         let revoked = sqlx::query(
@@ -91,7 +91,7 @@ impl CredentialStore {
         .bind(user_id)
         .bind(preserve_session_id)
         .bind(preserve_session_id)
-        .execute(&mut *transaction)
+        .execute(&mut **transaction)
         .await?;
 
         audit::append_in_transaction(

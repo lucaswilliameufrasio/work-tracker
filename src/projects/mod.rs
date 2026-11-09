@@ -104,7 +104,7 @@ impl ProjectStore {
         archived: bool,
         now: DateTime<Utc>,
     ) -> Result<ProjectArchiveChange, ProjectArchiveError> {
-        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut transaction = crate::db::admitted_write(&self.pool).await?;
         let context = AccessStore::load_project_context_in_transaction(
             &mut transaction,
             actor_user_id,
@@ -131,7 +131,7 @@ impl ProjectStore {
         .bind(&timestamp)
         .bind(project_id)
         .bind(archived)
-        .execute(&mut *transaction)
+        .execute(&mut **transaction)
         .await?;
         if update.rows_affected() == 0 {
             transaction.rollback().await?;
@@ -175,7 +175,7 @@ impl ProjectStore {
 
         let project_id = Uuid::now_v7().to_string();
         let timestamp = format_timestamp(now);
-        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut transaction = crate::db::admitted_write(&self.pool).await?;
 
         let access_context = AccessStore::load_organization_context_in_transaction(
             &mut transaction,
@@ -194,7 +194,7 @@ impl ProjectStore {
 
         let organization_locale: String =
             sqlx::query_scalar("SELECT locale FROM organizations WHERE id = 1")
-                .fetch_one(&mut *transaction)
+                .fetch_one(&mut **transaction)
                 .await?;
         let is_portuguese = match organization_locale.as_str() {
             "pt-BR" => true,
@@ -216,7 +216,7 @@ impl ProjectStore {
         .bind(ProjectDefaultView::Board.as_str())
         .bind(&timestamp)
         .bind(&timestamp)
-        .execute(&mut *transaction)
+        .execute(&mut **transaction)
         .await?;
 
         if inserted.rows_affected() == 0 {
@@ -232,7 +232,7 @@ impl ProjectStore {
         .bind(&project_id)
         .bind(actor_user_id)
         .bind(&timestamp)
-        .execute(&mut *transaction)
+        .execute(&mut **transaction)
         .await?;
 
         persist_initial_issue_schema(&mut transaction, &project_id, is_portuguese, &timestamp)

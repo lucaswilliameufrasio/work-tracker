@@ -1183,14 +1183,14 @@ mod tests {
         .await
         .unwrap();
 
-        let mut transaction = database.pool().begin_with("BEGIN IMMEDIATE").await.unwrap();
+        let mut transaction = crate::db::admitted_write(database.pool()).await.unwrap();
         sqlx::query(
             "UPDATE project_members SET role = 'viewer' \
              WHERE project_id = ? AND user_id = ?",
         )
         .bind(&project.id)
         .bind(&user_id)
-        .execute(&mut *transaction)
+        .execute(&mut **transaction)
         .await
         .unwrap();
         let transaction_context = AccessStore::load_project_context_in_transaction(

@@ -298,7 +298,7 @@ impl CommentStore {
             return Err(CommentError::Unavailable);
         }
         let digest = key_digest(actor_user_id, operation, &key);
-        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut transaction = crate::db::admitted_write(&self.pool).await?;
         let issue = load_issue(&mut transaction, actor_user_id, project_id, issue_number).await?;
         if let Some(existing) = stored_receipt(
             &mut transaction,
@@ -338,7 +338,7 @@ impl CommentStore {
                 .bind(&body)
                 .bind(&timestamp)
                 .bind(&timestamp)
-                .execute(&mut *transaction)
+                .execute(&mut **transaction)
                 .await?;
                 insert_event(
                     &mut transaction,
@@ -384,7 +384,7 @@ impl CommentStore {
                     .bind(result_version)
                     .bind(&timestamp)
                     .bind(&comment_id)
-                    .execute(&mut *transaction)
+                    .execute(&mut **transaction)
                     .await?;
                     insert_event(
                         &mut transaction,
@@ -416,7 +416,7 @@ impl CommentStore {
                 }
                 sqlx::query("DELETE FROM issue_comments WHERE id = ?")
                     .bind(&comment_id)
-                    .execute(&mut *transaction)
+                    .execute(&mut **transaction)
                     .await?;
                 insert_event(
                     &mut transaction,
@@ -449,7 +449,7 @@ impl CommentStore {
         .bind(outcome.result_version)
         .bind(i64::from(outcome.changed))
         .bind(&timestamp)
-        .execute(&mut *transaction)
+        .execute(&mut **transaction)
         .await?;
         transaction.commit().await?;
         Ok(CommentReceipt {

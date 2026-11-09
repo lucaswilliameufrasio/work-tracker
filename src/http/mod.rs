@@ -146,6 +146,7 @@ async fn frontend(request: Request) -> Response {
                 || path == "index.html"
                 || path == "convite"
                 || path == "convites"
+                || path == "gestao"
                 || path == "itens"
                 || path == "settings/sessions"
                 || path == "projects"

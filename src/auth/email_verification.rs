@@ -84,7 +84,7 @@ impl EmailVerificationStore {
         let issued_id = Uuid::now_v7().to_string();
         let created_at_text = format_timestamp(now);
         let expires_at_text = format_timestamp(expires_at);
-        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut transaction = crate::db::admitted_write(&self.pool).await?;
 
         let eligible = sqlx::query_scalar::<_, String>(
             "SELECT user_emails.id \
@@ -94,7 +94,7 @@ impl EmailVerificationStore {
         )
         .bind(email_id)
         .bind(user_id)
-        .fetch_optional(&mut *transaction)
+        .fetch_optional(&mut **transaction)
         .await?;
         if eligible.is_none() {
             return Err(EmailVerificationError::EmailNotEligible);
@@ -106,7 +106,7 @@ impl EmailVerificationStore {
         )
         .bind(&created_at_text)
         .bind(email_id)
-        .execute(&mut *transaction)
+        .execute(&mut **transaction)
         .await?;
 
         sqlx::query(
@@ -119,7 +119,7 @@ impl EmailVerificationStore {
         .bind(email_id)
         .bind(created_at_text)
         .bind(expires_at_text)
-        .execute(&mut *transaction)
+        .execute(&mut **transaction)
         .await?;
 
         transaction.commit().await?;
@@ -137,7 +137,7 @@ impl EmailVerificationStore {
     ) -> Result<bool, EmailVerificationError> {
         let token_hash = token.digest().to_vec();
         let now_text = format_timestamp(now);
-        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut transaction = crate::db::admitted_write(&self.pool).await?;
         let row = sqlx::query(
             "SELECT tokens.id, tokens.email_id, tokens.created_at, tokens.expires_at \
              FROM email_verification_tokens AS tokens \
@@ -147,7 +147,7 @@ impl EmailVerificationStore {
                AND user_emails.confirmed_at IS NULL AND users.state = 'active'",
         )
         .bind(token_hash)
-        .fetch_optional(&mut *transaction)
+        .fetch_optional(&mut **transaction)
         .await?;
 
         let Some(row) = row else {
@@ -177,7 +177,7 @@ impl EmailVerificationStore {
         )
         .bind(&now_text)
         .bind(token_id)
-        .execute(&mut *transaction)
+        .execute(&mut **transaction)
         .await?;
         if consumed.rows_affected() != 1 {
             transaction.rollback().await?;
@@ -190,7 +190,7 @@ impl EmailVerificationStore {
         )
         .bind(now_text)
         .bind(&email_id)
-        .execute(&mut *transaction)
+        .execute(&mut **transaction)
         .await?;
         if confirmed.rows_affected() != 1 {
             transaction.rollback().await?;

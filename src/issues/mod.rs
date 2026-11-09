@@ -115,7 +115,7 @@ impl IssueStore {
         now: DateTime<Utc>,
     ) -> Result<IssueRecord, IssueCreationError> {
         validate_creation(input)?;
-        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut transaction = crate::db::admitted_write(&self.pool).await?;
         let issue =
             Self::create_in_transaction(&mut transaction, actor_user_id, project_id, input, now)
                 .await?;

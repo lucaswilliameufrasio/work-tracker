@@ -44,11 +44,11 @@ impl SetupTokenStore {
     /// The caller is responsible for revealing the returned value only once to
     /// an interactive local operator.
     pub async fn issue(&self, now: DateTime<Utc>) -> Result<SetupToken, SetupTokenError> {
-        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut transaction = crate::db::admitted_write(&self.pool).await?;
         let completed_at = sqlx::query_scalar::<_, Option<String>>(
             "SELECT setup_completed_at FROM installation_state WHERE singleton = 1",
         )
-        .fetch_one(&mut *transaction)
+        .fetch_one(&mut **transaction)
         .await?;
         if completed_at.is_some() {
             transaction.rollback().await?;
@@ -68,7 +68,7 @@ impl SetupTokenStore {
         )
         .bind(token_hash)
         .bind(issued_at)
-        .execute(&mut *transaction)
+        .execute(&mut **transaction)
         .await?;
         transaction.commit().await?;
         Ok(token)

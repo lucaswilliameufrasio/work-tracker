@@ -152,6 +152,18 @@ fn generated_contract_has_unique_operations_resolved_refs_and_only_implemented_r
         ),
         ("/api/v1/admin/projects", "get"),
         ("/api/v1/admin/projects", "head"),
+        ("/api/v1/admin/overview", "get"),
+        ("/api/v1/admin/overview", "head"),
+        ("/api/v1/admin/people", "get"),
+        ("/api/v1/admin/people", "head"),
+        ("/api/v1/admin/people/{person_id}/ban", "post"),
+        ("/api/v1/admin/people/{person_id}/unban", "post"),
+        ("/api/v1/admin/catalog", "get"),
+        ("/api/v1/admin/catalog", "head"),
+        ("/api/v1/admin/audit", "get"),
+        ("/api/v1/admin/audit", "head"),
+        ("/api/v1/admin/replication/capture", "post"),
+        ("/api/v1/admin/replication/restore", "post"),
     ]);
     let mut actual = BTreeSet::new();
     let mut operation_ids = BTreeSet::new();

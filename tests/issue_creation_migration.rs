@@ -18,6 +18,7 @@ async fn migration_preserves_existing_issues_and_history_without_fabricating_old
         .connect_with(options)
         .await
         .unwrap();
+    puxiri::db::ensure_write_gate(&pool).await.unwrap();
     let migration_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
     let mut paths = std::fs::read_dir(migration_root)
         .unwrap()

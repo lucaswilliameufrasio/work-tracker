@@ -216,7 +216,7 @@ impl SessionIssueTextWriter {
             return Err(IssueTextError::InvalidIdempotencyKey);
         }
         let key_id = self.master_key.key_id();
-        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut tx = crate::db::admitted_write(&self.pool).await?;
         let actor_id = match source {
             ActorSource::User(user_id) => user_id.to_owned(),
             ActorSource::Session(token) => self
@@ -242,7 +242,7 @@ impl SessionIssueTextWriter {
             )
             .bind(project)
             .bind(number)
-            .fetch_optional(&mut *tx)
+            .fetch_optional(&mut **tx)
             .await?
             .ok_or(IssueTextError::Unavailable)?,
         };
@@ -273,7 +273,7 @@ impl SessionIssueTextWriter {
             digest.as_slice(),
         );
         let row = sqlx::query("SELECT issues.issue_number, issues.version, issues.title, issues.description, issues.trashed_at, issues.updated_at, projects.project_key FROM issues JOIN projects ON projects.id = issues.project_id WHERE issues.project_id = ? AND issues.id = ?")
-            .bind(project).bind(issue).fetch_optional(&mut *tx).await?.ok_or(IssueTextError::Unavailable)?;
+            .bind(project).bind(issue).fetch_optional(&mut **tx).await?.ok_or(IssueTextError::Unavailable)?;
         if row.try_get::<Option<String>, _>("trashed_at")?.is_some() {
             return Err(IssueTextError::Unavailable);
         }
@@ -294,7 +294,7 @@ impl SessionIssueTextWriter {
         hash.update(parsed_key.as_bytes());
         let key_digest: [u8; 32] = hash.finalize().into();
         let prior = sqlx::query("SELECT request_fingerprint, master_key_id, project_id, issue_id, issue_number, result_version, changed FROM issue_text_receipts WHERE actor_user_id = ? AND operation = 'issue.replace_text' AND key_digest = ?")
-            .bind(actor).bind(key_digest.as_slice()).fetch_optional(&mut *tx).await?;
+            .bind(actor).bind(key_digest.as_slice()).fetch_optional(&mut **tx).await?;
         if let Some(prior) = prior {
             let stored_key: Vec<u8> = prior.try_get("master_key_id")?;
             if stored_key.as_slice() != key_id {
@@ -364,7 +364,7 @@ impl SessionIssueTextWriter {
                 return Err(IssueTextError::TimeRegression);
             }
             let updated = sqlx::query("UPDATE issues SET title = ?, description = ?, version = ?, updated_at = ? WHERE project_id = ? AND id = ? AND version = ? AND trashed_at IS NULL")
-                .bind(input.title.trim()).bind(input.description).bind(result_version).bind(&timestamp).bind(project).bind(issue).bind(current_version).execute(&mut *tx).await?;
+                .bind(input.title.trim()).bind(input.description).bind(result_version).bind(&timestamp).bind(project).bind(issue).bind(current_version).execute(&mut **tx).await?;
             if updated.rows_affected() != 1 {
                 return Err(IssueTextError::VersionConflict);
             }
@@ -374,12 +374,12 @@ impl SessionIssueTextWriter {
                 _ => "issue.text_updated",
             };
             sqlx::query("INSERT INTO issue_events (id, project_id, issue_id, actor_user_id, event_kind, occurred_at) VALUES (?, ?, ?, ?, ?, ?)")
-                .bind(Uuid::now_v7().to_string()).bind(project).bind(issue).bind(actor).bind(kind).bind(&timestamp).execute(&mut *tx).await?;
+                .bind(Uuid::now_v7().to_string()).bind(project).bind(issue).bind(actor).bind(kind).bind(&timestamp).execute(&mut **tx).await?;
             sqlx::query("INSERT INTO outbox_events (id, event_kind, payload_version, project_id, issue_id, actor_user_id, issue_version, occurred_at) VALUES (?, ?, 1, ?, ?, ?, ?, ?)")
-                .bind(Uuid::now_v7().to_string()).bind(kind).bind(project).bind(issue).bind(actor).bind(result_version).bind(&timestamp).execute(&mut *tx).await?;
+                .bind(Uuid::now_v7().to_string()).bind(kind).bind(project).bind(issue).bind(actor).bind(result_version).bind(&timestamp).execute(&mut **tx).await?;
         }
         sqlx::query("INSERT INTO issue_text_receipts (actor_user_id, operation, key_digest, request_fingerprint, master_key_id, project_id, issue_id, issue_number, result_version, changed, created_at) VALUES (?, 'issue.replace_text', ?, ?, ?, ?, ?, ?, ?, ?, ?)")
-            .bind(actor).bind(key_digest.as_slice()).bind(fingerprint.as_slice()).bind(key_id.as_slice()).bind(project).bind(issue).bind(number).bind(result_version).bind(changed).bind(&timestamp).execute(&mut *tx).await?;
+            .bind(actor).bind(key_digest.as_slice()).bind(fingerprint.as_slice()).bind(key_id.as_slice()).bind(project).bind(issue).bind(number).bind(result_version).bind(changed).bind(&timestamp).execute(&mut **tx).await?;
         tx.commit().await?;
         Ok(IssueTextOutcome {
             receipt: IssueTextReceipt {

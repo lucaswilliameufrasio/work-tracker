@@ -220,7 +220,7 @@ impl ProjectMembershipStore {
         role: ProjectRole,
         now: DateTime<Utc>,
     ) -> Result<ProjectMembershipChange, ProjectMembershipError> {
-        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut transaction = crate::db::admitted_write(&self.pool).await?;
         let actor_context = load_actor_context(&mut transaction, actor_user_id, project_id).await?;
 
         if authorize(&actor_context, AccessCapability::ManageProjectMembership).is_err() {
@@ -248,7 +248,7 @@ impl ProjectMembershipStore {
         )
         .bind(project_id)
         .bind(target_user_id)
-        .fetch_optional(&mut *transaction)
+        .fetch_optional(&mut **transaction)
         .await?
         .map(|value| parse_project_role(&value))
         .transpose()?;
@@ -305,7 +305,7 @@ impl ProjectMembershipStore {
                 .bind(target_user_id)
                 .bind(project_role_as_str(role))
                 .bind(&timestamp)
-                .execute(&mut *transaction)
+                .execute(&mut **transaction)
                 .await?;
                 (
                     ProjectMembershipChange::Added,
@@ -322,7 +322,7 @@ impl ProjectMembershipStore {
                 .bind(project_role_as_str(role))
                 .bind(project_id)
                 .bind(target_user_id)
-                .execute(&mut *transaction)
+                .execute(&mut **transaction)
                 .await?;
                 (
                     ProjectMembershipChange::RoleChanged,
@@ -361,7 +361,7 @@ impl ProjectMembershipStore {
         target_user_id: &str,
         now: DateTime<Utc>,
     ) -> Result<ProjectMembershipChange, ProjectMembershipError> {
-        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut transaction = crate::db::admitted_write(&self.pool).await?;
         let actor_context = load_actor_context(&mut transaction, actor_user_id, project_id).await?;
 
         if authorize(&actor_context, AccessCapability::ManageProjectMembership).is_err() {
@@ -374,7 +374,7 @@ impl ProjectMembershipStore {
         )
         .bind(project_id)
         .bind(target_user_id)
-        .fetch_optional(&mut *transaction)
+        .fetch_optional(&mut **transaction)
         .await?
         .map(|value| parse_project_role(&value))
         .transpose()?;
@@ -403,7 +403,7 @@ impl ProjectMembershipStore {
         sqlx::query("DELETE FROM project_members WHERE project_id = ? AND user_id = ?")
             .bind(project_id)
             .bind(target_user_id)
-            .execute(&mut *transaction)
+            .execute(&mut **transaction)
             .await?;
 
         audit::append_in_transaction(
@@ -434,7 +434,7 @@ impl ProjectMembershipStore {
         project_id: &str,
         now: DateTime<Utc>,
     ) -> Result<ProjectMembershipChange, ProjectMembershipError> {
-        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut transaction = crate::db::admitted_write(&self.pool).await?;
         let context = load_actor_context(&mut transaction, user_id, project_id).await?;
         if authorize(&context, AccessCapability::LeaveProject).is_err() {
             transaction.rollback().await?;
@@ -446,7 +446,7 @@ impl ProjectMembershipStore {
         )
         .bind(project_id)
         .bind(user_id)
-        .fetch_optional(&mut *transaction)
+        .fetch_optional(&mut **transaction)
         .await?
         .map(|value| parse_project_role(&value))
         .transpose()?
@@ -462,7 +462,7 @@ impl ProjectMembershipStore {
         sqlx::query("DELETE FROM project_members WHERE project_id = ? AND user_id = ?")
             .bind(project_id)
             .bind(user_id)
-            .execute(&mut *transaction)
+            .execute(&mut **transaction)
             .await?;
 
         audit::append_in_transaction(

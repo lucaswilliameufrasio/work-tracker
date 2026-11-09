@@ -113,12 +113,12 @@ impl AuthRateLimiter {
     }
 
     async fn initialize_key_state(&self) -> Result<(), AuthRateLimitError> {
-        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut transaction = crate::db::admitted_write(&self.pool).await?;
         let key_id = self.master_key.key_id();
         let stored_key_id = sqlx::query_scalar::<_, Vec<u8>>(
             "SELECT master_key_id FROM auth_rate_limit_key_state WHERE singleton = 1",
         )
-        .fetch_optional(&mut *transaction)
+        .fetch_optional(&mut **transaction)
         .await?;
         match stored_key_id {
             Some(stored) if stored.as_slice() == key_id.as_slice() => {}
@@ -135,7 +135,7 @@ impl AuthRateLimiter {
                      VALUES (1, ?)",
                 )
                 .bind(key_id.as_slice())
-                .execute(&mut *transaction)
+                .execute(&mut **transaction)
                 .await?;
             }
         }
@@ -210,7 +210,7 @@ impl AuthRateLimiter {
         identity_key: &str,
         now: DateTime<Utc>,
     ) -> Result<Option<DateTime<Utc>>, AuthRateLimitError> {
-        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut transaction = crate::db::admitted_write(&self.pool).await?;
         let result = self
             .record_failure_in_transaction(&mut transaction, client_ip, identity_key, now)
             .await;

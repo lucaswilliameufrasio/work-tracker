@@ -12,6 +12,7 @@
   import ProjectCreationPage from './lib/ProjectCreationPage.svelte';
   import MyItemsPage from './lib/MyItemsPage.svelte';
   import InvitesPage from './lib/InvitesPage.svelte';
+  import ManagementPage from './lib/ManagementPage.svelte';
   import {
     getInstallationStatus,
     type InstallationStatus,
@@ -20,6 +21,7 @@
   const pathname = globalThis.location.pathname;
   const invitationPage = pathname === '/convite';
   const invitesPage = pathname === '/convites';
+  const managementPage = pathname === '/gestao';
   const itemsPage = pathname === '/itens';
   const projectCreationPage = pathname === '/projects/new';
   const sessionsPage = pathname === '/settings/sessions';
@@ -34,6 +36,7 @@
   const homePage =
     !invitationPage &&
     !invitesPage &&
+    !managementPage &&
     !itemsPage &&
     !projectCreationPage &&
     !sessionsPage &&
@@ -114,6 +117,9 @@
     <a href="/convites" aria-current={invitesPage ? 'page' : undefined}
       >Convites</a
     >
+    <a href="/gestao" aria-current={managementPage ? 'page' : undefined}
+      >Gestão</a
+    >
     <a
       href="/settings/sessions"
       aria-current={sessionsPage ? 'page' : undefined}>Minhas sessões</a
@@ -128,6 +134,8 @@
     <MyItemsPage />
   {:else if invitesPage}
     <InvitesPage />
+  {:else if managementPage}
+    <ManagementPage />
   {:else if projectCreationPage}
     <ProjectCreationPage />
   {:else if creationPage}

@@ -25,6 +25,9 @@ pub enum Command {
         /// Enable browser session and read-only project APIs for this explicit HTTPS origin.
         #[arg(long, env = "PUXIRI_BROWSER_ORIGIN")]
         browser_origin: Option<crate::http::browser_session::BrowserOrigin>,
+        /// Local sqlite-replication repository. Another filesystem is required to survive loss of the data disk.
+        #[arg(long, env = "PUXIRI_REPLICATION_DIR")]
+        replication_dir: Option<PathBuf>,
     },
     /// Issue and display a one-time installation setup token to a local terminal.
     SetupToken {
@@ -53,6 +56,7 @@ mod tests {
             data_dir,
             master_key_path,
             browser_origin,
+            replication_dir,
         } = cli.command
         else {
             panic!("expected serve command");
@@ -62,6 +66,7 @@ mod tests {
         assert_eq!(data_dir, PathBuf::from("a directory"));
         assert_eq!(master_key_path, None);
         assert_eq!(browser_origin, None);
+        assert_eq!(replication_dir, None);
     }
 
     #[test]

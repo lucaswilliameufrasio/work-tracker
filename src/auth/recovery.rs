@@ -73,7 +73,7 @@ impl RecoveryCodeStore {
         policy: RecoveryCodePolicy,
         now: DateTime<Utc>,
     ) -> Result<RecoveryCodeBatch, RecoveryCodeError> {
-        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut transaction = crate::db::admitted_write(&self.pool).await?;
         let batch = self
             .issue_in_transaction(&mut transaction, user_id, policy, now)
             .await?;
@@ -146,7 +146,7 @@ impl RecoveryCodeStore {
         let Some(digest) = digest_candidate(value) else {
             return Ok(false);
         };
-        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut transaction = crate::db::admitted_write(&self.pool).await?;
         let consumed = self
             .consume_digest_in_transaction(&mut transaction, user_id, &digest, now)
             .await?;

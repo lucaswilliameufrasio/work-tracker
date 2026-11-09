@@ -162,7 +162,7 @@ impl JobStore {
             .map(canonical_uuid)
             .transpose()?;
 
-        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut transaction = crate::db::admitted_write(&self.pool).await?;
         if let Some(existing) = load_by_dedupe_key(&mut transaction, &spec.dedupe_key).await? {
             let inserted = false;
             if !same_specification(
@@ -186,7 +186,7 @@ impl JobStore {
              WHERE job_kind = ? AND state IN ('pending', 'running')",
         )
         .bind(&spec.job_kind)
-        .fetch_one(&mut *transaction)
+        .fetch_one(&mut **transaction)
         .await?;
         if outstanding >= i64::from(max_outstanding) {
             return Err(JobStoreError::Capacity);
@@ -211,7 +211,7 @@ impl JobStore {
         .bind(i64::from(spec.max_attempts))
         .bind(&created_at)
         .bind(&created_at)
-        .execute(&mut *transaction)
+        .execute(&mut **transaction)
         .await?;
 
         let job = load_by_id(&mut transaction, &id)
@@ -240,14 +240,14 @@ impl JobStore {
         let lease_text = encode_time(lease_expires_at);
         let token = Uuid::now_v7().to_string();
 
-        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut transaction = crate::db::admitted_write(&self.pool).await?;
         let selected = sqlx::query(
             "SELECT id, claim_epoch FROM jobs \
              WHERE state = 'pending' AND available_at <= ? AND attempts < max_attempts \
              ORDER BY available_at, id LIMIT 1",
         )
         .bind(&now_text)
-        .fetch_optional(&mut *transaction)
+        .fetch_optional(&mut **transaction)
         .await?;
         let Some(selected) = selected else {
             transaction.commit().await?;
@@ -271,7 +271,7 @@ impl JobStore {
         .bind(&now_text)
         .bind(&id)
         .bind(old_epoch)
-        .execute(&mut *transaction)
+        .execute(&mut **transaction)
         .await?
         .rows_affected();
         if changed != 1 {
@@ -300,7 +300,7 @@ impl JobStore {
             .ok_or(JobStoreError::InvalidSpecification)?;
         let now_text = encode_time(now);
         let expiry_text = encode_time(proposed_expiry);
-        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut transaction = crate::db::admitted_write(&self.pool).await?;
         let changed = sqlx::query(
             "UPDATE jobs SET \
              lease_expires_at = CASE WHEN lease_expires_at < ? THEN ? ELSE lease_expires_at END, \
@@ -316,7 +316,7 @@ impl JobStore {
         .bind(claim.job.claim_epoch)
         .bind(&claim.token)
         .bind(&now_text)
-        .execute(&mut *transaction)
+        .execute(&mut **transaction)
         .await?
         .rows_affected();
         if changed != 1 {
@@ -335,7 +335,7 @@ impl JobStore {
         now: DateTime<Utc>,
     ) -> Result<JobRecord, JobStoreError> {
         let now_text = encode_time(now);
-        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut transaction = crate::db::admitted_write(&self.pool).await?;
         let changed = sqlx::query(
             "UPDATE jobs SET state = 'succeeded', claim_token = NULL, \
              lease_expires_at = NULL, finished_at = ?, updated_at = ? \
@@ -348,7 +348,7 @@ impl JobStore {
         .bind(claim.job.claim_epoch)
         .bind(&claim.token)
         .bind(&now_text)
-        .execute(&mut *transaction)
+        .execute(&mut **transaction)
         .await?
         .rows_affected();
         if changed != 1 {
@@ -395,7 +395,7 @@ impl JobStore {
         } else {
             encode_time(claim.job.available_at)
         };
-        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut transaction = crate::db::admitted_write(&self.pool).await?;
         let changed = sqlx::query(
             "UPDATE jobs SET state = ?, available_at = ?, claim_token = NULL, \
              lease_expires_at = NULL, last_error_code = ?, finished_at = ?, updated_at = ? \
@@ -411,7 +411,7 @@ impl JobStore {
         .bind(claim.job.claim_epoch)
         .bind(&claim.token)
         .bind(&now_text)
-        .execute(&mut *transaction)
+        .execute(&mut **transaction)
         .await?
         .rows_affected();
         if changed != 1 {
@@ -430,7 +430,7 @@ impl JobStore {
         now: DateTime<Utc>,
     ) -> Result<JobRecord, JobStoreError> {
         let now_text = encode_time(now);
-        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut transaction = crate::db::admitted_write(&self.pool).await?;
         let changed = sqlx::query(
             "UPDATE jobs SET state = 'canceled', finished_at = ?, updated_at = ? \
              WHERE id = ? AND state = 'pending'",
@@ -438,7 +438,7 @@ impl JobStore {
         .bind(&now_text)
         .bind(&now_text)
         .bind(job_id)
-        .execute(&mut *transaction)
+        .execute(&mut **transaction)
         .await?
         .rows_affected();
         if changed != 1 {
@@ -477,7 +477,7 @@ impl JobStore {
         };
         let available_at = retry.then_some(now_text.as_str());
 
-        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut transaction = crate::db::admitted_write(&self.pool).await?;
         let changed = sqlx::query(
             "UPDATE jobs SET state = ?, \
              available_at = COALESCE(?, available_at), \
@@ -494,7 +494,7 @@ impl JobStore {
         .bind(&claim.job.id)
         .bind(claim.job.claim_epoch)
         .bind(&claim.token)
-        .execute(&mut *transaction)
+        .execute(&mut **transaction)
         .await?
         .rows_affected();
         if changed != 1 {
@@ -521,7 +521,7 @@ impl JobStore {
         now: DateTime<Utc>,
     ) -> Result<u64, sqlx::Error> {
         let now_text = encode_time(now);
-        let mut transaction = pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut transaction = crate::db::admitted_write(pool).await?;
         let result = sqlx::query(
             "UPDATE jobs SET \
              state = CASE WHEN attempts < max_attempts THEN 'pending' ELSE 'failed' END, \
@@ -535,7 +535,7 @@ impl JobStore {
         .bind(&now_text)
         .bind(&now_text)
         .bind(&now_text)
-        .execute(&mut *transaction)
+        .execute(&mut **transaction)
         .await?;
         transaction.commit().await?;
         Ok(result.rows_affected())

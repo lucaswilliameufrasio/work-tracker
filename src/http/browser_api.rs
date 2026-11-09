@@ -51,6 +51,7 @@ struct BrowserState {
     mail: crate::mail::MailSenderStore,
 }
 
+mod admin;
 mod catalogs;
 mod entry;
 mod invitations;
@@ -152,6 +153,7 @@ pub(super) fn routes(
         .merge(project_members::routes())
         .merge(issues::routes())
         .merge(catalogs::routes())
+        .merge(admin::routes())
         .method_not_allowed_fallback(method_not_allowed)
         .with_state(state)
         .layer(middleware::from_fn_with_state(
@@ -644,6 +646,20 @@ async fn method_not_allowed(request: Request) -> Response {
                 .is_some_and(|path| path.as_str() == "/api/v1/mcp/grant")
             {
                 "GET, HEAD, PUT, DELETE"
+            } else if request
+                .extensions()
+                .get::<axum::extract::MatchedPath>()
+                .is_some_and(|path| {
+                    matches!(
+                        path.as_str(),
+                        "/api/v1/admin/people/{person_id}/ban"
+                            | "/api/v1/admin/people/{person_id}/unban"
+                            | "/api/v1/admin/replication/capture"
+                            | "/api/v1/admin/replication/restore"
+                    )
+                })
+            {
+                "POST"
             } else {
                 "GET, HEAD"
             },

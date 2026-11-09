@@ -254,22 +254,22 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        let mut writer = db.pool().begin_with("BEGIN IMMEDIATE").await.unwrap();
+        let mut writer = crate::db::admitted_write(db.pool()).await.unwrap();
         sqlx::query("UPDATE issues SET title = 'After', version = version + 1 WHERE id = ?")
             .bind(&issue.id)
-            .execute(&mut *writer)
+            .execute(&mut **writer)
             .await
             .unwrap();
         sqlx::query("DELETE FROM project_members WHERE project_id = ? AND user_id = ?")
             .bind(&project.id)
             .bind(&viewer)
-            .execute(&mut *writer)
+            .execute(&mut **writer)
             .await
             .unwrap();
         sqlx::query("UPDATE sessions SET revoked_at = ? WHERE id = ?")
             .bind(now.to_rfc3339())
             .bind(&issued.id)
-            .execute(&mut *writer)
+            .execute(&mut **writer)
             .await
             .unwrap();
         writer.commit().await.unwrap();

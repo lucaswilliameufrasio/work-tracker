@@ -106,7 +106,7 @@ impl PasswordResetStore {
         let token_id = Uuid::now_v7().to_string();
         let now_text = format_timestamp(now);
         let expires_at_text = format_timestamp(expires_at);
-        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut transaction = crate::db::admitted_write(&self.pool).await?;
 
         let eligible = sqlx::query(
             "SELECT user_emails.id AS email_id, user_emails.user_id \
@@ -118,7 +118,7 @@ impl PasswordResetStore {
                AND users.state = 'active'",
         )
         .bind(&email.key)
-        .fetch_optional(&mut *transaction)
+        .fetch_optional(&mut **transaction)
         .await?;
         let Some(eligible) = eligible else {
             transaction.rollback().await?;
@@ -133,7 +133,7 @@ impl PasswordResetStore {
         )
         .bind(&now_text)
         .bind(&email_id)
-        .execute(&mut *transaction)
+        .execute(&mut **transaction)
         .await?;
         sqlx::query(
             "INSERT INTO password_reset_tokens \
@@ -146,7 +146,7 @@ impl PasswordResetStore {
         .bind(email_id)
         .bind(now_text)
         .bind(expires_at_text)
-        .execute(&mut *transaction)
+        .execute(&mut **transaction)
         .await?;
         transaction.commit().await?;
         Ok(Some(IssuedPasswordReset {
@@ -175,7 +175,7 @@ impl PasswordResetStore {
 
         let new_password_hash = self.password_service.hash(new_password).await?;
         let now_text = format_timestamp(now);
-        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut transaction = crate::db::admitted_write(&self.pool).await?;
         let Some(current_row) = self
             .load_eligible_token_in_transaction(&mut transaction, &token_hash)
             .await?
@@ -196,7 +196,7 @@ impl PasswordResetStore {
         .bind(&now_text)
         .bind(&current_row.id)
         .bind(&token_hash)
-        .execute(&mut *transaction)
+        .execute(&mut **transaction)
         .await?;
         if consumed.rows_affected() != 1 {
             transaction.rollback().await?;
@@ -217,7 +217,7 @@ impl PasswordResetStore {
         .bind(&now_text)
         .bind(&current_row.user_id)
         .bind(&current_row.email_id)
-        .execute(&mut *transaction)
+        .execute(&mut **transaction)
         .await?;
         if updated_credential.rows_affected() != 1 {
             transaction.rollback().await?;
@@ -230,7 +230,7 @@ impl PasswordResetStore {
         )
         .bind(&now_text)
         .bind(&current_row.user_id)
-        .execute(&mut *transaction)
+        .execute(&mut **transaction)
         .await?;
         sqlx::query(
             "UPDATE password_reset_tokens SET invalidated_at = ? \
@@ -240,7 +240,7 @@ impl PasswordResetStore {
         .bind(&now_text)
         .bind(&current_row.user_id)
         .bind(&current_row.id)
-        .execute(&mut *transaction)
+        .execute(&mut **transaction)
         .await?;
 
         audit::append_in_transaction(

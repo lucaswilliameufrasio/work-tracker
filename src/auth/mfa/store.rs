@@ -94,12 +94,12 @@ impl TotpCredentialStore {
         let credential_id_text = credential_id.to_string();
         let now_text = format_timestamp(now);
         let expires_at_text = format_timestamp(expires_at);
-        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut transaction = crate::db::admitted_write(&self.pool).await?;
 
         let account_state: Option<String> =
             sqlx::query_scalar("SELECT state FROM users WHERE id = ?")
                 .bind(&user_id_text)
-                .fetch_optional(&mut *transaction)
+                .fetch_optional(&mut **transaction)
                 .await?;
         if account_state.as_deref() != Some("active") {
             transaction.rollback().await?;
@@ -109,7 +109,7 @@ impl TotpCredentialStore {
         let existing_activation: Option<Option<String>> =
             sqlx::query_scalar("SELECT activated_at FROM mfa_credentials WHERE user_id = ?")
                 .bind(&user_id_text)
-                .fetch_optional(&mut *transaction)
+                .fetch_optional(&mut **transaction)
                 .await?;
         if existing_activation.is_some_and(|activated_at| activated_at.is_some()) {
             transaction.rollback().await?;
@@ -118,7 +118,7 @@ impl TotpCredentialStore {
 
         sqlx::query("DELETE FROM mfa_credentials WHERE user_id = ? AND activated_at IS NULL")
             .bind(&user_id_text)
-            .execute(&mut *transaction)
+            .execute(&mut **transaction)
             .await?;
         sqlx::query(
             "INSERT INTO mfa_credentials \
@@ -130,7 +130,7 @@ impl TotpCredentialStore {
         .bind(encrypted_secret.as_bytes())
         .bind(&now_text)
         .bind(&expires_at_text)
-        .execute(&mut *transaction)
+        .execute(&mut **transaction)
         .await?;
         audit::append_in_transaction(
             &mut transaction,
@@ -161,7 +161,7 @@ impl TotpCredentialStore {
     ) -> Result<bool, TotpCredentialError> {
         let user_id_text = user_id.to_string();
         let now_text = format_timestamp(now);
-        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut transaction = crate::db::admitted_write(&self.pool).await?;
         let row = sqlx::query(
             "SELECT mfa_credentials.id, mfa_credentials.secret_envelope, \
                     mfa_credentials.expires_at, mfa_credentials.activated_at, users.state \
@@ -170,7 +170,7 @@ impl TotpCredentialStore {
              WHERE mfa_credentials.user_id = ?",
         )
         .bind(&user_id_text)
-        .fetch_optional(&mut *transaction)
+        .fetch_optional(&mut **transaction)
         .await?;
         let Some(row) = row else {
             transaction.rollback().await?;
@@ -201,7 +201,7 @@ impl TotpCredentialStore {
             )
             .bind(&credential_id_text)
             .bind(&user_id_text)
-            .execute(&mut *transaction)
+            .execute(&mut **transaction)
             .await?;
             if deleted.rows_affected() != 1 {
                 return Err(TotpCredentialError::InvalidCredential);
@@ -242,7 +242,7 @@ impl TotpCredentialStore {
         .bind(&credential_id_text)
         .bind(&user_id_text)
         .bind(&now_text)
-        .execute(&mut *transaction)
+        .execute(&mut **transaction)
         .await?;
         if updated.rows_affected() != 1 {
             return Err(TotpCredentialError::InvalidCredential);
@@ -353,7 +353,7 @@ impl TotpCredentialStore {
         }
 
         let authenticated_at_text = format_timestamp(proof.authenticated_at);
-        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut transaction = crate::db::admitted_write(&self.pool).await?;
         let proof_is_current: i64 = sqlx::query_scalar(
             "SELECT EXISTS( \
                  SELECT 1 FROM sessions \
@@ -367,7 +367,7 @@ impl TotpCredentialStore {
         .bind(&proof.user_id)
         .bind(&proof.token_digest)
         .bind(authenticated_at_text)
-        .fetch_one(&mut *transaction)
+        .fetch_one(&mut **transaction)
         .await?;
         if proof_is_current != 1 {
             transaction.rollback().await?;
@@ -378,7 +378,7 @@ impl TotpCredentialStore {
             "SELECT EXISTS(SELECT 1 FROM installation_admins WHERE user_id = ?)",
         )
         .bind(&proof.user_id)
-        .fetch_one(&mut *transaction)
+        .fetch_one(&mut **transaction)
         .await?;
         if is_installation_admin == 1 {
             transaction.rollback().await?;
@@ -390,7 +390,7 @@ impl TotpCredentialStore {
              WHERE user_id = ? AND activated_at IS NOT NULL",
         )
         .bind(&proof.user_id)
-        .fetch_optional(&mut *transaction)
+        .fetch_optional(&mut **transaction)
         .await?;
         let Some(active_credential) = active_credential else {
             transaction.rollback().await?;
@@ -403,7 +403,7 @@ impl TotpCredentialStore {
         )
         .bind(&credential_id)
         .bind(&proof.user_id)
-        .execute(&mut *transaction)
+        .execute(&mut **transaction)
         .await?;
         if deleted.rows_affected() != 1 {
             return Err(TotpCredentialError::InvalidCredential);
@@ -414,7 +414,7 @@ impl TotpCredentialStore {
              WHERE user_id = ? AND mfa_authenticated_at IS NOT NULL",
         )
         .bind(&proof.user_id)
-        .execute(&mut *transaction)
+        .execute(&mut **transaction)
         .await?;
         audit::append_in_transaction(
             &mut transaction,

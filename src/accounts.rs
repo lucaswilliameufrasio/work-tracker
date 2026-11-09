@@ -80,7 +80,7 @@ impl AccountAdministrationStore {
     ) -> Result<AccountStatusChange, AccountAdministrationError> {
         let reason = validate_ban_reason(reason)?;
         let now_text = format_timestamp(now);
-        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut transaction = crate::db::admitted_write(&self.pool).await?;
         require_installation_admin(
             &mut transaction,
             actor_user_id,
@@ -112,7 +112,7 @@ impl AccountAdministrationStore {
         )
         .bind(&now_text)
         .bind(target_user_id)
-        .execute(&mut *transaction)
+        .execute(&mut **transaction)
         .await?;
         if update.rows_affected() != 1 {
             transaction.rollback().await?;
@@ -143,7 +143,7 @@ impl AccountAdministrationStore {
         now: DateTime<Utc>,
     ) -> Result<AccountStatusChange, AccountAdministrationError> {
         let now_text = format_timestamp(now);
-        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut transaction = crate::db::admitted_write(&self.pool).await?;
         require_installation_admin(
             &mut transaction,
             actor_user_id,
@@ -174,7 +174,7 @@ impl AccountAdministrationStore {
         )
         .bind(&now_text)
         .bind(target_user_id)
-        .execute(&mut *transaction)
+        .execute(&mut **transaction)
         .await?;
         if update.rows_affected() != 1 {
             transaction.rollback().await?;
@@ -206,7 +206,7 @@ impl AccountAdministrationStore {
         now: DateTime<Utc>,
     ) -> Result<AccountStatusChange, AccountAdministrationError> {
         let now_text = format_timestamp(now);
-        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut transaction = crate::db::admitted_write(&self.pool).await?;
         let context =
             AccessStore::load_organization_context_in_transaction(&mut transaction, user_id, false)
                 .await?;
@@ -239,7 +239,7 @@ impl AccountAdministrationStore {
         )
         .bind(&now_text)
         .bind(user_id)
-        .execute(&mut *transaction)
+        .execute(&mut **transaction)
         .await?;
         if update.rows_affected() != 1 {
             transaction.rollback().await?;
@@ -270,7 +270,7 @@ impl AccountAdministrationStore {
         now: DateTime<Utc>,
     ) -> Result<AccountStatusChange, AccountAdministrationError> {
         let now_text = format_timestamp(now);
-        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut transaction = crate::db::admitted_write(&self.pool).await?;
         require_installation_admin(
             &mut transaction,
             actor_user_id,
@@ -301,7 +301,7 @@ impl AccountAdministrationStore {
         )
         .bind(&now_text)
         .bind(target_user_id)
-        .execute(&mut *transaction)
+        .execute(&mut **transaction)
         .await?;
         if update.rows_affected() != 1 {
             transaction.rollback().await?;
@@ -331,7 +331,7 @@ impl AccountAdministrationStore {
         now: DateTime<Utc>,
     ) -> Result<AccountStatusChange, AccountAdministrationError> {
         let now_text = format_timestamp(now);
-        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut transaction = crate::db::admitted_write(&self.pool).await?;
         let actor_context = AccessStore::load_organization_context_in_transaction(
             &mut transaction,
             actor_user_id,
@@ -371,7 +371,7 @@ impl AccountAdministrationStore {
         .bind(&now_text)
         .bind(&now_text)
         .bind(target_user_id)
-        .execute(&mut *transaction)
+        .execute(&mut **transaction)
         .await?;
         if update.rows_affected() != 1 {
             transaction.rollback().await?;

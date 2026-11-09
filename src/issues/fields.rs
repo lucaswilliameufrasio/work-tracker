@@ -191,7 +191,7 @@ impl SessionIssueFieldWriter {
         );
         let key_id = self.master_key.key_id();
 
-        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut transaction = crate::db::admitted_write(&self.pool).await?;
         let principal = self
             .sessions
             .authenticate_in_transaction(&mut transaction, token, now)
@@ -219,7 +219,7 @@ impl SessionIssueFieldWriter {
         )
         .bind(project_id)
         .bind(issue_number)
-        .fetch_optional(&mut *transaction)
+        .fetch_optional(&mut **transaction)
         .await?
         .ok_or(IssueFieldError::Unavailable)?;
         if row.try_get::<Option<String>, _>("trashed_at")?.is_some() {
@@ -254,7 +254,7 @@ impl SessionIssueFieldWriter {
         )
         .bind(actor)
         .bind(key_digest.as_slice())
-        .fetch_optional(&mut *transaction)
+        .fetch_optional(&mut **transaction)
         .await?;
         if let Some(prior) = prior {
             let stored_key: Vec<u8> = prior.try_get("master_key_id")?;
@@ -336,7 +336,7 @@ impl SessionIssueFieldWriter {
             .bind(project_id)
             .bind(&issue_id)
             .bind(current_version)
-            .execute(&mut *transaction)
+            .execute(&mut **transaction)
             .await?;
             if updated.rows_affected() != 1 {
                 return Err(IssueFieldError::VersionConflict);
@@ -355,7 +355,7 @@ impl SessionIssueFieldWriter {
             .bind(&timestamp)
             .bind(serde_json::to_string(&priority_name(current_priority))?)
             .bind(serde_json::to_string(&priority_name(input.priority))?)
-            .execute(&mut *transaction)
+            .execute(&mut **transaction)
             .await?;
             sqlx::query(
                 "INSERT INTO outbox_events \
@@ -369,7 +369,7 @@ impl SessionIssueFieldWriter {
             .bind(actor)
             .bind(result_version)
             .bind(&timestamp)
-            .execute(&mut *transaction)
+            .execute(&mut **transaction)
             .await?;
         }
 
@@ -391,7 +391,7 @@ impl SessionIssueFieldWriter {
         .bind(result_version)
         .bind(changed)
         .bind(&timestamp)
-        .execute(&mut *transaction)
+        .execute(&mut **transaction)
         .await?;
         transaction.commit().await?;
 
@@ -451,7 +451,7 @@ impl SessionIssueFieldWriter {
         );
         let key_id = self.master_key.key_id();
 
-        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut transaction = crate::db::admitted_write(&self.pool).await?;
         let principal = self
             .sessions
             .authenticate_in_transaction(&mut transaction, token, now)
@@ -472,7 +472,7 @@ impl SessionIssueFieldWriter {
 
         let timezone: Option<String> =
             sqlx::query_scalar("SELECT timezone FROM organizations WHERE id = 1")
-                .fetch_optional(&mut *transaction)
+                .fetch_optional(&mut **transaction)
                 .await?;
         let timezone = timezone.ok_or(IssueFieldError::OrganizationTimezoneUnavailable)?;
         let _timezone = OrganizationTimezone::parse(&timezone)
@@ -487,7 +487,7 @@ impl SessionIssueFieldWriter {
         )
         .bind(project_id)
         .bind(issue_number)
-        .fetch_optional(&mut *transaction)
+        .fetch_optional(&mut **transaction)
         .await?
         .ok_or(IssueFieldError::Unavailable)?;
         if row.try_get::<Option<String>, _>("trashed_at")?.is_some() {
@@ -522,7 +522,7 @@ impl SessionIssueFieldWriter {
         )
         .bind(actor)
         .bind(key_digest.as_slice())
-        .fetch_optional(&mut *transaction)
+        .fetch_optional(&mut **transaction)
         .await?;
         if let Some(prior) = prior {
             let stored_key: Vec<u8> = prior.try_get("master_key_id")?;
@@ -604,7 +604,7 @@ impl SessionIssueFieldWriter {
             .bind(project_id)
             .bind(&issue_id)
             .bind(current_version)
-            .execute(&mut *transaction)
+            .execute(&mut **transaction)
             .await?;
             if updated.rows_affected() != 1 {
                 return Err(IssueFieldError::VersionConflict);
@@ -629,7 +629,7 @@ impl SessionIssueFieldWriter {
                     .due_date
                     .map(|date| date.format("%Y-%m-%d").to_string()),
             )?)
-            .execute(&mut *transaction)
+            .execute(&mut **transaction)
             .await?;
             sqlx::query(
                 "INSERT INTO outbox_events \
@@ -643,7 +643,7 @@ impl SessionIssueFieldWriter {
             .bind(actor)
             .bind(result_version)
             .bind(&timestamp)
-            .execute(&mut *transaction)
+            .execute(&mut **transaction)
             .await?;
         }
 
@@ -665,7 +665,7 @@ impl SessionIssueFieldWriter {
         .bind(result_version)
         .bind(changed)
         .bind(&timestamp)
-        .execute(&mut *transaction)
+        .execute(&mut **transaction)
         .await?;
         transaction.commit().await?;
 
@@ -729,7 +729,7 @@ impl SessionIssueFieldWriter {
         );
         let key_id = self.master_key.key_id();
 
-        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut transaction = crate::db::admitted_write(&self.pool).await?;
         let principal = self
             .sessions
             .authenticate_in_transaction(&mut transaction, token, now)
@@ -757,7 +757,7 @@ impl SessionIssueFieldWriter {
         )
         .bind(project_id)
         .bind(issue_number)
-        .fetch_optional(&mut *transaction)
+        .fetch_optional(&mut **transaction)
         .await?
         .ok_or(IssueFieldError::Unavailable)?;
         if row.try_get::<Option<String>, _>("trashed_at")?.is_some() {
@@ -795,7 +795,7 @@ impl SessionIssueFieldWriter {
         )
         .bind(actor)
         .bind(key_digest.as_slice())
-        .fetch_optional(&mut *transaction)
+        .fetch_optional(&mut **transaction)
         .await?;
         if let Some(prior) = prior {
             let stored_key: Vec<u8> = prior.try_get("master_key_id")?;
@@ -897,7 +897,7 @@ impl SessionIssueFieldWriter {
             .bind(project_id)
             .bind(&issue_id)
             .bind(current_version)
-            .execute(&mut *transaction)
+            .execute(&mut **transaction)
             .await?;
             if updated.rows_affected() != 1 {
                 return Err(IssueFieldError::VersionConflict);
@@ -916,7 +916,7 @@ impl SessionIssueFieldWriter {
             .bind(&timestamp)
             .bind(serde_json::to_string(&current_assignee)?)
             .bind(serde_json::to_string(&input.assignee_user_id)?)
-            .execute(&mut *transaction)
+            .execute(&mut **transaction)
             .await?;
             sqlx::query(
                 "INSERT INTO outbox_events \
@@ -930,7 +930,7 @@ impl SessionIssueFieldWriter {
             .bind(actor)
             .bind(result_version)
             .bind(&timestamp)
-            .execute(&mut *transaction)
+            .execute(&mut **transaction)
             .await?;
         }
 
@@ -952,7 +952,7 @@ impl SessionIssueFieldWriter {
         .bind(result_version)
         .bind(changed)
         .bind(&timestamp)
-        .execute(&mut *transaction)
+        .execute(&mut **transaction)
         .await?;
         transaction.commit().await?;
 

@@ -163,7 +163,7 @@ impl MfaLoginService {
         let expires_at_text = format_timestamp(expires_at);
         Uuid::parse_str(&verified.user_id).map_err(|_| MfaLoginError::InvalidState)?;
         let credential_fingerprint = password_fingerprint(&verified.password_hash);
-        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut transaction = crate::db::admitted_write(&self.pool).await?;
 
         if let Some(blocked_until) = self
             .rate_limiter
@@ -187,7 +187,7 @@ impl MfaLoginService {
         .bind(&verified.user_id)
         .bind(&verified.password_hash)
         .bind(&verified.email_key)
-        .fetch_one(&mut *transaction)
+        .fetch_one(&mut **transaction)
         .await?;
         if credential_is_current != 1 {
             transaction.rollback().await?;
@@ -198,14 +198,14 @@ impl MfaLoginService {
             "SELECT EXISTS(SELECT 1 FROM installation_admins WHERE user_id = ?)",
         )
         .bind(&verified.user_id)
-        .fetch_one(&mut *transaction)
+        .fetch_one(&mut **transaction)
         .await?;
         let active_totp_credential_id: Option<String> = sqlx::query_scalar(
             "SELECT id FROM mfa_credentials \
              WHERE user_id = ? AND activated_at IS NOT NULL",
         )
         .bind(&verified.user_id)
-        .fetch_optional(&mut *transaction)
+        .fetch_optional(&mut **transaction)
         .await?;
 
         if is_installation_admin == 1 && active_totp_credential_id.is_none() {
@@ -219,7 +219,7 @@ impl MfaLoginService {
             let token_hash = token.digest();
             sqlx::query("DELETE FROM mfa_login_challenges WHERE expires_at <= ?")
                 .bind(&now_text)
-                .execute(&mut *transaction)
+                .execute(&mut **transaction)
                 .await?;
             sqlx::query(
                 "INSERT INTO mfa_login_challenges \
@@ -234,7 +234,7 @@ impl MfaLoginService {
             .bind(totp_credential_id)
             .bind(&now_text)
             .bind(&expires_at_text)
-            .execute(&mut *transaction)
+            .execute(&mut **transaction)
             .await?;
             transaction.commit().await?;
             return Ok(MfaLoginPasswordOutcome::MfaRequired(MfaLoginChallenge {
@@ -274,7 +274,7 @@ impl MfaLoginService {
     ) -> Result<MfaLoginAuthentication, MfaLoginError> {
         let token_hash = token.digest();
         let now_text = format_timestamp(now);
-        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut transaction = crate::db::admitted_write(&self.pool).await?;
         let challenge = sqlx::query(
             "SELECT challenges.user_id, challenges.email_key, \
                     challenges.credential_fingerprint, challenges.created_at, \
@@ -296,12 +296,12 @@ impl MfaLoginService {
         )
         .bind(token_hash.as_slice())
         .bind(&now_text)
-        .fetch_optional(&mut *transaction)
+        .fetch_optional(&mut **transaction)
         .await?;
         let Some(challenge) = challenge else {
             sqlx::query("DELETE FROM mfa_login_challenges WHERE token_hash = ?")
                 .bind(token_hash.as_slice())
-                .execute(&mut *transaction)
+                .execute(&mut **transaction)
                 .await?;
             transaction.commit().await?;
             return Ok(MfaLoginAuthentication::Rejected {
@@ -328,7 +328,7 @@ impl MfaLoginService {
         if created_at > now || expires_at != maximum_expires_at || expires_at <= now {
             sqlx::query("DELETE FROM mfa_login_challenges WHERE token_hash = ?")
                 .bind(token_hash.as_slice())
-                .execute(&mut *transaction)
+                .execute(&mut **transaction)
                 .await?;
             transaction.commit().await?;
             return Ok(MfaLoginAuthentication::Rejected {
@@ -346,7 +346,7 @@ impl MfaLoginService {
         if !fingerprint_is_current {
             sqlx::query("DELETE FROM mfa_login_challenges WHERE token_hash = ?")
                 .bind(token_hash.as_slice())
-                .execute(&mut *transaction)
+                .execute(&mut **transaction)
                 .await?;
             transaction.commit().await?;
             return Ok(MfaLoginAuthentication::Rejected {
@@ -386,7 +386,7 @@ impl MfaLoginService {
         .bind(token_hash.as_slice())
         .bind(&user_id)
         .bind(&now_text)
-        .execute(&mut *transaction)
+        .execute(&mut **transaction)
         .await?;
         if consumed.rows_affected() != 1 {
             transaction.rollback().await?;

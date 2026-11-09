@@ -201,8 +201,7 @@ pub async fn replace_grant(
             return Err(GrantError::Invalid);
         }
     }
-    let mut transaction = pool
-        .begin_with("BEGIN IMMEDIATE")
+    let mut transaction = crate::db::admitted_write(pool)
         .await
         .map_err(|_| GrantError::Database)?;
     for project_id in &unique {
@@ -212,7 +211,7 @@ pub async fn replace_grant(
         )
         .bind(project_id)
         .bind(user_id)
-        .fetch_optional(&mut *transaction)
+        .fetch_optional(&mut **transaction)
         .await
         .map_err(|_| GrantError::Database)?;
         if member.is_none() {
@@ -222,7 +221,7 @@ pub async fn replace_grant(
     let timestamp = format_timestamp(now);
     sqlx::query("DELETE FROM mcp_grants WHERE user_id = ?")
         .bind(user_id)
-        .execute(&mut *transaction)
+        .execute(&mut **transaction)
         .await
         .map_err(|_| GrantError::Database)?;
     sqlx::query(
@@ -234,14 +233,14 @@ pub async fn replace_grant(
     .bind(i64::from(all_projects))
     .bind(&timestamp)
     .bind(&timestamp)
-    .execute(&mut *transaction)
+    .execute(&mut **transaction)
     .await
     .map_err(|_| GrantError::Database)?;
     for project_id in &unique {
         sqlx::query("INSERT INTO mcp_grant_projects (user_id, project_id) VALUES (?, ?)")
             .bind(user_id)
             .bind(project_id)
-            .execute(&mut *transaction)
+            .execute(&mut **transaction)
             .await
             .map_err(|_| GrantError::Database)?;
     }

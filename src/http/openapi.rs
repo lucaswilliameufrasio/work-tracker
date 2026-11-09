@@ -530,13 +530,14 @@ pub fn browser_document() -> Value {
     paths
         .get_mut("/api/v1/projects/{project_id}/issues")
         .unwrap()["post"] = create;
+    insert_admin_contract(&mut paths);
     insert_entry_contract(&mut paths);
     let mut document = json!({
         "openapi": "3.1.0",
         "info": {
             "title": "Puxiri opt-in browser API — partial development contract",
             "version": env!("CARGO_PKG_VERSION"),
-            "description": "Disabled (404) unless --browser-origin/PUXIRI_BROWSER_ORIGIN is configured. Listener does not terminate TLS; use an explicitly configured HTTPS origin. Cookie-only authentication; no Authorization fallback. Host must match; Origin and Fetch Metadata are checked when supplied, and mutations require exact Origin plus CSRF. Unknown/duplicate query fields are rejected. Every operation has no-store responses; HEAD has no body, including errors. Browser admission: eight in-flight requests per router instance, no admission queue; path+query <=2048 bytes, headers <=64 entries/16384 aggregate name+value bytes. Matched anonymous setup and login requests, project creation, POST issue creation/move, PUT issue text/priority/due-date/assignee, POST issue comments, PUT comment edits, POST invitations, PUT the mail sender, and PUT the MCP grant accept uncompressed JSON up to 524288 bytes. Setup and login start do not require a session. Project and issue mutations require the session cookie and CSRF. Every other operation requires an empty body. Bodies must finish within one second before any handler/transaction starts. There is no whole-handler timeout or per-client requests-per-second limit. Setup issues the initial administrator session. Later Muira login issues a Puxiri session only when that person already belongs to the installation or consumes a pending invitation; otherwise the callback stores no account and sends the browser to the invitation-required page. A Muira token never authorizes a Puxiri call. MCP accepts that token only as identity after an invitation and a separate Puxiri grant. This contract issues no API token. Do not store bearer tokens in localStorage. This document is generated locally, not served as an endpoint or a production readiness claim."
+            "description": "Disabled (404) unless --browser-origin/PUXIRI_BROWSER_ORIGIN is configured. Listener does not terminate TLS; use an explicitly configured HTTPS origin. Cookie-only authentication; no Authorization fallback. Host must match; Origin and Fetch Metadata are checked when supplied, and mutations require exact Origin plus CSRF. Unknown/duplicate query fields are rejected. Every operation has no-store responses; HEAD has no body, including errors. Browser admission: eight in-flight requests per router instance, no admission queue; path+query <=2048 bytes, headers <=64 entries/16384 aggregate name+value bytes. Matched anonymous setup and login requests, project creation, POST issue creation/move, PUT issue text/priority/due-date/assignee, POST issue comments, PUT comment edits, POST invitations, PUT the mail sender, PUT the MCP grant, POST installation ban and unban, and POST replication capture and restore accept uncompressed JSON up to 524288 bytes. Setup and login start do not require a session. Project and issue mutations require the session cookie and CSRF. Every other operation requires an empty body. Bodies must finish within one second before any handler/transaction starts. There is no whole-handler timeout or per-client requests-per-second limit. Setup issues the initial administrator session. Later Muira login issues a Puxiri session only when that person already belongs to the installation or consumes a pending invitation; otherwise the callback stores no account and sends the browser to the invitation-required page. A Muira token never authorizes a Puxiri call. MCP accepts that token only as identity after an invitation and a separate Puxiri grant. Installation administration is separate from organization ownership. This contract issues no API token. Do not store bearer tokens in localStorage. This document is generated locally, not served as an endpoint or a production readiness claim."
         },
         "security": [{"browserSession": []}],
         "paths": paths,
@@ -573,6 +574,84 @@ pub fn browser_document() -> Value {
             }
         }
     });
+    {
+        let schemas = document["components"]["schemas"]
+            .as_object_mut()
+            .expect("openapi schemas");
+        schemas.insert(
+            "InstallationOverview".into(),
+            object(
+                json!({"login_source": {"type": "string", "enum": ["puxiri", "muira"]}, "mail_configured": {"type": "boolean"}, "replication": {"$ref": "#/components/schemas/ReplicationStatus"}}),
+                &["mail_configured", "replication"],
+            ),
+        );
+        schemas.insert(
+            "ReplicationStatus".into(),
+            object(
+                json!({"snapshot": {"type": "boolean"}, "txid": {"type": "string", "minLength": 1}, "same_filesystem": {"type": "boolean"}}),
+                &["snapshot", "same_filesystem"],
+            ),
+        );
+        schemas.insert(
+            "InstallationPerson".into(),
+            object(
+                json!({"user_id": uuid.clone(), "display_name": {"type": "string", "minLength": 1}, "organization_role": {"type": "string", "enum": ["owner", "admin", "member", "guest"]}, "state": {"type": "string", "enum": ["active", "banned", "disabled"]}, "installation_admin": {"type": "boolean"}, "primary_email": {"type": "string", "minLength": 1}}),
+                &[
+                    "user_id",
+                    "display_name",
+                    "organization_role",
+                    "state",
+                    "installation_admin",
+                ],
+            ),
+        );
+        schemas.insert(
+            "InstallationPeople".into(),
+            object(
+                json!({"data": {"type": "array", "maxItems": 200, "items": {"$ref": "#/components/schemas/InstallationPerson"}}, "has_more": {"type": "boolean"}}),
+                &["data", "has_more"],
+            ),
+        );
+        schemas.insert(
+            "AuditRecord".into(),
+            object(
+                json!({"id": uuid.clone(), "event_kind": {"type": "string", "minLength": 1}, "result": {"type": "string", "enum": ["success", "failure"]}, "actor_user_id": uuid.clone(), "target_kind": {"type": "string", "minLength": 1}, "target_id": uuid.clone(), "reason": {"type": "string", "minLength": 1}, "occurred_at": timestamp.clone()}),
+                &[
+                    "id",
+                    "event_kind",
+                    "result",
+                    "target_kind",
+                    "target_id",
+                    "occurred_at",
+                ],
+            ),
+        );
+        schemas.insert(
+            "AuditPage".into(),
+            object(
+                json!({"data": {"type": "array", "maxItems": 50, "items": {"$ref": "#/components/schemas/AuditRecord"}}, "has_more": {"type": "boolean"}}),
+                &["data", "has_more"],
+            ),
+        );
+        schemas.insert(
+            "AccountChange".into(),
+            object(json!({"changed": {"type": "boolean"}}), &["changed"]),
+        );
+        schemas.insert(
+            "ReplicationCapture".into(),
+            object(
+                json!({"txid": {"type": "string", "minLength": 1}, "transactions": {"type": "integer", "minimum": 0}, "wal_frames": {"type": "integer", "minimum": 0}, "snapshot_created": {"type": "boolean"}}),
+                &["txid", "transactions", "wal_frames", "snapshot_created"],
+            ),
+        );
+        schemas.insert(
+            "ReplicationRestore".into(),
+            object(
+                json!({"file_name": {"type": "string", "minLength": 1, "maxLength": 80}}),
+                &["file_name"],
+            ),
+        );
+    }
     let mut detail = document["components"]["schemas"]["Issue"].clone();
     let mut card = detail.clone();
     card["properties"]["rank"] = json!({"type": "string", "pattern": "^(0|-?[1-9][0-9]{0,18})$", "maxLength": 20, "description": "Read-only canonical signed i64 decimal, from -9223372036854775808 through 9223372036854775807."});
@@ -751,6 +830,93 @@ pub fn browser_document() -> Value {
         &["id", "project_key", "name", "default_view"],
     );
     document
+}
+
+fn insert_admin_contract(paths: &mut serde_json::Map<String, Value>) {
+    let headers = vec![
+        json!({"name": "Origin", "in": "header", "required": true, "schema": {"type": "string"}}),
+        json!({"name": "x-csrf-token", "in": "header", "required": true, "schema": {"type": "string", "minLength": 43, "maxLength": 43}}),
+    ];
+    let mut person_parameters = vec![
+        json!({"name": "person_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}}),
+    ];
+    person_parameters.extend(headers.clone());
+    let overview = "Installation administration only. Organization ownership is not enough. Shows the login source when setup has chosen one, whether an email sender is configured, and the local replication watermark. A replica on the same filesystem does not survive loss of that disk. This response has no issue text.";
+    paths.insert(
+        "/api/v1/admin/overview".into(),
+        json!({
+            "get": operation("installationOverview", Some("InstallationOverview"), vec![], overview),
+            "head": operation("installationOverviewHead", None, vec![], overview),
+        }),
+    );
+    let people = "People in the organization: display name, organization role, account state, installation-admin flag, and primary email when one exists. Installation administration is required. This is not an issue reader.";
+    paths.insert(
+        "/api/v1/admin/people".into(),
+        json!({
+            "get": operation("listInstallationPeople", Some("InstallationPeople"), vec![], people),
+            "head": operation("listInstallationPeopleHead", None, vec![], people),
+        }),
+    );
+    paths.insert(
+        "/api/v1/admin/people/{person_id}/ban".into(),
+        json!({"post": authenticated_mutation(
+            "banInstallationPerson",
+            "AccountChange",
+            "200",
+            "Ban an account. Memberships stay. Credentials that could become valid again are revoked. The reason is stored on the audit event. The last installation administrator cannot be removed this way.",
+            object(json!({"reason": {"type": "string", "minLength": 1, "maxLength": 500}}), &["reason"]),
+            person_parameters.clone(),
+        )}),
+    );
+    paths.insert(
+        "/api/v1/admin/people/{person_id}/unban".into(),
+        json!({"post": authenticated_mutation(
+            "unbanInstallationPerson",
+            "AccountChange",
+            "200",
+            "Restore a banned account to active. Revoked sessions are not recreated.",
+            object(json!({}), &[]),
+            person_parameters,
+        )}),
+    );
+    let catalog = "Project metadata for an installation administrator: key, name, archive time, membership count, and issue count. The first 100 projects are returned in project-key order. This does not include issue text. Organization ownership alone is not this permission.";
+    paths.insert(
+        "/api/v1/admin/catalog".into(),
+        json!({
+            "get": operation("listInstallationCatalog", Some("OperationalProjectPage"), vec![], catalog),
+            "head": operation("listInstallationCatalogHead", None, vec![], catalog),
+        }),
+    );
+    let audit_text = "The 50 newest audit events: kind, result, actor, target, and the reason when the administrator recorded one. Issue text is not included.";
+    paths.insert(
+        "/api/v1/admin/audit".into(),
+        json!({
+            "get": operation("listInstallationAudit", Some("AuditPage"), vec![], audit_text),
+            "head": operation("listInstallationAuditHead", None, vec![], audit_text),
+        }),
+    );
+    paths.insert(
+        "/api/v1/admin/replication/capture".into(),
+        json!({"post": authenticated_mutation(
+            "captureReplication",
+            "ReplicationCapture",
+            "200",
+            "Create the initial snapshot when needed, then capture the WAL through sqlite-replication while application writers are paused. The repository is local. This does not upload to object storage and does not promise survival of power loss or of the disk that holds the repository.",
+            object(json!({}), &[]),
+            headers.clone(),
+        )}),
+    );
+    paths.insert(
+        "/api/v1/admin/replication/restore".into(),
+        json!({"post": authenticated_mutation(
+            "restoreReplication",
+            "ReplicationRestore",
+            "200",
+            "Restore the newest verified local point into a new file under the data directory. The live database is not replaced. Stop Puxiri before substituting that file by hand.",
+            object(json!({}), &[]),
+            headers,
+        )}),
+    );
 }
 
 fn insert_entry_contract(paths: &mut serde_json::Map<String, Value>) {

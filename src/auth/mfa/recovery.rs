@@ -241,7 +241,7 @@ impl MfaRecoveryService {
         let token_digest = token.digest();
         let now_text = format_timestamp(now);
         let expires_at_text = format_timestamp(expires_at);
-        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut transaction = crate::db::admitted_write(&self.pool).await?;
 
         let current_password: i64 = sqlx::query_scalar(
             "SELECT EXISTS( \
@@ -256,20 +256,20 @@ impl MfaRecoveryService {
         .bind(&verified.user_id)
         .bind(&verified.password_hash)
         .bind(&verified.email_key)
-        .fetch_one(&mut *transaction)
+        .fetch_one(&mut **transaction)
         .await?;
         let active_totp: i64 = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM mfa_credentials \
              WHERE user_id = ? AND activated_at IS NOT NULL)",
         )
         .bind(&verified.user_id)
-        .fetch_one(&mut *transaction)
+        .fetch_one(&mut **transaction)
         .await?;
         let installation_admin: i64 = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM installation_admins WHERE user_id = ?)",
         )
         .bind(&verified.user_id)
-        .fetch_one(&mut *transaction)
+        .fetch_one(&mut **transaction)
         .await?;
         if current_password != 1 || active_totp != 1 || installation_admin == 1 {
             transaction.rollback().await?;
@@ -284,7 +284,7 @@ impl MfaRecoveryService {
         .bind(&now_text)
         .bind(&verified.user_id)
         .bind(&now_text)
-        .execute(&mut *transaction)
+        .execute(&mut **transaction)
         .await?;
         let recovery_already_open: i64 = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM mfa_recovery_sessions \
@@ -293,7 +293,7 @@ impl MfaRecoveryService {
         )
         .bind(&verified.user_id)
         .bind(&now_text)
-        .fetch_one(&mut *transaction)
+        .fetch_one(&mut **transaction)
         .await?;
         if recovery_already_open == 1 {
             transaction.rollback().await?;
@@ -319,7 +319,7 @@ impl MfaRecoveryService {
         .bind(&verified.user_id)
         .bind(&now_text)
         .bind(&expires_at_text)
-        .execute(&mut *transaction)
+        .execute(&mut **transaction)
         .await?;
         self.rate_limiter
             .record_success_in_transaction(&mut transaction, &identity_key)
@@ -383,7 +383,7 @@ impl MfaRecoveryService {
         let max_expires_at = now
             .checked_add_signed(RECOVERY_SESSION_LIFETIME)
             .ok_or(MfaRecoveryError::DeadlineOutOfRange)?;
-        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut transaction = crate::db::admitted_write(&self.pool).await?;
         let Some(principal) = self
             .current_principal_in_transaction(&mut transaction, token, now)
             .await?
@@ -394,14 +394,14 @@ impl MfaRecoveryService {
 
         sqlx::query("DELETE FROM mfa_recovery_enrollments WHERE expires_at <= ?")
             .bind(&now_text)
-            .execute(&mut *transaction)
+            .execute(&mut **transaction)
             .await?;
         let existing_enrollment: i64 = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM mfa_recovery_enrollments \
              WHERE recovery_session_id = ?)",
         )
         .bind(&principal.recovery_session_id)
-        .fetch_one(&mut *transaction)
+        .fetch_one(&mut **transaction)
         .await?;
         if existing_enrollment == 1 {
             transaction.rollback().await?;
@@ -430,7 +430,7 @@ impl MfaRecoveryService {
         .bind(encrypted_secret.as_bytes())
         .bind(&now_text)
         .bind(&expires_at_text)
-        .execute(&mut *transaction)
+        .execute(&mut **transaction)
         .await?;
         audit::append_in_transaction(
             &mut transaction,
@@ -463,7 +463,7 @@ impl MfaRecoveryService {
         now: DateTime<Utc>,
     ) -> Result<Option<RecoveryCodeBatch>, MfaRecoveryError> {
         let now_text = format_timestamp(now);
-        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut transaction = crate::db::admitted_write(&self.pool).await?;
         let Some(principal) = self
             .current_principal_in_transaction(&mut transaction, token, now)
             .await?
@@ -479,7 +479,7 @@ impl MfaRecoveryService {
         )
         .bind(&principal.recovery_session_id)
         .bind(&now_text)
-        .fetch_optional(&mut *transaction)
+        .fetch_optional(&mut **transaction)
         .await?;
         let Some(enrollment) = enrollment else {
             transaction.rollback().await?;
@@ -519,7 +519,7 @@ impl MfaRecoveryService {
              WHERE user_id = ? AND activated_at IS NOT NULL",
         )
         .bind(&principal.user_id)
-        .fetch_optional(&mut *transaction)
+        .fetch_optional(&mut **transaction)
         .await?;
         let Some(old_credential_id) = old_credential_id else {
             transaction.rollback().await?;
@@ -531,7 +531,7 @@ impl MfaRecoveryService {
         )
         .bind(old_credential_id)
         .bind(&principal.user_id)
-        .execute(&mut *transaction)
+        .execute(&mut **transaction)
         .await?;
         if deleted.rows_affected() != 1 {
             transaction.rollback().await?;
@@ -550,7 +550,7 @@ impl MfaRecoveryService {
         .bind(&activated_at)
         .bind(&activated_at)
         .bind(matched_step)
-        .execute(&mut *transaction)
+        .execute(&mut **transaction)
         .await?;
 
         let recovery_codes = self
@@ -568,7 +568,7 @@ impl MfaRecoveryService {
         )
         .bind(&credential_id_text)
         .bind(&principal.recovery_session_id)
-        .execute(&mut *transaction)
+        .execute(&mut **transaction)
         .await?;
         let completed = sqlx::query(
             "UPDATE mfa_recovery_sessions SET completed_at = ? \
@@ -579,7 +579,7 @@ impl MfaRecoveryService {
         .bind(&principal.recovery_session_id)
         .bind(&principal.user_id)
         .bind(&now_text)
-        .execute(&mut *transaction)
+        .execute(&mut **transaction)
         .await?;
         if completed.rows_affected() != 1 {
             transaction.rollback().await?;
@@ -593,7 +593,7 @@ impl MfaRecoveryService {
         )
         .bind(&now_text)
         .bind(&principal.user_id)
-        .execute(&mut *transaction)
+        .execute(&mut **transaction)
         .await?;
         audit::append_in_transaction(
             &mut transaction,

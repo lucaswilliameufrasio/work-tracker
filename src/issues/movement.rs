@@ -228,7 +228,7 @@ impl SessionIssueMover {
             .keyed_digest(b"issue.move request sha256-json v1", digest.as_slice());
         let key_id = self.master_key.key_id();
 
-        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut transaction = crate::db::admitted_write(&self.pool).await?;
         let actor_id = match source {
             ActorSource::User(user_id) => user_id.to_owned(),
             ActorSource::Session(token) => self
@@ -255,7 +255,7 @@ impl SessionIssueMover {
         let issue = sqlx::query("SELECT issues.id, issues.issue_number, issues.status_id, issues.rank, issues.version, issues.completed_at, issues.updated_at, statuses.category AS current_category, projects.project_key FROM issues JOIN statuses ON statuses.project_id = issues.project_id AND statuses.id = issues.status_id JOIN projects ON projects.id = issues.project_id WHERE issues.project_id = ? AND issues.issue_number = ? AND issues.trashed_at IS NULL")
             .bind(project_id)
             .bind(issue_number)
-            .fetch_optional(&mut *transaction)
+            .fetch_optional(&mut **transaction)
             .await?
             .ok_or(IssueMoveError::Unavailable)?;
         let issue_id: String = issue.try_get("id")?;
@@ -287,7 +287,7 @@ impl SessionIssueMover {
         let prior = sqlx::query("SELECT request_fingerprint, master_key_id, project_id, issue_id, issue_number, result_status_id, result_version, changed FROM issue_move_receipts WHERE actor_user_id = ? AND operation = 'issue.move' AND key_digest = ?")
             .bind(actor)
             .bind(key_digest.as_slice())
-            .fetch_optional(&mut *transaction)
+            .fetch_optional(&mut **transaction)
             .await?;
         if let Some(prior) = prior {
             let stored_key: Vec<u8> = prior.try_get("master_key_id")?;
@@ -350,7 +350,7 @@ impl SessionIssueMover {
         )
         .bind(project_id)
         .bind(input.target_status_id)
-        .fetch_optional(&mut *transaction)
+        .fetch_optional(&mut **transaction)
         .await?;
         let target_category = target_category.ok_or(IssueMoveError::Unavailable)?;
         if !valid_category(&target_category) {
@@ -484,7 +484,7 @@ impl SessionIssueMover {
             .bind(project_id)
             .bind(&issue_id)
             .bind(current_version)
-            .execute(&mut *transaction)
+            .execute(&mut **transaction)
             .await?;
         if updated.rows_affected() != 1 {
             return Err(IssueMoveError::VersionConflict);
@@ -496,7 +496,7 @@ impl SessionIssueMover {
             .bind(&issue_id)
             .bind(actor)
             .bind(&timestamp)
-            .execute(&mut *transaction)
+            .execute(&mut **transaction)
             .await?;
         sqlx::query("INSERT INTO outbox_events (id, event_kind, payload_version, project_id, issue_id, actor_user_id, issue_version, occurred_at) VALUES (?, 'issue.moved', 1, ?, ?, ?, ?, ?)")
             .bind(Uuid::now_v7().to_string())
@@ -505,7 +505,7 @@ impl SessionIssueMover {
             .bind(actor)
             .bind(result_version)
             .bind(&timestamp)
-            .execute(&mut *transaction)
+            .execute(&mut **transaction)
             .await?;
         insert_receipt(
             &mut transaction,

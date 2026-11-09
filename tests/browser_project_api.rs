@@ -304,6 +304,7 @@ async fn every_documented_browser_operation_matches_real_success_and_auth_error_
         .execute(database.pool())
         .await
         .unwrap();
+    let member = user(&database, "member").await;
     let comment = puxiri::issues::comments::CommentStore::new(database.pool().clone())
         .create(
             &actor,
@@ -334,7 +335,8 @@ async fn every_documented_browser_operation_matches_real_success_and_auth_error_
             let uri = path
                 .replace("{session_id}", &issued.id)
                 .replace("{project_id}", &project.id)
-                .replace("{user_id}", &actor);
+                .replace("{user_id}", &actor)
+                .replace("{person_id}", &member);
             let uri = uri.replace("{issue_number}", &contract_issue.issue_number.to_string());
             let mut uri = uri.replace("{status_id}", &contract_issue.status_id);
             uri = uri.replace(
@@ -459,6 +461,13 @@ async fn every_documented_browser_operation_matches_real_success_and_auth_error_
                     r#"{"provider":"sabia","api_key":"contract-mail-key","template":"organization-invite","origin":"https://sabia.example.test"}"#.to_owned()
                 } else if operation_id == "replaceMcpGrant" {
                     r#"{"scope":"read","all_projects":true}"#.to_owned()
+                } else if operation_id == "banInstallationPerson" {
+                    r#"{"reason":"Contract review"}"#.to_owned()
+                } else if operation_id == "unbanInstallationPerson"
+                    || operation_id == "captureReplication"
+                    || operation_id == "restoreReplication"
+                {
+                    "{}".to_owned()
                 } else if operation_id == "createIssueComment" {
                     r#"{"body":"Contract comment"}"#.to_owned()
                 } else if operation_id == "editIssueComment" {

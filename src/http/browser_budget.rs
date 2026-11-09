@@ -264,6 +264,22 @@ fn json_admission(method: &axum::http::Method, path: &str) -> JsonAdmission {
             | (&axum::http::Method::POST, "/api/v1/invitations")
             | (&axum::http::Method::PUT, "/api/v1/mail/sender")
             | (&axum::http::Method::PUT, "/api/v1/mcp/grant")
+            | (
+                &axum::http::Method::POST,
+                "/api/v1/admin/people/{person_id}/ban"
+            )
+            | (
+                &axum::http::Method::POST,
+                "/api/v1/admin/people/{person_id}/unban"
+            )
+            | (
+                &axum::http::Method::POST,
+                "/api/v1/admin/replication/capture"
+            )
+            | (
+                &axum::http::Method::POST,
+                "/api/v1/admin/replication/restore"
+            )
     ) {
         return JsonAdmission::Authenticated;
     }

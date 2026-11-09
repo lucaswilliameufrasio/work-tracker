@@ -390,6 +390,7 @@ async fn archive_audit_migration_preserves_old_rows_and_enforces_typed_immutable
         .connect_with(options)
         .await
         .unwrap();
+    puxiri::db::ensure_write_gate(&pool).await.unwrap();
     let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
     let mut paths = std::fs::read_dir(directory)
         .unwrap()

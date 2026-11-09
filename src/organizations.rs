@@ -73,7 +73,7 @@ impl OrganizationMembershipStore {
         role: OrganizationRole,
         now: DateTime<Utc>,
     ) -> Result<OrganizationMembershipChange, OrganizationMembershipError> {
-        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut transaction = crate::db::admitted_write(&self.pool).await?;
         let actor_context = load_organization_actor(&mut transaction, actor_user_id).await?;
         if authorize(
             &actor_context,
@@ -134,7 +134,7 @@ impl OrganizationMembershipStore {
         .bind(organization_role_as_str(role))
         .bind(target_user_id)
         .bind(organization_role_as_str(current_role))
-        .execute(&mut *transaction)
+        .execute(&mut **transaction)
         .await?;
         if update.rows_affected() != 1 {
             transaction.rollback().await?;
@@ -164,7 +164,7 @@ impl OrganizationMembershipStore {
         target_user_id: &str,
         now: DateTime<Utc>,
     ) -> Result<OrganizationMembershipChange, OrganizationMembershipError> {
-        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut transaction = crate::db::admitted_write(&self.pool).await?;
         let actor_context = load_organization_actor(&mut transaction, actor_user_id).await?;
         if authorize(
             &actor_context,
@@ -204,7 +204,7 @@ impl OrganizationMembershipStore {
              WHERE organization_id = 1 AND user_id = ? AND role = 'owner'",
         )
         .bind(actor_user_id)
-        .execute(&mut *transaction)
+        .execute(&mut **transaction)
         .await?;
         if old_owner_update.rows_affected() != 1 {
             transaction.rollback().await?;
@@ -216,7 +216,7 @@ impl OrganizationMembershipStore {
         )
         .bind(target_user_id)
         .bind(organization_role_as_str(target_role))
-        .execute(&mut *transaction)
+        .execute(&mut **transaction)
         .await?;
         if target_update.rows_affected() != 1 {
             transaction.rollback().await?;
@@ -257,7 +257,7 @@ impl OrganizationMembershipStore {
         target_user_id: &str,
         now: DateTime<Utc>,
     ) -> Result<OrganizationMembershipChange, OrganizationMembershipError> {
-        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut transaction = crate::db::admitted_write(&self.pool).await?;
         let actor_context = load_organization_actor(&mut transaction, actor_user_id).await?;
         if authorize(
             &actor_context,
@@ -295,7 +295,7 @@ impl OrganizationMembershipStore {
         user_id: &str,
         now: DateTime<Utc>,
     ) -> Result<OrganizationMembershipChange, OrganizationMembershipError> {
-        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut transaction = crate::db::admitted_write(&self.pool).await?;
         let context = load_organization_actor(&mut transaction, user_id).await?;
         let Some(current_role) = context.organization_role() else {
             transaction.rollback().await?;

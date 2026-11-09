@@ -3,6 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-11-08
 - **Email clarification:** 2026-11-08 — the usable version ships Sabiá, MillionSend, and Resend.
+- **Superseded in part on 2026-11-09 by [ADR 0007](0007-disaster-recovery-and-administration.md):** local disaster recovery through `sqlite-replication` and the installation administration panel are part of the usable installation. The rest of this decision stands. ADR 0002 stays Deferred.
 - **Context:** `docs/development-plan.md`, sections 7 and 10; [ADR 0001](0001-authorization-server-selection.md); [ADR 0002](0002-backup-archive-format-deferred.md)
 
 ## Context

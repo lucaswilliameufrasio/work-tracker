@@ -24,8 +24,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
             data_dir,
             master_key_path,
             browser_origin,
+            replication_dir,
         } => {
-            let database = Arc::new(Database::open(&data_dir).await?);
+            let database = match replication_dir {
+                Some(path) => Arc::new(Database::open_with_replication(&data_dir, &path).await?),
+                None => Arc::new(Database::open(&data_dir).await?),
+            };
             let master_key_path = master_key_path.unwrap_or_else(|| data_dir.join("master.key"));
             let master_key = MasterKeyStore::load_or_create(&master_key_path)?;
             let browser_entry = browser_origin.is_some();

@@ -309,7 +309,7 @@ impl OrganizationInvitationStore {
             .ok_or(OrganizationInvitationError::DeadlineOutOfRange)?;
         let now_text = format_timestamp(now);
         let expires_at_text = format_timestamp(expires_at);
-        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut transaction = crate::db::admitted_write(&self.pool).await?;
         let actor_context = load_organization_context(&mut transaction, actor_user_id).await?;
         let is_organization_admin = is_organization_admin(&actor_context);
         if !is_organization_admin && (role != OrganizationInviteRole::Guest || projects.is_empty())
@@ -350,7 +350,7 @@ impl OrganizationInvitationStore {
              )",
         )
         .bind(&email.key)
-        .fetch_one(&mut *transaction)
+        .fetch_one(&mut **transaction)
         .await?;
         if already_member != 0 {
             return Err(OrganizationInvitationError::TargetAlreadyMember);
@@ -363,7 +363,7 @@ impl OrganizationInvitationStore {
              ORDER BY created_at, id",
         )
         .bind(&email.key)
-        .fetch_all(&mut *transaction)
+        .fetch_all(&mut **transaction)
         .await?;
         if !is_organization_admin {
             for invite in &existing_invites {
@@ -385,7 +385,7 @@ impl OrganizationInvitationStore {
             )
             .bind(&now_text)
             .bind(&previous_id)
-            .execute(&mut *transaction)
+            .execute(&mut **transaction)
             .await?;
             if canceled.rows_affected() != 1 {
                 return Err(OrganizationInvitationError::CorruptState);
@@ -414,7 +414,7 @@ impl OrganizationInvitationStore {
         .bind(actor_user_id)
         .bind(&now_text)
         .bind(&expires_at_text)
-        .execute(&mut *transaction)
+        .execute(&mut **transaction)
         .await?;
 
         for assignment in &projects {
@@ -426,7 +426,7 @@ impl OrganizationInvitationStore {
             .bind(&invite_id)
             .bind(&assignment.project_id)
             .bind(project_role_as_str(assignment.role))
-            .execute(&mut *transaction)
+            .execute(&mut **transaction)
             .await?;
         }
 
@@ -541,7 +541,7 @@ impl OrganizationInvitationStore {
         invitation_id: &str,
         now: DateTime<Utc>,
     ) -> Result<(), OrganizationInvitationError> {
-        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut transaction = crate::db::admitted_write(&self.pool).await?;
         let context = load_organization_context(&mut transaction, actor_user_id).await?;
         if !is_organization_admin(&context) {
             return Err(OrganizationInvitationError::Forbidden);
@@ -552,7 +552,7 @@ impl OrganizationInvitationStore {
              WHERE id = ? AND organization_id = 1",
         )
         .bind(invitation_id)
-        .fetch_optional(&mut *transaction)
+        .fetch_optional(&mut **transaction)
         .await?;
         let Some(invite) = invite else {
             return Err(OrganizationInvitationError::InvitationNotFound);
@@ -577,7 +577,7 @@ impl OrganizationInvitationStore {
         )
         .bind(format_timestamp(now))
         .bind(invitation_id)
-        .execute(&mut *transaction)
+        .execute(&mut **transaction)
         .await?;
         if canceled.rows_affected() != 1 {
             return Err(OrganizationInvitationError::CorruptState);
@@ -608,7 +608,7 @@ impl OrganizationInvitationStore {
             return Err(OrganizationInvitationError::Disabled);
         }
 
-        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut transaction = crate::db::admitted_write(&self.pool).await?;
         require_current_reauthentication(&mut transaction, proof, now).await?;
         let user_id = proof.user_id.as_str();
         let invitation = load_pending_invitation(&mut transaction, token, now).await?;
@@ -619,7 +619,7 @@ impl OrganizationInvitationStore {
         )
         .bind(user_id)
         .bind(&invitation.email_key)
-        .fetch_one(&mut *transaction)
+        .fetch_one(&mut **transaction)
         .await?;
         if confirmed_email == 0 {
             return Err(OrganizationInvitationError::EmailNotConfirmed);
@@ -630,7 +630,7 @@ impl OrganizationInvitationStore {
              WHERE organization_id = 1 AND user_id = ?)",
         )
         .bind(user_id)
-        .fetch_one(&mut *transaction)
+        .fetch_one(&mut **transaction)
         .await?;
         if already_member != 0 {
             return Err(OrganizationInvitationError::AlreadyOrganizationMember);
@@ -672,7 +672,7 @@ impl OrganizationInvitationStore {
         let user_id = Uuid::now_v7().to_string();
         let email_id = Uuid::now_v7().to_string();
         let now_text = format_timestamp(now);
-        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut transaction = crate::db::admitted_write(&self.pool).await?;
         let invitation = load_pending_invitation(&mut transaction, token, now).await?;
         ensure_invitation_email_is_unclaimed(&mut transaction, &invitation.email_key).await?;
 
@@ -685,7 +685,7 @@ impl OrganizationInvitationStore {
         .bind(display_name)
         .bind(&now_text)
         .bind(&now_text)
-        .execute(&mut *transaction)
+        .execute(&mut **transaction)
         .await?;
         sqlx::query(
             "INSERT INTO user_emails \
@@ -698,7 +698,7 @@ impl OrganizationInvitationStore {
         .bind(&invitation.email_key)
         .bind(&now_text)
         .bind(&now_text)
-        .execute(&mut *transaction)
+        .execute(&mut **transaction)
         .await?;
         sqlx::query(
             "INSERT INTO password_credentials (user_id, password_hash, changed_at) \
@@ -707,7 +707,7 @@ impl OrganizationInvitationStore {
         .bind(&user_id)
         .bind(&password_hash)
         .bind(&now_text)
-        .execute(&mut *transaction)
+        .execute(&mut **transaction)
         .await?;
 
         for (event_kind, target) in [

@@ -126,7 +126,7 @@ impl SessionIssueWriter {
             .master_key
             .keyed_digest(b"issue.create request sha256-json v1", digest.as_slice());
         let key_id = self.master_key.key_id();
-        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut transaction = crate::db::admitted_write(&self.pool).await?;
         let principal = self
             .sessions
             .authenticate_in_transaction(&mut transaction, token, now)
@@ -151,7 +151,7 @@ impl SessionIssueWriter {
         hash.update(parsed_key.as_bytes());
         let key_digest: [u8; 32] = hash.finalize().into();
         let previous = sqlx::query("SELECT request_fingerprint, master_key_id, project_id, issue_id, issue_number FROM issue_creation_receipts WHERE actor_user_id = ? AND operation = 'issue.create' AND key_digest = ?")
-            .bind(actor).bind(key_digest.as_slice()).fetch_optional(&mut *transaction).await?;
+            .bind(actor).bind(key_digest.as_slice()).fetch_optional(&mut **transaction).await?;
         if let Some(previous) = previous {
             let stored_key_id: Vec<u8> = previous.try_get("master_key_id")?;
             if stored_key_id.as_slice() != key_id {
@@ -178,7 +178,7 @@ impl SessionIssueWriter {
                 return Err(SessionIssueCreationError::CorruptReceipt);
             }
             let project_key: Option<String> = sqlx::query_scalar("SELECT projects.project_key FROM issues JOIN projects ON projects.id = issues.project_id WHERE issues.id = ? AND issues.project_id = ? AND issues.issue_number = ? AND issues.creator_user_id = ?")
-                .bind(&issue_id).bind(project_id).bind(issue_number).bind(actor).fetch_optional(&mut *transaction).await?;
+                .bind(&issue_id).bind(project_id).bind(issue_number).bind(actor).fetch_optional(&mut **transaction).await?;
             let project_key = project_key.ok_or(SessionIssueCreationError::Unavailable)?;
             if !(2..=6).contains(&project_key.len())
                 || !project_key.bytes().all(|byte| byte.is_ascii_uppercase())
@@ -199,7 +199,7 @@ impl SessionIssueWriter {
             IssueStore::create_in_transaction(&mut transaction, actor, project_id, input, now)
                 .await?;
         sqlx::query("INSERT INTO issue_creation_receipts (actor_user_id, operation, key_digest, request_fingerprint, master_key_id, project_id, issue_id, issue_number, created_at) VALUES (?, 'issue.create', ?, ?, ?, ?, ?, ?, ?)")
-            .bind(actor).bind(key_digest.as_slice()).bind(fingerprint.as_slice()).bind(key_id.as_slice()).bind(project_id).bind(&issue.id).bind(issue.issue_number).bind(format_timestamp(now)).execute(&mut *transaction).await?;
+            .bind(actor).bind(key_digest.as_slice()).bind(fingerprint.as_slice()).bind(key_id.as_slice()).bind(project_id).bind(&issue.id).bind(issue.issue_number).bind(format_timestamp(now)).execute(&mut **transaction).await?;
         let receipt = IssueCreationReceipt {
             issue_id: issue.id,
             project_id: issue.project_id,

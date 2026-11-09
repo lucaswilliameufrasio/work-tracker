@@ -106,7 +106,7 @@ impl EmailAddressStore {
         let user_id = proof.user_id();
         let email_id = Uuid::now_v7().to_string();
         let now_text = format_timestamp(now);
-        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut transaction = crate::db::admitted_write(&self.pool).await?;
         self.require_active_user(&mut transaction, user_id).await?;
         self.require_recent_authentication(&mut transaction, &proof, user_id, now)
             .await?;
@@ -114,7 +114,7 @@ impl EmailAddressStore {
             "SELECT EXISTS(SELECT 1 FROM user_emails WHERE address_key = ?)",
         )
         .bind(&email.key)
-        .fetch_one(&mut *transaction)
+        .fetch_one(&mut **transaction)
         .await?;
         if already_used != 0 {
             transaction.rollback().await?;
@@ -131,7 +131,7 @@ impl EmailAddressStore {
         .bind(&email.address)
         .bind(&email.key)
         .bind(&now_text)
-        .execute(&mut *transaction)
+        .execute(&mut **transaction)
         .await?;
         audit::append_in_transaction(
             &mut transaction,
@@ -213,7 +213,7 @@ impl EmailAddressStore {
         now: DateTime<Utc>,
     ) -> Result<bool, EmailAddressManagementError> {
         let user_id = proof.user_id();
-        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut transaction = crate::db::admitted_write(&self.pool).await?;
         self.require_active_user(&mut transaction, user_id).await?;
         self.require_recent_authentication(&mut transaction, &proof, user_id, now)
             .await?;
@@ -223,7 +223,7 @@ impl EmailAddressStore {
         )
         .bind(email_id)
         .bind(user_id)
-        .fetch_one(&mut *transaction)
+        .fetch_one(&mut **transaction)
         .await?;
         if confirmed == 0 {
             transaction.rollback().await?;
@@ -232,7 +232,7 @@ impl EmailAddressStore {
 
         sqlx::query("UPDATE user_emails SET is_primary = 0 WHERE user_id = ?")
             .bind(user_id)
-            .execute(&mut *transaction)
+            .execute(&mut **transaction)
             .await?;
         let promoted = sqlx::query(
             "UPDATE user_emails SET is_primary = 1 \
@@ -240,7 +240,7 @@ impl EmailAddressStore {
         )
         .bind(email_id)
         .bind(user_id)
-        .execute(&mut *transaction)
+        .execute(&mut **transaction)
         .await?;
         if promoted.rows_affected() != 1 {
             transaction.rollback().await?;
@@ -290,7 +290,7 @@ impl EmailAddressStore {
         now: DateTime<Utc>,
     ) -> Result<bool, EmailAddressManagementError> {
         let user_id = proof.user_id();
-        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut transaction = crate::db::admitted_write(&self.pool).await?;
         self.require_active_user(&mut transaction, user_id).await?;
         self.require_recent_authentication(&mut transaction, &proof, user_id, now)
             .await?;
@@ -300,7 +300,7 @@ impl EmailAddressStore {
         )
         .bind(email_id)
         .bind(user_id)
-        .fetch_optional(&mut *transaction)
+        .fetch_optional(&mut **transaction)
         .await?;
         let Some(target) = target else {
             transaction.rollback().await?;
@@ -313,7 +313,7 @@ impl EmailAddressStore {
         let total_count: i64 =
             sqlx::query_scalar("SELECT count(*) FROM user_emails WHERE user_id = ?")
                 .bind(user_id)
-                .fetch_one(&mut *transaction)
+                .fetch_one(&mut **transaction)
                 .await?;
         if total_count <= 1 {
             transaction.rollback().await?;
@@ -325,7 +325,7 @@ impl EmailAddressStore {
                  WHERE user_id = ? AND confirmed_at IS NOT NULL",
             )
             .bind(user_id)
-            .fetch_one(&mut *transaction)
+            .fetch_one(&mut **transaction)
             .await?;
             if confirmed_count <= 1 {
                 transaction.rollback().await?;
@@ -341,7 +341,7 @@ impl EmailAddressStore {
             )
             .bind(user_id)
             .bind(email_id)
-            .fetch_optional(&mut *transaction)
+            .fetch_optional(&mut **transaction)
             .await?;
             let Some(replacement) = replacement else {
                 transaction.rollback().await?;
@@ -349,19 +349,19 @@ impl EmailAddressStore {
             };
             sqlx::query("UPDATE user_emails SET is_primary = 0 WHERE user_id = ?")
                 .bind(user_id)
-                .execute(&mut *transaction)
+                .execute(&mut **transaction)
                 .await?;
             sqlx::query("UPDATE user_emails SET is_primary = 1 WHERE id = ? AND user_id = ?")
                 .bind(replacement)
                 .bind(user_id)
-                .execute(&mut *transaction)
+                .execute(&mut **transaction)
                 .await?;
         }
 
         let removed = sqlx::query("DELETE FROM user_emails WHERE id = ? AND user_id = ?")
             .bind(email_id)
             .bind(user_id)
-            .execute(&mut *transaction)
+            .execute(&mut **transaction)
             .await?;
         if removed.rows_affected() != 1 {
             transaction.rollback().await?;

@@ -48,6 +48,7 @@ async fn migration_preserves_existing_receipts_and_envelopes_and_supports_repeat
         )
         .await
         .unwrap();
+    puxiri::db::ensure_write_gate(&pool).await.unwrap();
     let mut paths =
         std::fs::read_dir(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations"))
             .unwrap()

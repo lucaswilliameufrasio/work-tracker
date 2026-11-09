@@ -160,8 +160,10 @@ impl SessionStore {
         Self { pool, policy }
     }
 
-    pub(crate) async fn begin_immediate(&self) -> Result<Transaction<'_, Sqlite>, SessionError> {
-        Ok(self.pool.begin_with("BEGIN IMMEDIATE").await?)
+    pub(crate) async fn begin_immediate(
+        &self,
+    ) -> Result<crate::db::WriteTransaction<'_>, SessionError> {
+        Ok(crate::db::admitted_write(&self.pool).await?)
     }
 
     pub async fn issue(
@@ -634,7 +636,7 @@ impl SessionStore {
         session_id: &str,
         now: DateTime<Utc>,
     ) -> Result<bool, SessionError> {
-        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut transaction = crate::db::admitted_write(&self.pool).await?;
         if !Self::revoke_in_transaction(&mut transaction, user_id, session_id, now).await? {
             transaction.rollback().await?;
             return Ok(false);
@@ -650,7 +652,7 @@ impl SessionStore {
         token: &SessionToken,
         now: DateTime<Utc>,
     ) -> Result<bool, SessionError> {
-        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut transaction = crate::db::admitted_write(&self.pool).await?;
         let Some(principal) = self
             .authenticate_in_transaction(&mut transaction, token, now)
             .await?
@@ -752,7 +754,7 @@ impl SessionStore {
     }
 
     pub async fn revoke_all(&self, user_id: &str, now: DateTime<Utc>) -> Result<u64, SessionError> {
-        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut transaction = crate::db::admitted_write(&self.pool).await?;
         let count = Self::revoke_all_in_transaction(&mut transaction, user_id, now).await?;
         transaction.commit().await?;
         Ok(count)
@@ -794,7 +796,7 @@ impl SessionStore {
         now: DateTime<Utc>,
     ) -> Result<Option<DateTime<Utc>>, SessionError> {
         let token_hash = token.digest().to_vec();
-        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut transaction = crate::db::admitted_write(&self.pool).await?;
         let row = sqlx::query(
             "SELECT sessions.id, sessions.user_id, sessions.created_at, \
                     sessions.last_activity_at, sessions.expires_at, \
@@ -810,7 +812,7 @@ impl SessionStore {
         .bind(&session.id)
         .bind(&session.user_id)
         .bind(&token_hash)
-        .fetch_optional(&mut *transaction)
+        .fetch_optional(&mut **transaction)
         .await?;
         let Some(row) = row else {
             transaction.rollback().await?;
@@ -875,7 +877,7 @@ impl SessionStore {
         .bind(&session.user_id)
         .bind(&token_hash)
         .bind(verified_password_hash)
-        .execute(&mut *transaction)
+        .execute(&mut **transaction)
         .await?;
         if updated.rows_affected() != 1 {
             transaction.rollback().await?;

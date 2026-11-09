@@ -203,7 +203,7 @@ impl InstallationEntry {
         let display_name = required_text(display_name)?;
         let email = normalize_email_address(email).map_err(|_| EntryError::SetupUnavailable)?;
         let password_hash = self.passwords.hash(password).await?;
-        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut transaction = crate::db::admitted_write(&self.pool).await?;
         SetupTokenStore::consume_in_transaction(&mut transaction, &token.digest(), now)
             .await
             .map_err(|_| EntryError::SetupUnavailable)?;
@@ -222,7 +222,7 @@ impl InstallationEntry {
         )
         .await?;
         sqlx::query("INSERT INTO installation_login (singleton, source) VALUES (1, 'puxiri')")
-            .execute(&mut *transaction)
+            .execute(&mut **transaction)
             .await?;
         let session = self
             .sessions
@@ -394,7 +394,7 @@ impl InstallationEntry {
         now: DateTime<Utc>,
     ) -> Result<MuiraLoginOutcome, EntryError> {
         let state_hash = sha256(state.as_bytes());
-        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut transaction = crate::db::admitted_write(&self.pool).await?;
         let attempt = sqlx::query(
             "SELECT purpose, nonce, organization_name, locale, timezone_name, display_name, \
                     owner_email, owner_email_key, setup_token_hash, client_secret_envelope, \
@@ -402,7 +402,7 @@ impl InstallationEntry {
              FROM muira_login_attempts WHERE state_hash = ?",
         )
         .bind(state_hash.to_vec())
-        .fetch_optional(&mut *transaction)
+        .fetch_optional(&mut **transaction)
         .await?;
         let Some(attempt) = attempt else {
             transaction.rollback().await?;
@@ -412,7 +412,7 @@ impl InstallationEntry {
         if expires_at <= format_timestamp(now) {
             sqlx::query("DELETE FROM muira_login_attempts WHERE state_hash = ?")
                 .bind(state_hash.to_vec())
-                .execute(&mut *transaction)
+                .execute(&mut **transaction)
                 .await?;
             transaction.commit().await?;
             return Err(EntryError::IdentityRejected);
@@ -477,7 +477,7 @@ impl InstallationEntry {
             .bind(&issuer)
             .bind(attempt.try_get::<String, _>("client_id")?)
             .bind(envelope)
-            .execute(&mut *transaction)
+            .execute(&mut **transaction)
             .await?;
             MuiraLoginOutcome::Session(
                 self.sessions
@@ -501,7 +501,7 @@ impl InstallationEntry {
             )
             .bind(&identity.issuer)
             .bind(&identity.subject)
-            .fetch_optional(&mut *transaction)
+            .fetch_optional(&mut **transaction)
             .await?;
             if let Some(existing) = existing {
                 let member: i64 = existing.try_get("member")?;
@@ -532,7 +532,7 @@ impl InstallationEntry {
                 .bind(email.address.as_str())
                 .bind(&now_text)
                 .bind(&now_text)
-                .execute(&mut *transaction)
+                .execute(&mut **transaction)
                 .await?;
                 let accepted = accept_pending_invitation_for_email(
                     &mut transaction,
@@ -560,7 +560,7 @@ impl InstallationEntry {
                 .bind(&email.key)
                 .bind(&now_text)
                 .bind(&now_text)
-                .execute(&mut *transaction)
+                .execute(&mut **transaction)
                 .await?;
                 insert_muira_identity(
                     &mut transaction,
@@ -581,7 +581,7 @@ impl InstallationEntry {
         };
         sqlx::query("DELETE FROM muira_login_attempts WHERE state_hash = ?")
             .bind(state_hash.to_vec())
-            .execute(&mut *transaction)
+            .execute(&mut **transaction)
             .await?;
         transaction.commit().await?;
         Ok(outcome)
@@ -957,12 +957,12 @@ fn secret_aad(key_id: &[u8; 16]) -> Vec<u8> {
 }
 
 async fn close_rejected_attempt(
-    mut transaction: Transaction<'_, Sqlite>,
+    mut transaction: crate::db::WriteTransaction<'_>,
     state_hash: &[u8],
 ) -> EntryError {
     if let Err(error) = sqlx::query("DELETE FROM muira_login_attempts WHERE state_hash = ?")
         .bind(state_hash.to_vec())
-        .execute(&mut *transaction)
+        .execute(&mut **transaction)
         .await
     {
         let _ = transaction.rollback().await;
@@ -975,12 +975,12 @@ async fn close_rejected_attempt(
 }
 
 async fn finish_without_access(
-    mut transaction: Transaction<'_, Sqlite>,
+    mut transaction: crate::db::WriteTransaction<'_>,
     state_hash: &[u8],
 ) -> Result<MuiraLoginOutcome, EntryError> {
     sqlx::query("DELETE FROM muira_login_attempts WHERE state_hash = ?")
         .bind(state_hash.to_vec())
-        .execute(&mut *transaction)
+        .execute(&mut **transaction)
         .await?;
     transaction.commit().await?;
     Ok(MuiraLoginOutcome::InvitationRequired)

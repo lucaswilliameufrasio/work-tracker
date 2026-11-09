@@ -465,6 +465,7 @@ async fn spa_and_built_assets_are_embedded_with_correct_cache_and_security_heade
         "/index.html",
         "/convite",
         "/convites",
+        "/gestao",
         "/itens",
         "/projects/example",
     ] {

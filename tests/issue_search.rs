@@ -24,6 +24,7 @@ async fn migration_38_database(directory: &TempDir) -> SqlitePool {
         .connect_with(options)
         .await
         .unwrap();
+    puxiri::db::ensure_write_gate(&pool).await.unwrap();
     let mut paths =
         std::fs::read_dir(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations"))
             .unwrap()

@@ -123,9 +123,9 @@ impl MailSenderStore {
     ) -> Result<MailSenderStatus, MailError> {
         validate_configuration(&configuration)?;
         let envelope = encrypt_api_key(&self.master_key, &configuration.api_key)?;
-        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut transaction = crate::db::admitted_write(&self.pool).await?;
         sqlx::query("DELETE FROM mail_sender WHERE id = 1")
-            .execute(&mut *transaction)
+            .execute(&mut **transaction)
             .await?;
         sqlx::query(
             "INSERT INTO mail_sender \
@@ -140,7 +140,7 @@ impl MailSenderStore {
         .bind(&configuration.template_key)
         .bind(&configuration.sabia_origin)
         .bind(format_timestamp(now))
-        .execute(&mut *transaction)
+        .execute(&mut **transaction)
         .await?;
         transaction.commit().await?;
         Ok(MailSenderStatus {
