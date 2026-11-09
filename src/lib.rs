@@ -8,6 +8,8 @@ pub mod http;
 pub mod invitations;
 pub mod issues;
 pub mod jobs;
+pub mod mail;
+pub mod mcp;
 pub(crate) mod organization_timezone;
 pub mod organizations;
 pub mod projects;

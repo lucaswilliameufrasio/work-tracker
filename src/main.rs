@@ -28,16 +28,22 @@ async fn main() -> Result<(), Box<dyn Error>> {
             let database = Arc::new(Database::open(&data_dir).await?);
             let master_key_path = master_key_path.unwrap_or_else(|| data_dir.join("master.key"));
             let master_key = MasterKeyStore::load_or_create(&master_key_path)?;
+            let browser_entry = browser_origin.is_some();
             let router = match browser_origin {
-                Some(origin) => http::router_with_browser_sessions(
+                Some(origin) => http::router_with_entry(
                     database.clone(),
                     http::browser_session::BrowserSessionSecurity::from_origin(origin, master_key),
                     SessionPolicy::initial(chrono::TimeDelta::minutes(5))?,
+                    Arc::new(puxiri::auth::muira_exchange::HttpMuiraExchange),
                 ),
                 None => http::router(database.clone()),
             };
             let listener = tokio::net::TcpListener::bind(bind).await?;
-            tracing::info!(address = %listener.local_addr()?, "development server listening; login, signup and onboarding remain unavailable");
+            tracing::info!(
+                address = %listener.local_addr()?,
+                browser_entry,
+                "development server listening"
+            );
             axum::serve(listener, router)
                 .with_graceful_shutdown(shutdown_signal())
                 .await?;

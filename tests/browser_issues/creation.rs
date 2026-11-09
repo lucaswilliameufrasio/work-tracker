@@ -416,7 +416,7 @@ async fn post_body_permission_is_not_widened_to_other_methods_or_routes_and_fram
         (Method::GET, f.path("")),
         (Method::PATCH, f.path("")),
         (Method::POST, format!("{}/1", f.path(""))),
-        (Method::POST, "/api/v1/projects".to_owned()),
+        (Method::POST, "/api/v1/setup/status".to_owned()),
         (Method::POST, "/api/v1/auth/session".to_owned()),
         (Method::POST, "/api/v1/auth/login".to_owned()),
     ] {

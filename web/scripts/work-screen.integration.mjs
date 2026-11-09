@@ -255,7 +255,9 @@ export async function readWork(context, origin, fixture, artifacts) {
   assert.ok(page.url().endsWith('/issues?cursor=21'));
   await expect(page.locator('[data-issue-id]')).toHaveCount(2);
   await page.goto(`${origin}/projects/${fixture.project_id}/issues/2`);
-  await expect(page.getByRole('status')).toContainText('Na lixeira');
+  await expect(
+    page.getByRole('status').filter({ hasText: 'Na lixeira' }),
+  ).toBeVisible();
   await page.goto(`${origin}/projects/${fixture.private_project_id}/issues`);
   await expect(
     page.getByRole('heading', { name: 'Conteúdo indisponível', exact: true }),

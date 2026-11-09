@@ -66,7 +66,7 @@ async fn all_four_connections_have_durable_sqlite_settings_and_real_migrations()
         .fetch_one(database.pool())
         .await
         .unwrap();
-    assert_eq!(rows, 44);
+    assert_eq!(rows, 48);
     let pending: Option<String> =
         sqlx::query_scalar("SELECT setup_completed_at FROM installation_state WHERE singleton = 1")
             .fetch_one(database.pool())
@@ -460,16 +460,19 @@ async fn health_is_minimal_and_readiness_reflects_real_database_failure() {
 #[tokio::test]
 async fn spa_and_built_assets_are_embedded_with_correct_cache_and_security_headers() {
     let (_directory, _database, router) = application().await;
-    for path in ["/", "/index.html", "/projects/example"] {
+    for path in [
+        "/",
+        "/index.html",
+        "/convite",
+        "/convites",
+        "/itens",
+        "/projects/example",
+    ] {
         let response = request(&router, Method::GET, path).await;
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(
             response.headers()[header::CACHE_CONTROL],
-            if path.starts_with("/projects/") {
-                "no-store"
-            } else {
-                "no-cache"
-            },
+            "no-store",
             "{path}"
         );
         assert_eq!(

@@ -126,7 +126,7 @@ async fn authorize(State(gate): State<Arc<Gate>>, request: Request, next: Next) 
         return challenge(&gate, StatusCode::UNAUTHORIZED, Some("invalid_token"));
     }
     let row: Result<Option<GrantRow>, _> = sqlx::query_as(
-        "SELECT resource,scope,expires,revoked,banned FROM mcp_grants WHERE digest=?",
+        "SELECT resource,scope,expires,revoked,banned FROM mcp_http_spike_grants WHERE digest=?",
     )
     .bind(sha256(token.as_bytes()).to_vec())
     .fetch_optional(gate.db.pool())
@@ -158,7 +158,7 @@ impl Fixture {
     async fn new() -> Self {
         let directory = TempDir::new().unwrap();
         let db = Arc::new(Database::open(directory.path()).await.unwrap());
-        sqlx::raw_sql("CREATE TABLE mcp_grants(digest BLOB PRIMARY KEY,resource TEXT NOT NULL,scope TEXT NOT NULL,expires INTEGER NOT NULL,revoked INTEGER NOT NULL,banned INTEGER NOT NULL)")
+        sqlx::raw_sql("CREATE TABLE mcp_http_spike_grants(digest BLOB PRIMARY KEY,resource TEXT NOT NULL,scope TEXT NOT NULL,expires INTEGER NOT NULL,revoked INTEGER NOT NULL,banned INTEGER NOT NULL)")
             .execute(db.pool()).await.unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
@@ -195,7 +195,7 @@ impl Fixture {
     }
     async fn seed(&self, token: &str, resource: &str, scope: &str, validity: (i64, i64, i64)) {
         let (expires, revoked, banned) = validity;
-        sqlx::query("INSERT INTO mcp_grants VALUES(?,?,?,?,?,?)")
+        sqlx::query("INSERT INTO mcp_http_spike_grants VALUES(?,?,?,?,?,?)")
             .bind(sha256(token.as_bytes()).to_vec())
             .bind(resource)
             .bind(scope)
@@ -287,13 +287,13 @@ async fn opaque_token_digest_and_revocation_survive_database_reopen_without_rest
     fixture
         .seed(token, &fixture.gate.resource, SCOPE, (NOW + 300, 0, 0))
         .await;
-    let digest: Vec<u8> = sqlx::query_scalar("SELECT digest FROM mcp_grants")
+    let digest: Vec<u8> = sqlx::query_scalar("SELECT digest FROM mcp_http_spike_grants")
         .fetch_one(fixture.gate.db.pool())
         .await
         .unwrap();
     assert_eq!(digest, sha256(token.as_bytes()));
     assert_ne!(digest, token.as_bytes());
-    sqlx::query("UPDATE mcp_grants SET revoked=1")
+    sqlx::query("UPDATE mcp_http_spike_grants SET revoked=1")
         .execute(fixture.gate.db.pool())
         .await
         .unwrap();
@@ -303,11 +303,12 @@ async fn opaque_token_digest_and_revocation_survive_database_reopen_without_rest
     let directory = std::mem::replace(&mut fixture.directory, TempDir::new().unwrap());
     drop(fixture);
     let reopened = Database::open(directory.path()).await.unwrap();
-    let revoked: i64 = sqlx::query_scalar("SELECT revoked FROM mcp_grants WHERE digest=?")
-        .bind(digest)
-        .fetch_one(reopened.pool())
-        .await
-        .unwrap();
+    let revoked: i64 =
+        sqlx::query_scalar("SELECT revoked FROM mcp_http_spike_grants WHERE digest=?")
+            .bind(digest)
+            .fetch_one(reopened.pool())
+            .await
+            .unwrap();
     assert_eq!(revoked, 1);
     reopened.close().await;
 }
@@ -419,7 +420,7 @@ async fn maintained_streamable_http_service_initializes_lists_and_calls_diagnost
         call["result"]["content"][0]["text"],
         "fixture only; no project data"
     );
-    sqlx::query("UPDATE mcp_grants SET revoked=1")
+    sqlx::query("UPDATE mcp_http_spike_grants SET revoked=1")
         .execute(fixture.gate.db.pool())
         .await
         .unwrap();
@@ -468,7 +469,7 @@ async fn malformed_headers_query_tokens_untrusted_origin_and_database_failure_fa
         .await
         .unwrap();
     assert_eq!(response.status(), 400);
-    sqlx::query("DROP TABLE mcp_grants")
+    sqlx::query("DROP TABLE mcp_http_spike_grants")
         .execute(fixture.gate.db.pool())
         .await
         .unwrap();

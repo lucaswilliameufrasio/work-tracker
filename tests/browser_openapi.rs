@@ -48,8 +48,26 @@ fn generated_contract_has_unique_operations_resolved_refs_and_only_implemented_r
         ("/api/v1/auth/sessions", "head"),
         ("/api/v1/auth/sessions", "delete"),
         ("/api/v1/auth/sessions/{session_id}", "delete"),
+        ("/api/v1/setup/status", "get"),
+        ("/api/v1/setup/status", "head"),
+        ("/api/v1/setup/puxiri", "post"),
+        ("/api/v1/setup/muira", "post"),
+        ("/api/v1/auth/muira/login", "post"),
+        ("/api/v1/auth/muira/callback", "get"),
+        ("/api/v1/auth/puxiri/login", "post"),
+        ("/api/v1/invitations", "post"),
+        ("/api/v1/mail/sender", "get"),
+        ("/api/v1/mail/sender", "head"),
+        ("/api/v1/mail/sender", "put"),
+        ("/api/v1/mcp/grant", "get"),
+        ("/api/v1/mcp/grant", "head"),
+        ("/api/v1/mcp/grant", "put"),
+        ("/api/v1/mcp/grant", "delete"),
+        ("/api/v1/me/issues", "get"),
+        ("/api/v1/me/issues", "head"),
         ("/api/v1/projects", "get"),
         ("/api/v1/projects", "head"),
+        ("/api/v1/projects", "post"),
         ("/api/v1/projects/{project_id}/members", "get"),
         ("/api/v1/projects/{project_id}/members", "head"),
         ("/api/v1/projects/{project_id}/members/{user_id}", "get"),
@@ -84,6 +102,26 @@ fn generated_contract_has_unique_operations_resolved_refs_and_only_implemented_r
         (
             "/api/v1/projects/{project_id}/issues/{issue_number}/move",
             "post",
+        ),
+        (
+            "/api/v1/projects/{project_id}/issues/{issue_number}/comments",
+            "get",
+        ),
+        (
+            "/api/v1/projects/{project_id}/issues/{issue_number}/comments",
+            "head",
+        ),
+        (
+            "/api/v1/projects/{project_id}/issues/{issue_number}/comments",
+            "post",
+        ),
+        (
+            "/api/v1/projects/{project_id}/issues/{issue_number}/comments/{comment_id}",
+            "put",
+        ),
+        (
+            "/api/v1/projects/{project_id}/issues/{issue_number}/comments/{comment_id}",
+            "delete",
         ),
         ("/api/v1/projects/{project_id}/statuses", "get"),
         ("/api/v1/projects/{project_id}/statuses", "head"),
@@ -126,7 +164,10 @@ fn generated_contract_has_unique_operations_resolved_refs_and_only_implemented_r
                 method == "post" || method == "put"
             );
             if method == "post" {
-                let is_create = operation["operationId"] == "createProjectIssue";
+                let is_create = operation["operationId"] == "createProjectIssue"
+                    || operation["operationId"] == "createProject"
+                    || operation["operationId"] == "createIssueComment"
+                    || operation["operationId"] == "createInvitation";
                 assert_eq!(operation["responses"].get("201").is_some(), is_create);
                 assert_eq!(operation["responses"].get("200").is_some(), !is_create);
                 for status in ["409", "415", "422", "503"] {

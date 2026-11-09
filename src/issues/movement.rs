@@ -119,6 +119,11 @@ struct ReceiptInsert<'a> {
     timestamp: &'a str,
 }
 
+enum ActorSource<'a> {
+    Session(&'a SessionToken),
+    User(&'a str),
+}
+
 impl SessionIssueMover {
     pub fn new(pool: SqlitePool, policy: SessionPolicy, master_key: MasterKey) -> Self {
         Self {
@@ -131,6 +136,48 @@ impl SessionIssueMover {
     pub async fn move_issue(
         &self,
         token: &SessionToken,
+        project_id: &str,
+        issue_number: i64,
+        idempotency_key: &str,
+        input: MoveIssue<'_>,
+        now: DateTime<Utc>,
+    ) -> Result<IssueMoveOutcome, IssueMoveError> {
+        self.move_with(
+            ActorSource::Session(token),
+            project_id,
+            issue_number,
+            idempotency_key,
+            input,
+            now,
+        )
+        .await
+    }
+
+    /// Same move as a browser session, for a person already authenticated by
+    /// Muira and authorized by a Puxiri grant. The user id is not a credential.
+    pub async fn move_issue_for_user(
+        &self,
+        user_id: &str,
+        project_id: &str,
+        issue_number: i64,
+        idempotency_key: &str,
+        input: MoveIssue<'_>,
+        now: DateTime<Utc>,
+    ) -> Result<IssueMoveOutcome, IssueMoveError> {
+        self.move_with(
+            ActorSource::User(user_id),
+            project_id,
+            issue_number,
+            idempotency_key,
+            input,
+            now,
+        )
+        .await
+    }
+
+    async fn move_with(
+        &self,
+        source: ActorSource<'_>,
         project_id: &str,
         issue_number: i64,
         idempotency_key: &str,
@@ -182,12 +229,17 @@ impl SessionIssueMover {
         let key_id = self.master_key.key_id();
 
         let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-        let principal = self
-            .sessions
-            .authenticate_in_transaction(&mut transaction, token, now)
-            .await?
-            .ok_or(IssueMoveError::Unauthenticated)?;
-        let actor = principal.user_id();
+        let actor_id = match source {
+            ActorSource::User(user_id) => user_id.to_owned(),
+            ActorSource::Session(token) => self
+                .sessions
+                .authenticate_in_transaction(&mut transaction, token, now)
+                .await?
+                .ok_or(IssueMoveError::Unauthenticated)?
+                .user_id()
+                .to_owned(),
+        };
+        let actor = actor_id.as_str();
         let context = AccessStore::load_project_context_in_transaction(
             &mut transaction,
             actor,

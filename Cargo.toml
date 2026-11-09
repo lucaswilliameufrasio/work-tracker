@@ -24,6 +24,9 @@ rust-embed = { version = "8.12.0", features = ["debug-embed"] }
 sha2 = "0.11.0"
 sha1 = "=0.11.0"
 serde = { version = "1.0", features = ["derive"] }
+openidconnect = { version = "=4.0.1", default-features = false, features = ["accept-string-booleans"] }
+reqwest = { version = "=0.13.5", default-features = false, features = ["json", "rustls"] }
+rmcp = { version = "=3.5.1", default-features = false, features = ["server", "transport-streamable-http-server"] }
 serde_json = "1.0"
 subtle = "=2.6.1"
 sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "sqlite", "migrate", "macros"] }
@@ -36,15 +39,12 @@ uuid = { version = "1.0", features = ["v7"] }
 zeroize = "1.9.0"
 
 [dev-dependencies]
-rmcp = { version = "=3.5.1", default-features = false, features = ["server", "transport-streamable-http-server"] }
-oauth2 = { version = "=5.0.0", default-features = false }
-openidconnect = { version = "=4.0.1", default-features = false, features = ["accept-string-booleans"] }
 aws-sdk-sesv2 = { version = "=1.123.0", default-features = false, features = ["rt-tokio", "default-https-client"] }
+oauth2 = { version = "=5.0.0", default-features = false }
 base64 = "=0.22.1"
 openssl = "=0.10.81"
 time = { version = "=0.3.55", features = ["parsing"] }
 p256 = { version = "=0.14.0", default-features = false, features = ["ecdsa", "pkcs8", "std"] }
-reqwest = { version = "=0.13.5", default-features = false, features = ["json", "rustls"] }
 rusqlite = { version = "=0.39.0", features = ["backup", "bundled"] }
 tempfile = "3.27.0"
 standardwebhooks = "=1.0.1"

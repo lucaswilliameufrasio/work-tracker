@@ -8,8 +8,8 @@ use crate::auth::{
 };
 
 use super::{
-    IssueHistoryCursor, IssueHistoryPage, IssueListPage, IssueReadError, IssueRecord,
-    IssueSearchOptions, IssueSearchPage, IssueStore,
+    AssignedIssuePage, IssueHistoryCursor, IssueHistoryPage, IssueListPage, IssueReadError,
+    IssueRecord, IssueSearchOptions, IssueSearchPage, IssueStore,
 };
 
 #[derive(Debug, Error)]
@@ -171,6 +171,33 @@ impl SessionIssueReader {
             principal.user_id(),
             project_id,
             options,
+            now,
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(page)
+    }
+
+    /// Issues currently assigned to the bearer, only in projects they can
+    /// still read. Archived projects and trashed issues stay out.
+    pub async fn list_assigned_issues(
+        &self,
+        token: &SessionToken,
+        cursor: Option<&str>,
+        page_size: u16,
+        now: DateTime<Utc>,
+    ) -> Result<AssignedIssuePage, SessionIssueReadError> {
+        let mut transaction = self.pool.begin().await?;
+        let principal = self
+            .sessions
+            .authenticate_in_transaction(&mut transaction, token, now)
+            .await?
+            .ok_or(SessionIssueReadError::Unauthenticated)?;
+        let page = IssueStore::assigned_in_transaction(
+            &mut transaction,
+            principal.user_id(),
+            cursor,
+            page_size,
             now,
         )
         .await?;

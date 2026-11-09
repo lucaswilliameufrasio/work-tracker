@@ -26,6 +26,8 @@ pub enum IssueReadError {
     InvalidBoardCursor,
     #[error("issue-search cursor is invalid")]
     InvalidSearchCursor,
+    #[error("assigned-issue cursor is invalid")]
+    InvalidAssignedCursor,
     #[error("issue-search query is invalid")]
     InvalidSearchQuery,
     #[error("issue-search type filter is invalid")]

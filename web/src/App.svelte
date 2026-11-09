@@ -7,19 +7,42 @@
   import IssueTextPage from './lib/IssueTextPage.svelte';
   import { issueTextDraftStore } from './lib/issue-text-drafts';
   import { onSessionEnded } from './lib/session-lifecycle';
+  import EntryPage from './lib/EntryPage.svelte';
+  import InvitationPage from './lib/InvitationPage.svelte';
+  import ProjectCreationPage from './lib/ProjectCreationPage.svelte';
+  import MyItemsPage from './lib/MyItemsPage.svelte';
+  import InvitesPage from './lib/InvitesPage.svelte';
+  import {
+    getInstallationStatus,
+    type InstallationStatus,
+  } from './lib/entry.ts';
 
-  const sessionsPage = globalThis.location.pathname === '/settings/sessions';
+  const pathname = globalThis.location.pathname;
+  const invitationPage = pathname === '/convite';
+  const invitesPage = pathname === '/convites';
+  const itemsPage = pathname === '/itens';
+  const projectCreationPage = pathname === '/projects/new';
+  const sessionsPage = pathname === '/settings/sessions';
   const creationPage =
-    globalThis.location.pathname.startsWith('/projects/') &&
-    globalThis.location.pathname.endsWith('/issues/new');
+    pathname.startsWith('/projects/') && pathname.endsWith('/issues/new');
   const editorPage =
-    globalThis.location.pathname.startsWith('/projects/') &&
-    globalThis.location.pathname.endsWith('/edit');
+    pathname.startsWith('/projects/') && pathname.endsWith('/edit');
   const workPage =
-    globalThis.location.pathname === '/projects' ||
-    globalThis.location.pathname.startsWith('/projects/');
+    !projectCreationPage &&
+    !itemsPage &&
+    (pathname === '/projects' || pathname.startsWith('/projects/'));
+  const homePage =
+    !invitationPage &&
+    !invitesPage &&
+    !itemsPage &&
+    !projectCreationPage &&
+    !sessionsPage &&
+    !creationPage &&
+    !editorPage &&
+    !workPage;
 
   let status = $state<Readiness | 'checking' | 'unavailable'>('checking');
+  let installation = $state<InstallationStatus | 'closed'>('closed');
   const controller = new AbortController();
   const unsubscribeSessionEnded = onSessionEnded(() => {
     try {
@@ -41,9 +64,19 @@
     }
   }
 
+  async function loadInstallation() {
+    try {
+      const result = await getInstallationStatus(controller.signal);
+      if (!controller.signal.aborted) installation = result;
+    } catch {
+      if (!controller.signal.aborted) installation = 'closed';
+    }
+  }
+
   onMount(() => {
-    if (!sessionsPage && !workPage) {
+    if (homePage) {
       void refresh();
+      void loadInstallation();
     }
     return () => {
       unsubscribeSessionEnded();
@@ -76,6 +109,11 @@
     <a href="/projects" aria-current={workPage ? 'page' : undefined}
       >Meus projetos</a
     >
+    <a href="/itens" aria-current={itemsPage ? 'page' : undefined}>Meus itens</a
+    >
+    <a href="/convites" aria-current={invitesPage ? 'page' : undefined}
+      >Convites</a
+    >
     <a
       href="/settings/sessions"
       aria-current={sessionsPage ? 'page' : undefined}>Minhas sessões</a
@@ -84,6 +122,14 @@
 
   {#if sessionsPage}
     <SessionsPage />
+  {:else if invitationPage}
+    <InvitationPage />
+  {:else if itemsPage}
+    <MyItemsPage />
+  {:else if invitesPage}
+    <InvitesPage />
+  {:else if projectCreationPage}
+    <ProjectCreationPage />
   {:else if creationPage}
     <IssueCreationPage />
   {:else if editorPage}
@@ -127,13 +173,17 @@
         </button>
       </section>
 
-      <aside class="notice" aria-label="Disponibilidade do produto">
-        <strong>Versão em desenvolvimento</strong>
-        <p>
-          Login, edição e integrações ainda não estão disponíveis. Não use dados
-          reais nesta versão.
-        </p>
-      </aside>
+      {#if installation === 'closed'}
+        <aside class="notice" aria-label="Disponibilidade do produto">
+          <strong>Versão em desenvolvimento</strong>
+          <p>
+            Login, edição e integrações ainda não estão disponíveis. Não use
+            dados reais nesta versão.
+          </p>
+        </aside>
+      {:else}
+        <EntryPage status={installation} />
+      {/if}
     </main>
 
     <footer>Fase 0 · Base técnica em validação</footer>

@@ -298,8 +298,38 @@ async fn every_documented_browser_operation_matches_real_success_and_auth_error_
     .unwrap();
     let sessions = SessionStore::new(database.pool().clone(), policy());
     let app = app(&directory, database.clone());
+    sqlx::query("INSERT INTO installation_admins (user_id, created_at) VALUES (?, ?)")
+        .bind(&actor)
+        .bind("2026-11-08T00:00:00.000000000Z")
+        .execute(database.pool())
+        .await
+        .unwrap();
+    let comment = puxiri::issues::comments::CommentStore::new(database.pool().clone())
+        .create(
+            &actor,
+            &project.id,
+            contract_issue.issue_number,
+            &Uuid::now_v7().to_string(),
+            "Contrato",
+            Utc::now(),
+        )
+        .await
+        .unwrap();
+    let comment_version: i64 =
+        sqlx::query_scalar("SELECT version FROM issue_comments WHERE id = ?")
+            .bind(&comment.comment_id)
+            .fetch_one(database.pool())
+            .await
+            .unwrap();
     for (path, operations) in document["paths"].as_object().unwrap() {
         for (method, operation) in operations.as_object().unwrap() {
+            let operation_id = operation["operationId"].as_str().unwrap();
+            if matches!(
+                operation_id,
+                "completePuxiriSetup" | "beginMuiraSetup" | "beginMuiraLogin" | "loginPuxiri"
+            ) {
+                continue;
+            }
             let issued = sessions.issue(&actor, Utc::now()).await.unwrap();
             let uri = path
                 .replace("{session_id}", &issued.id)
@@ -315,8 +345,30 @@ async fn every_documented_browser_operation_matches_real_success_and_auth_error_
                     &contract_issue.issue_type_id
                 },
             );
+            uri = uri.replace("{comment_id}", &comment.comment_id);
             if path.ends_with("/issues/search") {
                 uri.push_str("?q=Contract");
+            }
+            if operation_id == "completeMuiraLogin" {
+                let state = SessionToken::generate().unwrap();
+                uri = format!(
+                    "/api/v1/auth/muira/callback?code=contract&state={}",
+                    state.expose()
+                );
+            }
+            if operation_id == "editIssueComment" {
+                let edited = puxiri::issues::comments::CommentStore::new(database.pool().clone())
+                    .create(
+                        &actor,
+                        &project.id,
+                        contract_issue.issue_number,
+                        &Uuid::now_v7().to_string(),
+                        "Revisão",
+                        Utc::now(),
+                    )
+                    .await
+                    .unwrap();
+                uri = uri.replace(&comment.comment_id, &edited.comment_id);
             }
             let token = csrf(&app, &issued.token).await;
             let mut req = if method == "delete" || method == "post" || method == "put" {
@@ -334,7 +386,7 @@ async fn every_documented_browser_operation_matches_real_success_and_auth_error_
                     "idempotency-key",
                     HeaderValue::from_str(&Uuid::now_v7().to_string()).unwrap(),
                 );
-                *req.body_mut() = Body::from(if operation["operationId"] == "replaceIssueText" {
+                *req.body_mut() = Body::from(if operation_id == "replaceIssueText" {
                     let expected_version: i64 = sqlx::query_scalar(
                         "SELECT version FROM issues WHERE project_id = ? AND issue_number = 1",
                     )
@@ -347,7 +399,7 @@ async fn every_documented_browser_operation_matches_real_success_and_auth_error_
                         "expected_version": expected_version.to_string(),
                     })
                     .to_string()
-                } else if operation["operationId"] == "setProjectIssuePriority" {
+                } else if operation_id == "setProjectIssuePriority" {
                     let expected_version: i64 = sqlx::query_scalar(
                         "SELECT version FROM issues WHERE project_id = ? AND issue_number = 1",
                     )
@@ -360,7 +412,7 @@ async fn every_documented_browser_operation_matches_real_success_and_auth_error_
                         "priority": "high",
                     })
                     .to_string()
-                } else if operation["operationId"] == "setProjectIssueDueDate" {
+                } else if operation_id == "setProjectIssueDueDate" {
                     let expected_version: i64 = sqlx::query_scalar(
                         "SELECT version FROM issues WHERE project_id = ? AND issue_number = 1",
                     )
@@ -373,7 +425,7 @@ async fn every_documented_browser_operation_matches_real_success_and_auth_error_
                         "due_date": "2028-02-29",
                     })
                     .to_string()
-                } else if operation["operationId"] == "setProjectIssueAssignee" {
+                } else if operation_id == "setProjectIssueAssignee" {
                     let expected_version: i64 = sqlx::query_scalar(
                         "SELECT version FROM issues WHERE project_id = ? AND issue_number = 1",
                     )
@@ -386,7 +438,7 @@ async fn every_documented_browser_operation_matches_real_success_and_auth_error_
                         "assignee_user_id": actor.clone(),
                     })
                     .to_string()
-                } else if operation["operationId"] == "moveProjectIssue" {
+                } else if operation_id == "moveProjectIssue" {
                     let expected_version: i64 = sqlx::query_scalar(
                         "SELECT version FROM issues WHERE project_id = ? AND issue_number = 1",
                     )
@@ -399,38 +451,36 @@ async fn every_documented_browser_operation_matches_real_success_and_auth_error_
                         "target_status_id": move_status_id,
                     })
                     .to_string()
+                } else if operation_id == "createProject" {
+                    r#"{"project_key":"ZXCV","name":"Contract project"}"#.to_owned()
+                } else if operation_id == "createInvitation" {
+                    r#"{"email":"invitee@example.test","role":"member","projects":[]}"#.to_owned()
+                } else if operation_id == "replaceMailSender" {
+                    r#"{"provider":"sabia","api_key":"contract-mail-key","template":"organization-invite","origin":"https://sabia.example.test"}"#.to_owned()
+                } else if operation_id == "replaceMcpGrant" {
+                    r#"{"scope":"read","all_projects":true}"#.to_owned()
+                } else if operation_id == "createIssueComment" {
+                    r#"{"body":"Contract comment"}"#.to_owned()
+                } else if operation_id == "editIssueComment" {
+                    format!(
+                        r#"{{"body":"Contract revision","expected_version":"{comment_version}"}}"#
+                    )
                 } else {
                     r#"{"title":"Contract creation"}"#.to_owned()
                 });
             }
-            let response = app.clone().oneshot(req).await.unwrap();
-            let status = if method == "delete" {
-                StatusCode::NO_CONTENT
-            } else if method == "post" && operation["operationId"] == "createProjectIssue" {
-                StatusCode::CREATED
-            } else {
-                StatusCode::OK
-            };
-            assert_eq!(response.status(), status, "{method} {path}");
-            assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
-            if method == "head" || method == "delete" {
-                assert!(
-                    response
-                        .into_body()
-                        .collect()
-                        .await
-                        .unwrap()
-                        .to_bytes()
-                        .is_empty()
-                );
-            } else {
-                let body = json(response, status).await;
-                assert_contract_shape(
-                    &document,
-                    &operation["responses"][status.as_str()]["content"]["application/json"]["schema"],
-                    &body,
+            if method == "delete" && uri.contains("/comments/") {
+                req.headers_mut().insert(
+                    "idempotency-key",
+                    HeaderValue::from_str(&Uuid::now_v7().to_string()).unwrap(),
                 );
             }
+            let response = app.clone().oneshot(req).await.unwrap();
+            let status = documented_success(operation);
+            assert_operation_success(&document, operation, response, status, method).await;
+            let anonymous = operation
+                .get("security")
+                .is_some_and(|value| value.as_array().is_some_and(|items| items.is_empty()));
             let mut req = request(&uri, None);
             *req.method_mut() = Method::from_bytes(method.to_ascii_uppercase().as_bytes()).unwrap();
             if method == "delete" || method == "post" || method == "put" {
@@ -440,27 +490,259 @@ async fn every_documented_browser_operation_matches_real_success_and_auth_error_
                 );
             }
             let response = app.clone().oneshot(req).await.unwrap();
-            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-            if method == "head" {
-                assert!(
-                    response
-                        .into_body()
-                        .collect()
-                        .await
-                        .unwrap()
-                        .to_bytes()
-                        .is_empty()
-                );
+            if anonymous {
+                assert_operation_success(&document, operation, response, status, method).await;
             } else {
-                let error = json(response, StatusCode::UNAUTHORIZED).await;
-                assert_contract_shape(
-                    &document,
-                    &operation["responses"]["401"]["content"]["application/json"]["schema"],
-                    &error,
+                assert_eq!(
+                    response.status(),
+                    StatusCode::UNAUTHORIZED,
+                    "{method} {path}"
                 );
+                if method == "head" {
+                    assert!(
+                        response
+                            .into_body()
+                            .collect()
+                            .await
+                            .unwrap()
+                            .to_bytes()
+                            .is_empty()
+                    );
+                } else {
+                    let error = json(response, StatusCode::UNAUTHORIZED).await;
+                    assert_contract_shape(
+                        &document,
+                        &operation["responses"]["401"]["content"]["application/json"]["schema"],
+                        &error,
+                    );
+                }
             }
         }
     }
+    assert_anonymous_entry(&document).await;
+}
+
+fn documented_success(operation: &Value) -> StatusCode {
+    let responses = operation["responses"].as_object().unwrap();
+    if responses.contains_key("303") {
+        return StatusCode::SEE_OTHER;
+    }
+    if responses.contains_key("204") && !responses.contains_key("200") {
+        return StatusCode::NO_CONTENT;
+    }
+    if responses.contains_key("201") && !responses.contains_key("200") {
+        return StatusCode::CREATED;
+    }
+    StatusCode::OK
+}
+
+async fn assert_operation_success(
+    document: &Value,
+    operation: &Value,
+    response: Response,
+    status: StatusCode,
+    method: &str,
+) {
+    assert_eq!(response.status(), status, "{}", operation["operationId"]);
+    assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+    if method == "head" || method == "delete" || status == StatusCode::SEE_OTHER {
+        if status == StatusCode::SEE_OTHER {
+            let location = response.headers()[header::LOCATION].to_str().unwrap();
+            assert!(location.starts_with("https://tracker.example.test/"));
+        }
+        assert!(
+            response
+                .into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes()
+                .is_empty()
+        );
+        return;
+    }
+    let body = json(response, status).await;
+    assert_contract_shape(
+        document,
+        &operation["responses"][status.as_str()]["content"]["application/json"]["schema"],
+        &body,
+    );
+}
+
+fn anonymous_json(uri: &str, body: String) -> Request<Body> {
+    Request::builder()
+        .method(Method::POST)
+        .uri(uri)
+        .header(header::HOST, "tracker.example.test")
+        .header(header::ORIGIN, "https://tracker.example.test")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(body))
+        .unwrap()
+}
+
+async fn assert_anonymous_entry(document: &Value) {
+    let directory = TempDir::new().unwrap();
+    let database = Arc::new(Database::open(directory.path()).await.unwrap());
+    let router = app(&directory, database.clone());
+    let token = puxiri::auth::setup::SetupTokenStore::new(database.pool().clone())
+        .issue(Utc::now())
+        .await
+        .unwrap();
+    let setup = serde_json::json!({
+        "setup_token": token.expose(),
+        "organization_name": "Puxiri",
+        "locale": "pt-BR",
+        "timezone": "America/Sao_Paulo",
+        "display_name": "Ada",
+        "email": "ada@example.test",
+        "password": "puxiri-entry-passphrase",
+    });
+    let setup_operation = &document["paths"]["/api/v1/setup/puxiri"]["post"];
+    let response = router
+        .clone()
+        .oneshot(anonymous_json("/api/v1/setup/puxiri", setup.to_string()))
+        .await
+        .unwrap();
+    assert_operation_success(document, setup_operation, response, StatusCode::OK, "post").await;
+    let repeated = router
+        .clone()
+        .oneshot(anonymous_json("/api/v1/setup/puxiri", setup.to_string()))
+        .await
+        .unwrap();
+    let error = json(repeated, StatusCode::CONFLICT).await;
+    assert_eq!(error["code"], "setup_unavailable");
+    assert_contract_shape(
+        document,
+        &setup_operation["responses"]["409"]["content"]["application/json"]["schema"],
+        &error,
+    );
+    let muira_on_puxiri = router
+        .clone()
+        .oneshot(anonymous_json("/api/v1/auth/muira/login", "{}".to_owned()))
+        .await
+        .unwrap();
+    let muira_login = &document["paths"]["/api/v1/auth/muira/login"]["post"];
+    let error = json(muira_on_puxiri, StatusCode::UNAUTHORIZED).await;
+    assert_contract_shape(
+        document,
+        &muira_login["responses"]["401"]["content"]["application/json"]["schema"],
+        &error,
+    );
+    let puxiri_login = &document["paths"]["/api/v1/auth/puxiri/login"]["post"];
+    let session = router
+        .clone()
+        .oneshot(anonymous_json(
+            "/api/v1/auth/puxiri/login",
+            r#"{"email":"ada@example.test","password":"puxiri-entry-passphrase"}"#.to_owned(),
+        ))
+        .await
+        .unwrap();
+    assert_operation_success(document, puxiri_login, session, StatusCode::OK, "post").await;
+    let wrong = router
+        .clone()
+        .oneshot(anonymous_json(
+            "/api/v1/auth/puxiri/login",
+            r#"{"email":"ada@example.test","password":"wrong-passphrase"}"#.to_owned(),
+        ))
+        .await
+        .unwrap();
+    let error = json(wrong, StatusCode::UNAUTHORIZED).await;
+    assert_contract_shape(
+        document,
+        &puxiri_login["responses"]["401"]["content"]["application/json"]["schema"],
+        &error,
+    );
+
+    let muira_directory = TempDir::new().unwrap();
+    let muira_database = Arc::new(Database::open(muira_directory.path()).await.unwrap());
+    let muira = app(&muira_directory, muira_database.clone());
+    let muira_token = puxiri::auth::setup::SetupTokenStore::new(muira_database.pool().clone())
+        .issue(Utc::now())
+        .await
+        .unwrap();
+    let muira_setup = &document["paths"]["/api/v1/setup/muira"]["post"];
+    let started = muira
+        .clone()
+        .oneshot(anonymous_json(
+            "/api/v1/setup/muira",
+            serde_json::json!({
+                "setup_token": muira_token.expose(),
+                "organization_name": "Puxiri",
+                "locale": "pt-BR",
+                "timezone": "America/Sao_Paulo",
+                "display_name": "Ada",
+                "email": "ada@example.test",
+                "issuer": "https://muira.example.test",
+                "client_id": "puxiri",
+                "client_secret": "muira-test-secret",
+            })
+            .to_string(),
+        ))
+        .await
+        .unwrap();
+    let body = json(started, StatusCode::OK).await;
+    assert_contract_shape(
+        document,
+        &muira_setup["responses"]["200"]["content"]["application/json"]["schema"],
+        &body,
+    );
+    assert!(
+        body["authorization_url"]
+            .as_str()
+            .unwrap()
+            .starts_with("https://muira.example.test/")
+    );
+    let unknown = SessionToken::generate().unwrap();
+    let conflict = muira
+        .clone()
+        .oneshot(anonymous_json(
+            "/api/v1/setup/muira",
+            serde_json::json!({
+                "setup_token": unknown.expose(),
+                "organization_name": "Puxiri",
+                "locale": "en",
+                "timezone": "UTC",
+                "display_name": "Ada",
+                "email": "ada@example.test",
+                "issuer": "https://muira.example.test",
+                "client_id": "puxiri",
+                "client_secret": "muira-test-secret",
+            })
+            .to_string(),
+        ))
+        .await
+        .unwrap();
+    let error = json(conflict, StatusCode::CONFLICT).await;
+    assert_eq!(error["code"], "setup_unavailable");
+
+    let login_directory = TempDir::new().unwrap();
+    let login_database = Arc::new(Database::open(login_directory.path()).await.unwrap());
+    sqlx::query(
+        "INSERT INTO installation_login \
+         (singleton, source, muira_issuer, muira_client_id, muira_client_secret_envelope) \
+         VALUES (1, 'muira', 'https://muira.example.test', 'puxiri', ?)",
+    )
+    .bind(vec![7_u8])
+    .execute(login_database.pool())
+    .await
+    .unwrap();
+    let login = app(&login_directory, login_database);
+    let started = login
+        .oneshot(anonymous_json("/api/v1/auth/muira/login", "{}".to_owned()))
+        .await
+        .unwrap();
+    let body = json(started, StatusCode::OK).await;
+    assert_contract_shape(
+        document,
+        &muira_login["responses"]["200"]["content"]["application/json"]["schema"],
+        &body,
+    );
+    assert!(
+        body["authorization_url"]
+            .as_str()
+            .unwrap()
+            .starts_with("https://muira.example.test/")
+    );
 }
 
 #[tokio::test]
@@ -789,11 +1071,11 @@ async fn routes_are_read_only_head_is_empty_and_login_or_signup_stay_closed() {
         .await
         .unwrap();
     let app = app(&directory, database);
-    for method in [Method::POST, Method::PATCH, Method::DELETE, Method::OPTIONS] {
+    for method in [Method::PATCH, Method::DELETE, Method::OPTIONS] {
         let mut req = request("/api/v1/projects", Some(&issued.token));
         *req.method_mut() = method;
         let response = app.clone().oneshot(req).await.unwrap();
-        assert_eq!(response.headers()[header::ALLOW], "GET, HEAD");
+        assert_eq!(response.headers()[header::ALLOW], "GET, HEAD, POST");
         json(response, StatusCode::METHOD_NOT_ALLOWED).await;
     }
     for path in [
@@ -801,7 +1083,6 @@ async fn routes_are_read_only_head_is_empty_and_login_or_signup_stay_closed() {
         "/api/v1/auth/login",
         "/api/v1/auth/signup",
         "/setup",
-        "/mcp",
     ] {
         json(
             app.clone()
@@ -812,6 +1093,16 @@ async fn routes_are_read_only_head_is_empty_and_login_or_signup_stay_closed() {
         )
         .await;
     }
+    let mcp = app
+        .clone()
+        .oneshot(request("/mcp", Some(&issued.token)))
+        .await
+        .unwrap();
+    assert_eq!(mcp.status(), StatusCode::UNAUTHORIZED);
+    let challenge = mcp.headers()[header::WWW_AUTHENTICATE].to_str().unwrap();
+    assert!(challenge.contains("resource_metadata="));
+    assert!(challenge.contains("scope=\"mcp:read mcp:write\""));
+    assert!(!challenge.contains(issued.token.expose()));
     let mut head = request("/api/v1/projects", Some(&issued.token));
     *head.method_mut() = Method::HEAD;
     let head = app.oneshot(head).await.unwrap();

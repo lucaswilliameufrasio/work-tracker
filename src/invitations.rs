@@ -756,6 +756,42 @@ impl OrganizationInvitationStore {
     }
 }
 
+pub(crate) async fn accept_pending_invitation_for_email(
+    transaction: &mut Transaction<'_, sqlx::Sqlite>,
+    user_id: &str,
+    email_key: &str,
+    now: DateTime<Utc>,
+) -> Result<bool, OrganizationInvitationError> {
+    let now_text = format_timestamp(now);
+    let invitation = sqlx::query(
+        "SELECT id, email, email_key, role, expires_at, accepted_at, canceled_at \
+         FROM organization_invites \
+         WHERE organization_id = 1 AND email_key = ? \
+           AND accepted_at IS NULL AND canceled_at IS NULL AND expires_at > ? \
+         ORDER BY created_at ASC \
+         LIMIT 1",
+    )
+    .bind(email_key)
+    .bind(&now_text)
+    .fetch_optional(&mut **transaction)
+    .await?;
+    let Some(invitation) = invitation else {
+        return Ok(false);
+    };
+    let id = invitation.try_get::<String, _>("id")?;
+    let role = OrganizationInviteRole::parse(&invitation.try_get::<String, _>("role")?)?;
+    let projects = load_invitation_projects(transaction, &id).await?;
+    let pending = PendingOrganizationInvitation {
+        id,
+        email: invitation.try_get("email")?,
+        email_key: invitation.try_get("email_key")?,
+        role,
+        projects,
+    };
+    complete_invitation(transaction, user_id, &pending, now).await?;
+    Ok(true)
+}
+
 async fn load_pending_invitation(
     transaction: &mut Transaction<'_, sqlx::Sqlite>,
     token: &OrganizationInvitationToken,

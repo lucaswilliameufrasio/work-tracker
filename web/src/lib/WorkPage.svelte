@@ -17,6 +17,7 @@
   } from './issue-move.ts';
   import type { BoardCard } from './board.ts';
   import IssueAssigneeEditor from './IssueAssigneeEditor.svelte';
+  import IssueComments from './IssueComments.svelte';
   import { onSessionEnded } from './session-lifecycle.ts';
   import {
     IssuePriorityIdentityChanged,
@@ -709,6 +710,9 @@
   </p>
   <nav class="work-links" aria-label="Navegação do trabalho">
     <a href="/projects">Meus projetos</a>
+    {#if route.type === 'projects'}
+      <a href="/projects/new">Criar projeto</a>
+    {/if}
     {#if 'projectId' in route}
       <a href={`/projects/${route.projectId}/board`}>Ver board</a>
       <a href={`/projects/${route.projectId}/issues/new`}>Criar issue</a>
@@ -1198,6 +1202,10 @@
             </p>
             <pre>{issue.description ?? 'Sem descrição.'}</pre>
           </section>
+          <IssueComments
+            projectId={issue.project_id}
+            issueNumber={issue.issue_number}
+          />
           <section aria-labelledby="history-title">
             <h3 id="history-title">Histórico desta página</h3>
             {#if data.history.data.length === 0}<p role="status">

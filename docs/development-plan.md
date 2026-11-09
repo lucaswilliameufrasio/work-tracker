@@ -4,6 +4,8 @@ Versão: 1.1 · Atualizado: 07/11/2026 · Status: decisões de produto consolida
 
 Esta revisão incorpora as decisões da sessão de definição de produto nas seções correspondentes, substituindo regras anteriores incompatíveis. Recursos acordados não estão implementados nem tecnicamente comprovados apenas por constarem neste plano.
 
+Decisão de uso em 08/11/2026, registrada no [ADR 0006](adr/0006-optional-muira-login-and-usable-v1.md): a primeira instalação utilizável escolhe Muira ou a autenticação própria no setup. Muira é o caminho que será usado agora; a autenticação própria permanece disponível e incompleta. O Muira só autentica. O Puxiri emite a própria sessão e decide o acesso. Quem entra pelo Muira sem convite vê a mensagem de que precisa de um convite e não recebe acesso ao trabalho. O administrador inicial criado no setup é a exceção. A v1 utilizável acrescenta comentários, vista dos próprios itens, convite com email e MCP. O email dessa versão entrega os três provedores: Sabiá, MillionSend e Resend. Replicação contínua usa a biblioteca Rust de `sqlite-replication`; o formato criptográfico do ADR 0002 continua Deferred. `database-migrator` é o runner pretendido, sem trocar as migrations atuais antes da entrada funcionar. Labels, campos customizados, atualização ao vivo, arquivos, automações e o restante das fases entram depois, com o quadro já em uso.
+
 ## 1. Produto e decisões fechadas
 
 Puxiri é um gestor de trabalho self hosted, inspirado no Kanban do Jira e na agilidade do Linear. Cada instalação atende uma organização, com usuários, convidados e vários projetos. O objetivo é baixo custo de operação, instalação simples, segurança de acesso e boa experiência de uso.

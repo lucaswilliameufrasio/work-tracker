@@ -25,7 +25,7 @@ impl SetupToken {
         self.0.expose()
     }
 
-    fn digest(&self) -> [u8; 32] {
+    pub(crate) fn digest(&self) -> [u8; 32] {
         self.0.digest()
     }
 }
@@ -91,5 +91,35 @@ impl SetupTokenStore {
         .fetch_one(&self.pool)
         .await?;
         Ok(matches)
+    }
+
+    pub(crate) async fn consume_in_transaction(
+        transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        token_hash: &[u8],
+        now: DateTime<Utc>,
+    ) -> Result<(), SetupTokenError> {
+        let now_text = format_timestamp(now);
+        let consumed = sqlx::query(
+            "UPDATE setup_bootstrap_tokens SET consumed_at = ? \
+             WHERE singleton = 1 AND token_hash = ? AND consumed_at IS NULL",
+        )
+        .bind(&now_text)
+        .bind(token_hash)
+        .execute(&mut **transaction)
+        .await?;
+        if consumed.rows_affected() != 1 {
+            return Err(SetupTokenError::SetupComplete);
+        }
+        let completed = sqlx::query(
+            "UPDATE installation_state SET setup_completed_at = ? \
+             WHERE singleton = 1 AND setup_completed_at IS NULL",
+        )
+        .bind(&now_text)
+        .execute(&mut **transaction)
+        .await?;
+        if completed.rows_affected() != 1 {
+            return Err(SetupTokenError::SetupComplete);
+        }
+        Ok(())
     }
 }

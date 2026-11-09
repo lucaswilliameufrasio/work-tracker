@@ -82,28 +82,29 @@ async fn admit_request(budget: &BrowserBudget, request: Request, next: Next) -> 
             );
         }
     }
-    let json_mutation = parts
+    let admission = parts
         .extensions
         .get::<axum::extract::MatchedPath>()
-        .is_some_and(|path| {
-            (parts.method == axum::http::Method::POST
-                && path.as_str() == "/api/v1/projects/{project_id}/issues")
-                || (parts.method == axum::http::Method::PUT
-                    && path.as_str() == "/api/v1/projects/{project_id}/issues/{issue_number}/text")
-                || (parts.method == axum::http::Method::POST
-                    && path.as_str() == "/api/v1/projects/{project_id}/issues/{issue_number}/move")
-                || (parts.method == axum::http::Method::PUT
-                    && path.as_str()
-                        == "/api/v1/projects/{project_id}/issues/{issue_number}/priority")
-                || (parts.method == axum::http::Method::PUT
-                    && path.as_str()
-                        == "/api/v1/projects/{project_id}/issues/{issue_number}/due-date")
-                || (parts.method == axum::http::Method::PUT
-                    && path.as_str()
-                        == "/api/v1/projects/{project_id}/issues/{issue_number}/assignee")
-        })
-        && budget.security.is_some();
-    let limit = if json_mutation { MAX_JSON_BODY } else { 0 };
+        .map(|path| json_admission(&parts.method, path.as_str()))
+        .unwrap_or(JsonAdmission::None);
+    let anonymous_json = match admission {
+        JsonAdmission::None => None,
+        JsonAdmission::Anonymous => Some(true),
+        JsonAdmission::Authenticated => Some(false),
+    };
+    if anonymous_json.is_some() && budget.security.is_none() {
+        return rejection(
+            StatusCode::FORBIDDEN,
+            "request_origin_denied",
+            "Request origin denied",
+            false,
+        );
+    }
+    let limit = if anonymous_json.is_none() {
+        0
+    } else {
+        MAX_JSON_BODY
+    };
     let declared = match content_length(&parts.headers, limit) {
         Err(error) => {
             return match error {
@@ -123,7 +124,7 @@ async fn admit_request(budget: &BrowserBudget, request: Request, next: Next) -> 
         }
         Ok(declared) => declared,
     };
-    if json_mutation {
+    if let Some(anonymous) = anonymous_json {
         let Some(security) = &budget.security else {
             return rejection(
                 StatusCode::FORBIDDEN,
@@ -132,8 +133,14 @@ async fn admit_request(budget: &BrowserBudget, request: Request, next: Next) -> 
                 false,
             );
         };
-        if let Err(error) = security.authenticate_request(&parts.method, &parts.uri, &parts.headers)
-        {
+        let authorized = if anonymous {
+            security.authorize_anonymous_mutation(&parts.method, &parts.uri, &parts.headers)
+        } else {
+            security
+                .authenticate_request(&parts.method, &parts.uri, &parts.headers)
+                .map(|_| ())
+        };
+        if let Err(error) = authorized {
             return super::browser_api::transport_error(error).into_response();
         }
         if !json_content_type(&parts.headers)
@@ -199,6 +206,68 @@ async fn admit_request(budget: &BrowserBudget, request: Request, next: Next) -> 
                 .await
         }
     }
+}
+
+enum JsonAdmission {
+    None,
+    Authenticated,
+    Anonymous,
+}
+
+fn json_admission(method: &axum::http::Method, path: &str) -> JsonAdmission {
+    if *method == axum::http::Method::POST
+        && matches!(
+            path,
+            "/api/v1/setup/puxiri"
+                | "/api/v1/setup/muira"
+                | "/api/v1/auth/muira/login"
+                | "/api/v1/auth/puxiri/login"
+        )
+    {
+        return JsonAdmission::Anonymous;
+    }
+    if matches!(
+        (method, path),
+        (&axum::http::Method::POST, "/api/v1/projects")
+            | (
+                &axum::http::Method::POST,
+                "/api/v1/projects/{project_id}/issues"
+            )
+            | (
+                &axum::http::Method::PUT,
+                "/api/v1/projects/{project_id}/issues/{issue_number}/text"
+            )
+            | (
+                &axum::http::Method::POST,
+                "/api/v1/projects/{project_id}/issues/{issue_number}/move"
+            )
+            | (
+                &axum::http::Method::PUT,
+                "/api/v1/projects/{project_id}/issues/{issue_number}/priority"
+            )
+            | (
+                &axum::http::Method::PUT,
+                "/api/v1/projects/{project_id}/issues/{issue_number}/due-date"
+            )
+            | (
+                &axum::http::Method::PUT,
+                "/api/v1/projects/{project_id}/issues/{issue_number}/assignee"
+            )
+            | (
+                &axum::http::Method::POST,
+                "/api/v1/projects/{project_id}/issues/{issue_number}/comments"
+            )
+            | (
+                &axum::http::Method::PUT,
+                "/api/v1/projects/{project_id}/issues/{issue_number}/comments/{comment_id}"
+            )
+            | (&axum::http::Method::POST, "/api/v1/invitations")
+            | (&axum::http::Method::PUT, "/api/v1/mail/sender")
+            | (&axum::http::Method::PUT, "/api/v1/mcp/grant")
+    ) {
+        return JsonAdmission::Authenticated;
+    }
+    JsonAdmission::None
 }
 
 enum FramingError {

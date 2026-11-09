@@ -18,6 +18,7 @@ mod browser_api;
 mod browser_budget;
 pub mod browser_session;
 mod error;
+mod mcp;
 pub mod openapi;
 
 #[derive(RustEmbed)]
@@ -33,8 +34,30 @@ pub fn router_with_browser_sessions(
     security: browser_session::BrowserSessionSecurity,
     policy: crate::auth::session::SessionPolicy,
 ) -> Router {
+    router_with_entry(
+        database,
+        security,
+        policy,
+        Arc::new(crate::auth::entry::DisabledMuiraExchange),
+    )
+}
+
+pub fn router_with_entry(
+    database: Arc<Database>,
+    security: browser_session::BrowserSessionSecurity,
+    policy: crate::auth::session::SessionPolicy,
+    exchange: Arc<dyn crate::auth::entry::MuiraCodeExchange>,
+) -> Router {
+    let runtime = crate::mcp::McpRuntime {
+        pool: database.pool().clone(),
+        policy,
+        master_key: security.master_key(),
+        origin: security.canonical_origin().to_owned(),
+    };
     security_headers(
-        base_router(database.clone()).merge(browser_api::routes(database, security, policy)),
+        base_router(database.clone())
+            .merge(mcp::routes(runtime))
+            .merge(browser_api::routes(database, security, policy, exchange)),
     )
 }
 
@@ -119,7 +142,15 @@ async fn frontend(request: Request) -> Response {
     {
         (
             "index.html",
-            if path == "settings/sessions" || path == "projects" || path.starts_with("projects/") {
+            if path.is_empty()
+                || path == "index.html"
+                || path == "convite"
+                || path == "convites"
+                || path == "itens"
+                || path == "settings/sessions"
+                || path == "projects"
+                || path.starts_with("projects/")
+            {
                 "no-store"
             } else {
                 "no-cache"

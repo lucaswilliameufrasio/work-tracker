@@ -34,6 +34,7 @@ pub(super) fn routes() -> Router<Arc<BrowserState>> {
         .merge(detail::routes())
         .merge(board::routes())
         .merge(search::routes())
+        .merge(comments::routes())
         .route(
             "/api/v1/projects/{project_id}/issues/{issue_number}/text",
             put(text::replace),
@@ -54,10 +55,12 @@ pub(super) fn routes() -> Router<Arc<BrowserState>> {
             "/api/v1/projects/{project_id}/issues/{issue_number}/move",
             post(movement::move_issue),
         )
+        .route("/api/v1/me/issues", get(list_assigned))
 }
 
 mod assignee;
 mod board;
+mod comments;
 mod create;
 mod detail;
 mod due_date;
@@ -142,6 +145,36 @@ impl TryFrom<IssueSummary> for ListedIssue {
             updated_at: format_timestamp(issue.updated_at),
         })
     }
+}
+
+async fn list_assigned(
+    State(state): State<Arc<BrowserState>>,
+    request: Request,
+) -> Result<Response, ApiError> {
+    let (request, _) = request.into_parts();
+    let token = authenticated_token(&state, &request).await?;
+    let query = Query::<ListQuery>::try_from_uri(&request.uri)
+        .map_err(|_| malformed_query())?
+        .0;
+    let page = state
+        .issues
+        .list_assigned_issues(
+            &token,
+            query.cursor.as_deref(),
+            query.page_size.unwrap_or(50),
+            Utc::now(),
+        )
+        .await
+        .map_err(read_error)?;
+    let mut data = Vec::with_capacity(page.items.len());
+    for issue in page.items {
+        data.push(ListedIssue::try_from(issue).map_err(|error| read_error(error.into()))?);
+    }
+    Ok(no_store(Page {
+        data,
+        has_more: page.next_cursor.is_some(),
+        next_cursor: page.next_cursor.map(|cursor| cursor.encode()),
+    }))
 }
 
 async fn list(
@@ -251,6 +284,9 @@ fn read_error(error: SessionIssueReadError) -> ApiError {
         }
         SessionIssueReadError::Issue(IssueReadError::InvalidSearchCursor) => {
             ApiError::invalid_field("cursor", "Use a valid issue-search cursor")
+        }
+        SessionIssueReadError::Issue(IssueReadError::InvalidAssignedCursor) => {
+            ApiError::invalid_field("cursor", "Use a valid assigned-issue cursor")
         }
         SessionIssueReadError::Issue(IssueReadError::InvalidSearchQuery) => {
             ApiError::invalid_field(

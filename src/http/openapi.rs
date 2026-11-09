@@ -62,6 +62,18 @@ pub fn browser_document() -> Value {
         let head = operation(&format!("{id}Head"), None, query, description);
         paths.insert(path.into(), json!({"get": get, "head": head}));
     }
+    let assigned_query = vec![
+        json!({"name": "page_size", "in": "query", "schema": {"type": "integer", "minimum": 1, "maximum": 100, "default": 50}}),
+        json!({"name": "cursor", "in": "query", "schema": {"type": "string"}, "description": "Exclusive keyset. Order is due date ascending, dates that are absent last, then updated_at descending, then issue id descending."}),
+    ];
+    let assigned = "Issues whose current assignee is the signed-in person and whose project that person can still read. Archived projects and trashed issues are omitted. Creating or commenting on an issue does not put it here.";
+    paths.insert(
+        "/api/v1/me/issues".into(),
+        json!({
+            "get": operation("listAssignedIssues", Some("IssuePage"), assigned_query.clone(), assigned),
+            "head": operation("listAssignedIssuesHead", None, assigned_query, assigned),
+        }),
+    );
     for (path, id, description) in [
         (
             "/api/v1/auth/session",
@@ -415,15 +427,116 @@ pub fn browser_document() -> Value {
         "/api/v1/projects/{project_id}/issues/{issue_number}/move".into(),
         json!({"post": move_issue}),
     );
+    let comment_parameters = vec![
+        json!({"name": "project_id", "in": "path", "required": true, "schema": uuid.clone()}),
+        json!({"name": "issue_number", "in": "path", "required": true, "schema": decimal_i64()}),
+    ];
+    let comment_description = "Comments on one visible issue. Session and project read access share one snapshot. The body is Markdown stored as text. Events record created, edited, and removed without the previous body. Archived projects and trashed issues stay readable and reject changes. A viewer can read and cannot create. The author edits and deletes their own comment. A project manager can delete another person's comment and cannot rewrite it.";
+    paths.insert(
+        "/api/v1/projects/{project_id}/issues/{issue_number}/comments".into(),
+        json!({
+            "get": operation("listIssueComments", Some("IssueCommentPage"), comment_parameters.clone(), comment_description),
+            "head": operation("listIssueCommentsHead", None, comment_parameters, comment_description)
+        }),
+    );
+    let mut create_comment = create.clone();
+    create_comment["operationId"] = json!("createIssueComment");
+    create_comment["description"] = json!(
+        "Add a comment when the signed-in person can mutate issues. Exact replay returns the original content-free receipt. The same key with a different body, project, or issue returns 409. A viewer, an archived project, and a trashed issue are rejected."
+    );
+    create_comment["parameters"].as_array_mut().unwrap().push(
+        json!({"name": "issue_number", "in": "path", "required": true, "schema": decimal_i64()}),
+    );
+    create_comment["requestBody"] = json!({"required": true, "content": {"application/json": {"schema": object(json!({"body": {"type": "string", "minLength": 1, "maxLength": 65536}}), &["body"])}}});
+    create_comment["responses"]["201"]["description"] =
+        json!("Committed comment or exact replay. The response does not repeat the body.");
+    create_comment["responses"]["201"]["headers"]["Location"] =
+        json!({"schema": {"type": "string"}});
+    create_comment["responses"]["201"]["content"]["application/json"]["schema"] =
+        json!({"$ref": "#/components/schemas/IssueCommentReceipt"});
+    create_comment["responses"]["409"] =
+        error_response("idempotency_conflict; retryable=false", true);
+    create_comment["responses"]["403"] = error_response(
+        "permission_denied: viewer, archived project, or trashed issue",
+        true,
+    );
+    let mut comments = paths
+        .remove("/api/v1/projects/{project_id}/issues/{issue_number}/comments")
+        .unwrap_or_else(|| json!({}));
+    comments["post"] = create_comment;
+    paths.insert(
+        "/api/v1/projects/{project_id}/issues/{issue_number}/comments".into(),
+        comments,
+    );
+    let mut edit_comment = create.clone();
+    edit_comment["operationId"] = json!("editIssueComment");
+    edit_comment["description"] = json!(
+        "Replace the author's own comment when expected_version matches. A manager cannot rewrite another person's text. Exact replay returns the original receipt. A stale version returns 409."
+    );
+    edit_comment["parameters"].as_array_mut().unwrap().push(
+        json!({"name": "issue_number", "in": "path", "required": true, "schema": decimal_i64()}),
+    );
+    edit_comment["parameters"].as_array_mut().unwrap().push(
+        json!({"name": "comment_id", "in": "path", "required": true, "schema": uuid.clone()}),
+    );
+    edit_comment["requestBody"] = json!({"required": true, "content": {"application/json": {"schema": object(json!({"body": {"type": "string", "minLength": 1, "maxLength": 65536}, "expected_version": decimal_i64()}), &["body", "expected_version"])}}});
+    let mut edit_success = edit_comment["responses"]["201"].clone();
+    edit_success["description"] = json!(
+        "Committed edit, unchanged body, or exact replay. The response does not repeat the body."
+    );
+    edit_success["content"]["application/json"]["schema"] =
+        json!({"$ref": "#/components/schemas/IssueCommentReceipt"});
+    edit_comment["responses"]
+        .as_object_mut()
+        .unwrap()
+        .remove("201");
+    edit_comment["responses"]["200"] = edit_success;
+    edit_comment["responses"]["409"] = error_response(
+        "issue_version_conflict/idempotency_conflict; retryable=false",
+        true,
+    );
+    edit_comment["responses"]["403"] = error_response(
+        "permission_denied: only the author can edit, and the project must still accept changes",
+        true,
+    );
+    let mut remove_comment = operation(
+        "removeIssueComment",
+        None,
+        vec![
+            json!({"name": "project_id", "in": "path", "required": true, "schema": uuid.clone()}),
+            json!({"name": "issue_number", "in": "path", "required": true, "schema": decimal_i64()}),
+            json!({"name": "comment_id", "in": "path", "required": true, "schema": uuid.clone()}),
+            json!({"name": "Origin", "in": "header", "required": true, "schema": {"type": "string"}}),
+            json!({"name": "x-csrf-token", "in": "header", "required": true, "schema": {"type": "string", "minLength": 43, "maxLength": 43}}),
+            json!({"name": "Idempotency-Key", "in": "header", "required": true, "schema": uuid.clone()}),
+        ],
+        "Delete the author's own comment, or any comment when the actor is a project manager. History records the removal without the body. Exact replay returns 204 and does not delete again.",
+    );
+    remove_comment["responses"]
+        .as_object_mut()
+        .unwrap()
+        .remove("200");
+    remove_comment["responses"]["204"] = json!({
+        "description": "Committed removal or exact replay. Empty body.",
+        "headers": {
+            "Cache-Control": {"schema": {"type": "string", "const": "no-store"}},
+            "Idempotency-Replayed": {"schema": {"type": "string", "enum": ["true", "false"]}}
+        }
+    });
+    paths.insert(
+        "/api/v1/projects/{project_id}/issues/{issue_number}/comments/{comment_id}".into(),
+        json!({"put": edit_comment, "delete": remove_comment}),
+    );
     paths
         .get_mut("/api/v1/projects/{project_id}/issues")
         .unwrap()["post"] = create;
+    insert_entry_contract(&mut paths);
     let mut document = json!({
         "openapi": "3.1.0",
         "info": {
             "title": "Puxiri opt-in browser API — partial development contract",
             "version": env!("CARGO_PKG_VERSION"),
-            "description": "Disabled (404) unless --browser-origin/PUXIRI_BROWSER_ORIGIN is configured. Listener does not terminate TLS; use an explicitly configured HTTPS origin. Cookie-only authentication; no Authorization fallback. Host must match; Origin and Fetch Metadata are checked when supplied, and mutations require exact Origin plus CSRF. Unknown/duplicate query fields are rejected. Every operation has no-store responses; HEAD has no body, including errors. Browser admission: eight in-flight requests per router instance, no admission queue; path+query <=2048 bytes, headers <=64 entries/16384 aggregate name+value bytes. Only matched POST issue creation/move and PUT issue text/priority/due-date mutations accept JSON body bytes (<=524288); all other operations require an empty body. Bodies must finish within one second before any handler/transaction starts. There is no whole-handler timeout or per-client requests-per-second limit. No login/signup/setup/session issuance, API tokens or OAuth are provided by this contract. Do not store bearer tokens in localStorage. This document is generated locally, not served as an endpoint or a production readiness claim."
+            "description": "Disabled (404) unless --browser-origin/PUXIRI_BROWSER_ORIGIN is configured. Listener does not terminate TLS; use an explicitly configured HTTPS origin. Cookie-only authentication; no Authorization fallback. Host must match; Origin and Fetch Metadata are checked when supplied, and mutations require exact Origin plus CSRF. Unknown/duplicate query fields are rejected. Every operation has no-store responses; HEAD has no body, including errors. Browser admission: eight in-flight requests per router instance, no admission queue; path+query <=2048 bytes, headers <=64 entries/16384 aggregate name+value bytes. Matched anonymous setup and login requests, project creation, POST issue creation/move, PUT issue text/priority/due-date/assignee, POST issue comments, PUT comment edits, POST invitations, PUT the mail sender, and PUT the MCP grant accept uncompressed JSON up to 524288 bytes. Setup and login start do not require a session. Project and issue mutations require the session cookie and CSRF. Every other operation requires an empty body. Bodies must finish within one second before any handler/transaction starts. There is no whole-handler timeout or per-client requests-per-second limit. Setup issues the initial administrator session. Later Muira login issues a Puxiri session only when that person already belongs to the installation or consumes a pending invitation; otherwise the callback stores no account and sends the browser to the invitation-required page. A Muira token never authorizes a Puxiri call. MCP accepts that token only as identity after an invitation and a separate Puxiri grant. This contract issues no API token. Do not store bearer tokens in localStorage. This document is generated locally, not served as an endpoint or a production readiness claim."
         },
         "security": [{"browserSession": []}],
         "paths": paths,
@@ -474,7 +587,7 @@ pub fn browser_document() -> Value {
     document["components"]["schemas"]["BoardColumnPage"] = column;
     detail["properties"]["description"] = json!({"type": "string", "maxLength": 65536, "description": "Optional Markdown data, capped at 65536 UTF-8 bytes by the domain; never HTML-rendered by this endpoint."});
     detail["properties"]["completed_at"] = timestamp.clone();
-    detail["properties"]["trashed_at"] = timestamp;
+    detail["properties"]["trashed_at"] = timestamp.clone();
     document["components"]["schemas"]["IssueDetail"] = detail;
     let priority_change = object(
         json!({
@@ -575,7 +688,303 @@ pub fn browser_document() -> Value {
     document["components"]["schemas"]["BoardStatus"] = board_status;
     document["components"]["schemas"]["BoardStatusPage"] = page("BoardStatus");
     document["components"]["schemas"]["IssueTypePage"] = page("IssueType");
+    document["components"]["schemas"]["InstallationStatus"] = object(
+        json!({"setup_required": {"type": "boolean"}, "login": {"type": "string", "enum": ["puxiri", "muira"]}}),
+        &["setup_required"],
+    );
+    document["components"]["schemas"]["MuiraAuthorization"] = object(
+        json!({"authorization_url": {"type": "string", "format": "uri"}}),
+        &["authorization_url"],
+    );
+    document["components"]["schemas"]["IssueComment"] = object(
+        json!({"id": uuid.clone(), "author_user_id": uuid.clone(), "author_display_name": {"type": "string"}, "body": {"type": "string"}, "version": decimal_i64(), "can_edit": {"type": "boolean"}, "can_delete": {"type": "boolean"}, "created_at": timestamp.clone(), "updated_at": timestamp.clone()}),
+        &[
+            "id",
+            "author_user_id",
+            "author_display_name",
+            "body",
+            "version",
+            "can_edit",
+            "can_delete",
+            "created_at",
+            "updated_at",
+        ],
+    );
+    document["components"]["schemas"]["IssueCommentEvent"] = object(
+        json!({"id": uuid.clone(), "comment_id": uuid.clone(), "actor_user_id": uuid.clone(), "event_kind": {"type": "string", "enum": ["comment.created", "comment.edited", "comment.removed"]}, "occurred_at": timestamp.clone()}),
+        &[
+            "id",
+            "comment_id",
+            "actor_user_id",
+            "event_kind",
+            "occurred_at",
+        ],
+    );
+    document["components"]["schemas"]["IssueCommentPage"] = object(
+        json!({"comments": {"type": "array", "items": {"$ref": "#/components/schemas/IssueComment"}}, "events": {"type": "array", "items": {"$ref": "#/components/schemas/IssueCommentEvent"}}, "has_more": {"type": "boolean"}, "next_cursor": uuid.clone()}),
+        &["comments", "events", "has_more"],
+    );
+    document["components"]["schemas"]["IssueCommentReceipt"] = object(
+        json!({"id": uuid.clone(), "project_id": uuid.clone(), "issue_number": decimal_i64(), "result_version": decimal_i64(), "changed": {"type": "boolean"}}),
+        &["id", "project_id", "issue_number", "changed"],
+    );
+    document["components"]["schemas"]["McpGrant"] = object(
+        json!({"configured": {"type": "boolean"}, "scope": {"type": "string", "enum": ["read", "write"]}, "all_projects": {"type": "boolean"}, "projects": {"type": "array", "items": {"type": "string"}}}),
+        &["configured"],
+    );
+    document["components"]["schemas"]["IssuedInvitation"] = object(
+        json!({"id": uuid.clone(), "expires_at": timestamp.clone(), "delivery": {"type": "string", "enum": ["queued", "unconfigured", "rejected", "unknown"]}, "invite_url": {"type": "string"}, "token": {"type": "string", "minLength": 43, "maxLength": 43}, "provider_message_id": {"type": "string"}}),
+        &["id", "expires_at", "delivery", "invite_url", "token"],
+    );
+    document["components"]["schemas"]["MailSender"] = object(
+        json!({"configured": {"type": "boolean"}, "provider": {"type": "string", "enum": ["sabia", "resend", "millionsend"]}, "from_address": {"type": "string"}, "from_name": {"type": "string"}, "template": {"type": "string"}, "origin": {"type": "string"}}),
+        &["configured"],
+    );
+    document["components"]["schemas"]["CreatedProject"] = object(
+        json!({
+            "id": {"type": "string", "format": "uuid"},
+            "project_key": {"type": "string", "pattern": "^[A-Z]{2,6}$"},
+            "name": {"type": "string", "minLength": 1},
+            "description": {"type": "string"},
+            "default_view": {"type": "string", "enum": ["board", "list"]}
+        }),
+        &["id", "project_key", "name", "default_view"],
+    );
     document
+}
+
+fn insert_entry_contract(paths: &mut serde_json::Map<String, Value>) {
+    let status = "Whether this installation still needs its initial administrator, and which login source is active. No session, query, or body. login is omitted until setup completes.";
+    let mut status_get = operation(
+        "installationStatus",
+        Some("InstallationStatus"),
+        vec![],
+        status,
+    );
+    let mut status_head = operation("installationStatusHead", None, vec![], status);
+    status_get["security"] = json!([]);
+    status_head["security"] = json!([]);
+    paths.insert(
+        "/api/v1/setup/status".into(),
+        json!({"get": status_get, "head": status_head}),
+    );
+    paths.insert(
+        "/api/v1/setup/puxiri".into(),
+        json!({"post": anonymous_mutation("completePuxiriSetup", "CurrentSession", "Create the installation, its owner, and the built-in login source. The setup token is consumed only when the owner and session commit. Password policy failures are 422. A consumed or unknown token is 409.", object(json!({"setup_token": {"type": "string", "minLength": 43, "maxLength": 43}, "organization_name": {"type": "string", "minLength": 1}, "locale": {"type": "string", "enum": ["pt-BR", "en"]}, "timezone": {"type": "string", "minLength": 1}, "display_name": {"type": "string", "minLength": 1}, "email": {"type": "string"}, "password": {"type": "string", "minLength": 10}}), &["setup_token", "organization_name", "locale", "timezone", "display_name", "email", "password"]))}),
+    );
+    paths.insert(
+        "/api/v1/setup/muira".into(),
+        json!({"post": anonymous_mutation("beginMuiraSetup", "MuiraAuthorization", "Store the Muira client secret in the installation envelope and return the authorize URL. No session is issued until the callback verifies the same email. The setup token stays usable until that callback commits.", object(json!({"setup_token": {"type": "string", "minLength": 43, "maxLength": 43}, "organization_name": {"type": "string", "minLength": 1}, "locale": {"type": "string", "enum": ["pt-BR", "en"]}, "timezone": {"type": "string", "minLength": 1}, "display_name": {"type": "string", "minLength": 1}, "email": {"type": "string"}, "issuer": {"type": "string", "format": "uri"}, "client_id": {"type": "string", "minLength": 1}, "client_secret": {"type": "string", "minLength": 1, "maxLength": 512}}), &["setup_token", "organization_name", "locale", "timezone", "display_name", "email", "issuer", "client_id", "client_secret"]))}),
+    );
+    paths.insert(
+        "/api/v1/auth/muira/login".into(),
+        json!({"post": anonymous_mutation("beginMuiraLogin", "MuiraAuthorization", "Start Muira login for an installation that already chose Muira. An empty JSON object is required. Membership is checked only on the callback.", object(json!({}), &[]))}),
+    );
+    paths.insert(
+        "/api/v1/auth/puxiri/login".into(),
+        json!({"post": anonymous_mutation("loginPuxiri", "CurrentSession", "Check the built-in password credential. Unknown email, a wrong password, and a password submitted to a Muira installation share one response. The message does not reveal which login source is configured.", object(json!({"email": {"type": "string"}, "password": {"type": "string"}}), &["email", "password"]))}),
+    );
+    let mut callback = json!({
+        "operationId": "completeMuiraLogin",
+        "description": "Top-level return from Muira. The state query must match the __Host-puxiri_muira cookie. HEAD is rejected before the authorization code is exchanged. Success sets the Puxiri session cookie and redirects to /projects. A verified person without a membership or a matching invitation is redirected to /convite and no account or session is stored. A Muira token is not accepted on any other Puxiri route.",
+        "security": [],
+        "parameters": [
+            {"name": "code", "in": "query", "required": true, "schema": {"type": "string", "minLength": 1, "maxLength": 1024}},
+            {"name": "state", "in": "query", "required": true, "schema": {"type": "string", "minLength": 43, "maxLength": 43}}
+        ],
+        "responses": {
+            "303": {"description": "Browser redirect. Location is /projects, /convite, or /?erro=identidade|setup|login|indisponivel.", "headers": {"Cache-Control": {"schema": {"type": "string", "const": "no-store"}}, "Location": {"schema": {"type": "string"}}}},
+            "400": error_response("malformed_request: duplicate, unknown, or malformed callback query", true),
+            "403": error_response("request_origin_denied: host or fetch metadata rejected. HEAD is method_not_allowed before exchange.", true),
+            "405": error_response("method_not_allowed: HEAD does not exchange the code", true)
+        }
+    });
+    callback["responses"]["401"] = error_response(
+        "unauthenticated: not used; identity failure is a redirect",
+        true,
+    );
+    paths.insert(
+        "/api/v1/auth/muira/callback".into(),
+        json!({"get": callback}),
+    );
+    let mut project = paths
+        .remove("/api/v1/projects")
+        .unwrap_or_else(|| json!({}));
+    project["post"] = authenticated_mutation(
+        "createProject",
+        "CreatedProject",
+        "201",
+        "Create a project when the signed-in person is an organization owner or admin. The creator becomes the project manager. Members and guests receive 403.",
+        object(
+            json!({"project_key": {"type": "string", "pattern": "^[A-Z]{2,6}$"}, "name": {"type": "string", "minLength": 1}, "description": {"type": "string"}}),
+            &["project_key", "name"],
+        ),
+        vec![
+            json!({"name": "Origin", "in": "header", "required": true, "schema": {"type": "string"}}),
+            json!({"name": "x-csrf-token", "in": "header", "required": true, "schema": {"type": "string", "minLength": 43, "maxLength": 43}}),
+        ],
+    );
+    paths.insert("/api/v1/projects".into(), project);
+    paths.insert(
+        "/api/v1/invitations".into(),
+        json!({"post": authenticated_mutation(
+            "createInvitation",
+            "IssuedInvitation",
+            "201",
+            "Issue or reissue an organization invitation. Email is attempted only when one sender is configured. Acceptance by Sabiá, Resend, or MillionSend means queued, not delivered. An unconfigured sender still returns the one-time token so the operator can copy the invitation. A Muira login does not create this invitation.",
+            object(json!({"email": {"type": "string"}, "role": {"type": "string", "enum": ["member", "guest"]}, "projects": {"type": "array", "items": {"type": "object"}}}), &["email", "role"]),
+            vec![
+                json!({"name": "Origin", "in": "header", "required": true, "schema": {"type": "string"}}),
+                json!({"name": "x-csrf-token", "in": "header", "required": true, "schema": {"type": "string", "minLength": 43, "maxLength": 43}}),
+            ],
+        )}),
+    );
+    let mail_get = operation(
+        "mailSender",
+        Some("MailSender"),
+        vec![],
+        "The active email sender without its API key. configured is false when the installation has no sender. One sender is active; there is no fallback.",
+    );
+    let mail_head = operation(
+        "mailSenderHead",
+        None,
+        vec![],
+        "The active email sender without its API key.",
+    );
+    paths.insert(
+        "/api/v1/mail/sender".into(),
+        json!({
+            "get": mail_get,
+            "head": mail_head,
+            "put": authenticated_mutation(
+                "replaceMailSender",
+                "MailSender",
+                "200",
+                "Replace the only email sender. The API key is stored encrypted and is not returned. Sabiá uses a published template and origin. Resend and MillionSend are separate direct clients.",
+                object(json!({"provider": {"type": "string", "enum": ["sabia", "resend", "millionsend"]}, "api_key": {"type": "string", "minLength": 1, "maxLength": 512}, "from_address": {"type": "string"}, "from_name": {"type": "string"}, "template": {"type": "string"}, "origin": {"type": "string"}}), &["provider", "api_key"]),
+                vec![
+                    json!({"name": "Origin", "in": "header", "required": true, "schema": {"type": "string"}}),
+                    json!({"name": "x-csrf-token", "in": "header", "required": true, "schema": {"type": "string", "minLength": 43, "maxLength": 43}}),
+                ],
+            )
+        }),
+    );
+    let grant_parameters = vec![
+        json!({"name": "Origin", "in": "header", "required": true, "schema": {"type": "string"}}),
+        json!({"name": "x-csrf-token", "in": "header", "required": true, "schema": {"type": "string", "minLength": 43, "maxLength": 43}}),
+    ];
+    let grant_get = operation(
+        "mcpGrant",
+        Some("McpGrant"),
+        vec![],
+        "The signed-in person's MCP grant. configured is false when no grant exists. A Muira token is not this grant.",
+    );
+    let grant_head = operation(
+        "mcpGrantHead",
+        None,
+        vec![],
+        "The signed-in person's MCP grant.",
+    );
+    let mut grant_delete = authenticated_mutation(
+        "revokeMcpGrant",
+        "McpGrant",
+        "200",
+        "Remove the signed-in person's MCP grant. Later Muira tokens no longer open MCP.",
+        object(json!({}), &[]),
+        grant_parameters.clone(),
+    );
+    grant_delete.as_object_mut().unwrap().remove("requestBody");
+    grant_delete["responses"]
+        .as_object_mut()
+        .unwrap()
+        .remove("200");
+    grant_delete["responses"]["204"] = json!({
+        "description": "The grant is absent.",
+        "headers": {"Cache-Control": {"schema": {"type": "string", "const": "no-store"}}}
+    });
+    paths.insert(
+        "/api/v1/mcp/grant".into(),
+        json!({
+            "get": grant_get,
+            "head": grant_head,
+            "put": authenticated_mutation(
+                "replaceMcpGrant",
+                "McpGrant",
+                "200",
+                "Replace the signed-in person's MCP grant. all_projects covers current and future memberships. Otherwise every listed project must already include this person. Read cannot call write tools.",
+                object(json!({"scope": {"type": "string", "enum": ["read", "write"]}, "all_projects": {"type": "boolean"}, "projects": {"type": "array", "items": {"type": "string"}}}), &["scope", "all_projects"]),
+                grant_parameters,
+            ),
+            "delete": grant_delete,
+        }),
+    );
+}
+
+fn anonymous_mutation(id: &str, schema: &str, description: &str, body: Value) -> Value {
+    let mut operation = authenticated_mutation(id, schema, "200", description, body, vec![]);
+    operation["security"] = json!([]);
+    operation
+}
+
+fn authenticated_mutation(
+    id: &str,
+    schema: &str,
+    success_status: &str,
+    description: &str,
+    body: Value,
+    mut parameters: Vec<Value>,
+) -> Value {
+    if parameters.is_empty() {
+        parameters.push(json!({"name": "Origin", "in": "header", "required": true, "schema": {"type": "string"}}));
+    }
+    let success = json!({
+        "description": "Committed result. Setup and built-in login also set the session cookie. Muira start sets only the short-lived state cookie.",
+        "headers": {"Cache-Control": {"schema": {"type": "string", "const": "no-store"}}},
+        "content": {"application/json": {"schema": {"$ref": format!("#/components/schemas/{schema}")}}}
+    });
+    let mut responses = serde_json::Map::new();
+    responses.insert(success_status.to_owned(), success);
+    for (status, message) in [
+        (
+            "400",
+            "malformed_request: malformed or unsupported JSON, or an unexpected query",
+        ),
+        (
+            "401",
+            "unauthenticated: credentials were not accepted, or no active session",
+        ),
+        (
+            "403",
+            "request_origin_denied/csrf_required/permission_denied",
+        ),
+        (
+            "408",
+            "request_timeout: body verification did not finish before any handler started; retryable=true",
+        ),
+        ("409", "setup_unavailable/project_key_unavailable"),
+        ("413", "payload_too_large: JSON exceeds 524288 bytes"),
+        ("414", "uri_too_long"),
+        (
+            "415",
+            "unsupported_media_type: uncompressed application/json required",
+        ),
+        (
+            "422",
+            "invalid_params: field_errors identifies the invalid field",
+        ),
+        ("431", "headers_too_large"),
+        ("500", "unexpected_error"),
+        ("503", "storage_unavailable/service_busy; retryable=true"),
+    ] {
+        responses.insert(status.into(), error_response(message, true));
+    }
+    json!({
+        "operationId": id,
+        "description": description,
+        "parameters": parameters,
+        "requestBody": {"required": true, "content": {"application/json": {"schema": body}}},
+        "responses": responses
+    })
 }
 
 fn object(properties: Value, required: &[&str]) -> Value {

@@ -6,7 +6,7 @@ use axum::{
     http::{HeaderValue, StatusCode, header},
     middleware,
     response::{IntoResponse, Response},
-    routing::{delete, get},
+    routing::{delete, get, post},
 };
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -43,16 +43,26 @@ struct BrowserState {
     field_writer: crate::issues::fields::SessionIssueFieldWriter,
     text_writer: crate::issues::text::SessionIssueTextWriter,
     mover: crate::issues::movement::SessionIssueMover,
+    entry: crate::auth::entry::InstallationEntry,
+    exchange: Arc<dyn crate::auth::entry::MuiraCodeExchange>,
+    project_writer: crate::projects::ProjectStore,
+    comments: crate::issues::comments::CommentStore,
+    invitations: crate::invitations::OrganizationInvitationStore,
+    mail: crate::mail::MailSenderStore,
 }
 
 mod catalogs;
+mod entry;
+mod invitations;
 mod issues;
+mod mcp_grant;
 mod project_members;
 
 pub(super) fn routes(
     database: Arc<Database>,
     security: BrowserSessionSecurity,
     policy: SessionPolicy,
+    exchange: Arc<dyn crate::auth::entry::MuiraCodeExchange>,
 ) -> Router {
     let budget = Arc::new(super::browser_budget::BrowserBudget::with_security(
         security.clone(),
@@ -62,6 +72,14 @@ pub(super) fn routes(
         policy,
         security.master_key(),
     );
+    let sessions = SessionStore::new(database.pool().clone(), policy);
+    let entry = crate::auth::entry::InstallationEntry::new(
+        database.pool().clone(),
+        security.master_key(),
+        crate::auth::PasswordService::default(),
+        sessions.clone(),
+    );
+    let mail = crate::mail::MailSenderStore::new(database.pool().clone(), security.master_key());
     let state = Arc::new(BrowserState {
         field_writer: crate::issues::fields::SessionIssueFieldWriter::new(
             database.pool().clone(),
@@ -80,13 +98,22 @@ pub(super) fn routes(
         ),
         writer,
         security,
-        sessions: SessionStore::new(database.pool().clone(), policy),
+        sessions,
         projects: SessionProjectReader::new(database.pool().clone(), policy),
         issues: crate::issues::session::SessionIssueReader::new(database.pool().clone(), policy),
         catalogs: crate::projects::catalog::SessionProjectCatalogReader::new(
             database.pool().clone(),
             policy,
         ),
+        entry,
+        exchange,
+        project_writer: crate::projects::ProjectStore::new(database.pool().clone()),
+        comments: crate::issues::comments::CommentStore::new(database.pool().clone()),
+        invitations: crate::invitations::OrganizationInvitationStore::new(
+            database.pool().clone(),
+            crate::invitations::InvitationPolicy::initial(),
+        ),
+        mail,
         database,
     });
     Router::new()
@@ -96,12 +123,32 @@ pub(super) fn routes(
             get(list_sessions).delete(revoke_all_sessions),
         )
         .route("/api/v1/auth/sessions/{session_id}", delete(revoke_session))
-        .route("/api/v1/projects", get(accessible_projects))
+        .route("/api/v1/setup/status", get(entry::setup_status))
+        .route("/api/v1/setup/puxiri", post(entry::setup_puxiri))
+        .route("/api/v1/setup/muira", post(entry::setup_muira))
+        .route("/api/v1/auth/muira/login", post(entry::login_muira))
+        .route("/api/v1/auth/muira/callback", get(entry::muira_callback))
+        .route("/api/v1/auth/puxiri/login", post(entry::login_puxiri))
+        .route(
+            "/api/v1/projects",
+            get(accessible_projects).post(entry::create_project),
+        )
         .route(
             "/api/v1/projects/{project_id}/capabilities",
             get(project_capabilities),
         )
         .route("/api/v1/admin/projects", get(operational_projects))
+        .route("/api/v1/invitations", post(invitations::issue))
+        .route(
+            "/api/v1/mail/sender",
+            get(invitations::mail_status).put(invitations::configure_mail),
+        )
+        .route(
+            "/api/v1/mcp/grant",
+            get(mcp_grant::show)
+                .put(mcp_grant::replace)
+                .delete(mcp_grant::revoke),
+        )
         .merge(project_members::routes())
         .merge(issues::routes())
         .merge(catalogs::routes())
@@ -524,6 +571,24 @@ async fn method_not_allowed(request: Request) -> Response {
                 .extensions()
                 .get::<axum::extract::MatchedPath>()
                 .is_some_and(|path| {
+                    path.as_str()
+                        == "/api/v1/projects/{project_id}/issues/{issue_number}/comments/{comment_id}"
+                })
+            {
+                "PUT, DELETE"
+            } else if request
+                .extensions()
+                .get::<axum::extract::MatchedPath>()
+                .is_some_and(|path| {
+                    path.as_str()
+                        == "/api/v1/projects/{project_id}/issues/{issue_number}/comments"
+                })
+            {
+                "GET, HEAD, POST"
+            } else if request
+                .extensions()
+                .get::<axum::extract::MatchedPath>()
+                .is_some_and(|path| {
                     path.as_str() == "/api/v1/projects/{project_id}/issues/{issue_number}/move"
                 })
             {
@@ -535,6 +600,50 @@ async fn method_not_allowed(request: Request) -> Response {
                 "/api/v1/auth/session" | "/api/v1/auth/sessions"
             ) {
                 "GET, HEAD, DELETE"
+            } else if request
+                .extensions()
+                .get::<axum::extract::MatchedPath>()
+                .is_some_and(|path| {
+                    matches!(
+                        path.as_str(),
+                        "/api/v1/setup/puxiri"
+                            | "/api/v1/setup/muira"
+                            | "/api/v1/auth/muira/login"
+                            | "/api/v1/auth/puxiri/login"
+                    )
+                })
+            {
+                "POST"
+            } else if request
+                .extensions()
+                .get::<axum::extract::MatchedPath>()
+                .is_some_and(|path| path.as_str() == "/api/v1/auth/muira/callback")
+            {
+                "GET"
+            } else if request
+                .extensions()
+                .get::<axum::extract::MatchedPath>()
+                .is_some_and(|path| path.as_str() == "/api/v1/projects")
+            {
+                "GET, HEAD, POST"
+            } else if request
+                .extensions()
+                .get::<axum::extract::MatchedPath>()
+                .is_some_and(|path| path.as_str() == "/api/v1/invitations")
+            {
+                "POST"
+            } else if request
+                .extensions()
+                .get::<axum::extract::MatchedPath>()
+                .is_some_and(|path| path.as_str() == "/api/v1/mail/sender")
+            {
+                "GET, HEAD, PUT"
+            } else if request
+                .extensions()
+                .get::<axum::extract::MatchedPath>()
+                .is_some_and(|path| path.as_str() == "/api/v1/mcp/grant")
+            {
+                "GET, HEAD, PUT, DELETE"
             } else {
                 "GET, HEAD"
             },

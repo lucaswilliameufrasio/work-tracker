@@ -46,6 +46,34 @@ impl MasterKey {
         mac.finalize().into_bytes().into()
     }
 
+    pub(crate) fn derive_muira_client_secret_key(
+        &self,
+    ) -> Result<Zeroizing<[u8; 32]>, MasterKeyError> {
+        let salt = Salt::new(HKDF_SHA256, b"puxiri muira client secret extraction v1");
+        let pseudorandom_key = salt.extract(self.0.as_slice());
+        let output_key_material = pseudorandom_key
+            .expand(&[b"puxiri muira client secret key v1"], HKDF_SHA256)
+            .map_err(|_| MasterKeyError::SubkeyDerivationFailed)?;
+        let mut key = Zeroizing::new([0_u8; 32]);
+        output_key_material
+            .fill(&mut *key)
+            .map_err(|_| MasterKeyError::SubkeyDerivationFailed)?;
+        Ok(key)
+    }
+
+    pub(crate) fn derive_mail_api_key(&self) -> Result<Zeroizing<[u8; 32]>, MasterKeyError> {
+        let salt = Salt::new(HKDF_SHA256, b"puxiri mail api key extraction v1");
+        let pseudorandom_key = salt.extract(self.0.as_slice());
+        let output_key_material = pseudorandom_key
+            .expand(&[b"puxiri mail api key v1"], HKDF_SHA256)
+            .map_err(|_| MasterKeyError::SubkeyDerivationFailed)?;
+        let mut key = Zeroizing::new([0_u8; 32]);
+        output_key_material
+            .fill(&mut *key)
+            .map_err(|_| MasterKeyError::SubkeyDerivationFailed)?;
+        Ok(key)
+    }
+
     pub(crate) fn derive_totp_encryption_key(
         &self,
         user_id: &Uuid,

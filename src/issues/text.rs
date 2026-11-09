@@ -98,6 +98,11 @@ enum TextTarget<'a> {
     Number(i64),
 }
 
+enum ActorSource<'a> {
+    Session(&'a SessionToken),
+    User(&'a str),
+}
+
 impl SessionIssueTextWriter {
     pub fn new(pool: SqlitePool, policy: SessionPolicy, master_key: MasterKey) -> Self {
         Self {
@@ -116,8 +121,15 @@ impl SessionIssueTextWriter {
         input: ReplaceIssueText<'_>,
         now: DateTime<Utc>,
     ) -> Result<IssueTextOutcome, IssueTextError> {
-        self.replace_target(token, project, TextTarget::Id(issue), key, input, now)
-            .await
+        self.replace_target(
+            ActorSource::Session(token),
+            project,
+            TextTarget::Id(issue),
+            key,
+            input,
+            now,
+        )
+        .await
     }
 
     pub async fn replace_by_number(
@@ -129,13 +141,43 @@ impl SessionIssueTextWriter {
         input: ReplaceIssueText<'_>,
         now: DateTime<Utc>,
     ) -> Result<IssueTextOutcome, IssueTextError> {
-        self.replace_target(token, project, TextTarget::Number(number), key, input, now)
-            .await
+        self.replace_target(
+            ActorSource::Session(token),
+            project,
+            TextTarget::Number(number),
+            key,
+            input,
+            now,
+        )
+        .await
+    }
+
+    /// Same text replacement as a browser session, for a person already
+    /// authenticated by Muira and authorized by a Puxiri grant. The user id is
+    /// not itself a credential.
+    pub async fn replace_by_number_for_user(
+        &self,
+        user_id: &str,
+        project: &str,
+        number: i64,
+        key: &str,
+        input: ReplaceIssueText<'_>,
+        now: DateTime<Utc>,
+    ) -> Result<IssueTextOutcome, IssueTextError> {
+        self.replace_target(
+            ActorSource::User(user_id),
+            project,
+            TextTarget::Number(number),
+            key,
+            input,
+            now,
+        )
+        .await
     }
 
     async fn replace_target(
         &self,
-        token: &SessionToken,
+        source: ActorSource<'_>,
         project: &str,
         target: TextTarget<'_>,
         key: &str,
@@ -175,12 +217,17 @@ impl SessionIssueTextWriter {
         }
         let key_id = self.master_key.key_id();
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-        let principal = self
-            .sessions
-            .authenticate_in_transaction(&mut tx, token, now)
-            .await?
-            .ok_or(IssueTextError::Unauthenticated)?;
-        let actor = principal.user_id();
+        let actor_id = match source {
+            ActorSource::User(user_id) => user_id.to_owned(),
+            ActorSource::Session(token) => self
+                .sessions
+                .authenticate_in_transaction(&mut tx, token, now)
+                .await?
+                .ok_or(IssueTextError::Unauthenticated)?
+                .user_id()
+                .to_owned(),
+        };
+        let actor = actor_id.as_str();
         let context =
             AccessStore::load_project_context_in_transaction(&mut tx, actor, project, false)
                 .await?
