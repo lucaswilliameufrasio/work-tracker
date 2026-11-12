@@ -26,12 +26,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
             browser_origin,
             replication_dir,
             replication_s3,
+            replication_schedule,
         } => {
             let remote_replica = remote_replica(*replication_s3)?;
             let database = match replication_dir {
                 Some(path) => Database::open_with_replication(&data_dir, &path).await?,
                 None => Database::open(&data_dir).await?,
             };
+            let database = database.with_replication_policy(replication_schedule.policy());
             let database = Arc::new(match remote_replica {
                 Some(remote) => {
                     tracing::info!(location = %remote.location(), "replication uploads to S3");
@@ -57,10 +59,21 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 browser_entry,
                 "development server listening"
             );
-            axum::serve(listener, router)
+            let (stop_replication, replication_shutdown) = tokio::sync::watch::channel(false);
+            let scheduler =
+                puxiri::replication::spawn_scheduler(database.clone(), replication_shutdown);
+            let served = axum::serve(listener, router)
                 .with_graceful_shutdown(shutdown_signal())
-                .await?;
+                .await;
+            // A capture in progress finishes; no new one starts.
+            let _ = stop_replication.send(true);
+            if let Some(scheduler) = scheduler
+                && let Err(error) = scheduler.await
+            {
+                tracing::warn!(%error, "replication scheduler stopped abnormally");
+            }
             database.close().await;
+            served?;
             Ok(())
         }
         Command::SetupToken { data_dir } => {
@@ -103,7 +116,8 @@ async fn shutdown_signal() {
 fn remote_replica(
     args: puxiri::config::ReplicationS3Args,
 ) -> Result<Option<puxiri::replication::RemoteReplica>, Box<dyn Error>> {
-    let Some(bucket) = args.bucket else {
+    // Compose and env files pass unset settings as empty strings.
+    let Some(bucket) = args.bucket.filter(|bucket| !bucket.trim().is_empty()) else {
         return Ok(None);
     };
     let credential = |name: &str| {
@@ -116,7 +130,7 @@ fn remote_replica(
         bucket,
         prefix: args.prefix,
         region: args.region,
-        endpoint: args.endpoint,
+        endpoint: args.endpoint.filter(|endpoint| !endpoint.trim().is_empty()),
         path_style: args.path_style,
         access_key_id: credential("PUXIRI_REPLICATION_S3_ACCESS_KEY_ID")?,
         secret_access_key: credential("PUXIRI_REPLICATION_S3_SECRET_ACCESS_KEY")?,

@@ -36,4 +36,5 @@ curl --silent --output /dev/null --max-time 2 "$endpoint/" || {
 
 PUXIRI_TEST_REPLICATION_S3_ENDPOINT="$endpoint" \
     cargo test --locked --test replication -- --nocapture \
-    capture_uploads_to_s3_and_a_new_installation_restores_from_it
+    capture_uploads_to_s3_and_a_new_installation_restores_from_it \
+    remote_retention_keeps_the_newest_generations_and_only_deletes_its_own

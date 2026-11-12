@@ -1,4 +1,4 @@
-use std::{path::Path, sync::Arc, time::Duration};
+use std::{num::NonZeroUsize, path::Path, sync::Arc, time::Duration};
 
 use puxiri::{db::Database, replication};
 use rusqlite::OpenFlags;
@@ -78,9 +78,9 @@ async fn a_second_capture_is_busy_until_the_first_gate_is_released() {
     assert!(matches!(error, replication::ReplicationError::Busy));
     drop(permit);
     let report = replication::capture(&database).await.unwrap();
-    // The busy attempt already published the online snapshot. The write
-    // gate only stops the incremental capture, so the retry reuses it.
-    assert!(!report.snapshot_created);
+    // The busy attempt removed its unfinished generation, so the retry starts one.
+    assert!(report.snapshot_created);
+    assert!(report.generation_started);
     assert!(!report.txid.is_empty());
 }
 
@@ -291,4 +291,207 @@ async fn capture_uploads_to_s3_and_a_new_installation_restores_from_it() {
         .join(&restored.file_name);
     assert_ne!(path, fresh.database_path());
     assert_eq!(labels(&path), vec!["first".to_owned(), "second".to_owned()]);
+}
+
+fn rotating_policy(retained: usize) -> replication::ReplicationPolicy {
+    replication::ReplicationPolicy {
+        capture_interval: None,
+        generation_age: Duration::ZERO,
+        retained_generations: NonZeroUsize::new(retained).unwrap(),
+    }
+}
+
+fn local_generations(root: &Path) -> usize {
+    std::fs::read_dir(root.join("replication").join("generations"))
+        .unwrap()
+        .filter(|entry| entry.as_ref().unwrap().file_type().unwrap().is_dir())
+        .count()
+}
+
+#[tokio::test]
+async fn a_due_generation_starts_from_a_fresh_snapshot_and_drops_the_previous_one() {
+    let directory = TempDir::new().unwrap();
+    let database = Database::open(directory.path())
+        .await
+        .unwrap()
+        .with_replication_policy(rotating_policy(1));
+    for (id, label) in [(1, "first"), (2, "second"), (3, "third")] {
+        insert_probe(&database, id, label).await;
+        let report = replication::capture(&database).await.unwrap();
+        assert!(report.generation_started);
+        assert!(report.snapshot_created);
+        assert_eq!(local_generations(directory.path()), 1);
+    }
+    let status = replication::status(&database).await;
+    assert!(status.snapshot);
+    assert!(status.generation_started_at_millis.is_some());
+    let restored = replication::restore_latest(&database).await.unwrap();
+    let path = directory.path().join("restores").join(restored.file_name);
+    assert_eq!(
+        labels(&path),
+        vec!["first".to_owned(), "second".to_owned(), "third".to_owned()]
+    );
+}
+
+#[tokio::test]
+async fn a_generation_that_is_not_due_keeps_capturing_incrementally() {
+    let directory = TempDir::new().unwrap();
+    let database = Database::open(directory.path()).await.unwrap();
+    insert_probe(&database, 1, "first").await;
+    assert!(
+        replication::capture(&database)
+            .await
+            .unwrap()
+            .generation_started
+    );
+    insert_probe(&database, 2, "second").await;
+    let second = replication::capture(&database).await.unwrap();
+    assert!(!second.generation_started);
+    assert!(!second.snapshot_created);
+    assert_eq!(local_generations(directory.path()), 1);
+}
+
+#[tokio::test]
+async fn the_scheduler_captures_on_its_interval_and_stops_on_shutdown() {
+    let directory = TempDir::new().unwrap();
+    let database = Arc::new(
+        Database::open(directory.path())
+            .await
+            .unwrap()
+            .with_replication_policy(replication::ReplicationPolicy {
+                capture_interval: Some(Duration::from_millis(100)),
+                ..replication::ReplicationPolicy::default()
+            }),
+    );
+    insert_probe(&database, 1, "scheduled").await;
+    let (stop, shutdown) = tokio::sync::watch::channel(false);
+    let scheduler = replication::spawn_scheduler(Arc::clone(&database), shutdown).unwrap();
+    tokio::time::timeout(Duration::from_secs(30), async {
+        while replication::status(&database).await.txid.is_none() {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the scheduler did not capture");
+    stop.send(true).unwrap();
+    tokio::time::timeout(Duration::from_secs(30), scheduler)
+        .await
+        .expect("the scheduler did not stop")
+        .unwrap();
+}
+
+#[tokio::test]
+async fn without_an_interval_no_scheduler_runs() {
+    let directory = TempDir::new().unwrap();
+    let database = Arc::new(
+        Database::open(directory.path())
+            .await
+            .unwrap()
+            .with_replication_policy(rotating_policy(1)),
+    );
+    let (_stop, shutdown) = tokio::sync::watch::channel(false);
+    assert!(replication::spawn_scheduler(database, shutdown).is_none());
+}
+
+/// Runs only against a disposable S3-compatible server; see `make test-replication-s3`.
+#[tokio::test]
+async fn remote_retention_keeps_the_newest_generations_and_only_deletes_its_own() {
+    let Ok(endpoint) = std::env::var("PUXIRI_TEST_REPLICATION_S3_ENDPOINT") else {
+        eprintln!("skipped: PUXIRI_TEST_REPLICATION_S3_ENDPOINT is not set");
+        return;
+    };
+    let bucket = format!("puxiri-retention-{}", uuid::Uuid::now_v7());
+    let settings = remote_settings(&endpoint, &bucket);
+    let client = test_client(&endpoint, &settings);
+    client.create_bucket().bucket(&bucket).send().await.unwrap();
+    // Objects Puxiri did not write must survive retention.
+    let foreign = [
+        "installations/test/generations/not-a-generation/keep.txt",
+        "installations/test/notes.txt",
+    ];
+    for key in foreign {
+        client
+            .put_object()
+            .bucket(&bucket)
+            .key(key)
+            .body(aws_sdk_s3::primitives::ByteStream::from_static(b"keep"))
+            .send()
+            .await
+            .unwrap();
+    }
+
+    let directory = TempDir::new().unwrap();
+    let database = Database::open(directory.path())
+        .await
+        .unwrap()
+        .with_replication_policy(rotating_policy(2))
+        .with_remote_replica(replication::RemoteReplica::new(settings).unwrap());
+    for (id, label) in [(1, "first"), (2, "second"), (3, "third")] {
+        insert_probe(&database, id, label).await;
+        let report = replication::capture(&database).await.unwrap();
+        assert!(report.generation_started);
+        assert!(matches!(
+            report.remote,
+            Some(replication::RemoteSync::Synced { .. })
+        ));
+    }
+    let mut generations = std::collections::BTreeSet::new();
+    let listed = client
+        .list_objects_v2()
+        .bucket(&bucket)
+        .prefix("installations/test/")
+        .send()
+        .await
+        .unwrap();
+    let keys: Vec<String> = listed
+        .contents()
+        .iter()
+        .filter_map(|object| object.key().map(ToOwned::to_owned))
+        .collect();
+    for key in &keys {
+        if let Some(rest) = key.strip_prefix("installations/test/generations/")
+            && let Some((generation, _)) = rest.split_once('/')
+            && uuid::Uuid::parse_str(generation).is_ok()
+        {
+            generations.insert(generation.to_owned());
+        }
+    }
+    assert_eq!(generations.len(), 2, "{keys:?}");
+    for key in foreign {
+        assert!(keys.iter().any(|listed| listed == key), "{key} was deleted");
+    }
+
+    let replacement = TempDir::new().unwrap();
+    let fresh = Database::open(replacement.path())
+        .await
+        .unwrap()
+        .with_remote_replica(
+            replication::RemoteReplica::new(remote_settings(&endpoint, &bucket)).unwrap(),
+        );
+    let restored = replication::restore_latest_from_remote(&fresh)
+        .await
+        .unwrap();
+    let path = replacement.path().join("restores").join(restored.file_name);
+    assert_eq!(
+        labels(&path),
+        vec!["first".to_owned(), "second".to_owned(), "third".to_owned()]
+    );
+}
+
+fn test_client(endpoint: &str, settings: &replication::RemoteSettings) -> aws_sdk_s3::Client {
+    aws_sdk_s3::Client::from_conf(
+        aws_sdk_s3::Config::builder()
+            .behavior_version_latest()
+            .region(aws_sdk_s3::config::Region::new("us-east-1"))
+            .endpoint_url(endpoint)
+            .force_path_style(true)
+            .credentials_provider(aws_credential_types::Credentials::new(
+                settings.access_key_id.clone(),
+                settings.secret_access_key.clone(),
+                None,
+                None,
+                "puxiri-test",
+            ))
+            .build(),
+    )
 }

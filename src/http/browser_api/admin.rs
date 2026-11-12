@@ -53,6 +53,12 @@ struct ReplicationBody {
     txid: Option<String>,
     same_filesystem: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
+    generation_started_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    capture_interval_seconds: Option<u64>,
+    generation_hours: u64,
+    retained_generations: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
     remote: Option<RemoteStatusBody>,
 }
 
@@ -136,6 +142,7 @@ struct CaptureBody {
     transactions: u64,
     wal_frames: u64,
     snapshot_created: bool,
+    generation_started: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     remote: Option<RemoteSyncBody>,
 }
@@ -180,6 +187,17 @@ async fn overview(
             snapshot: replication.snapshot,
             txid: replication.txid,
             same_filesystem: replication.same_filesystem,
+            generation_started_at: replication
+                .generation_started_at_millis
+                .and_then(chrono::DateTime::from_timestamp_millis)
+                .map(|at| at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)),
+            capture_interval_seconds: replication
+                .policy
+                .capture_interval
+                .map(|interval| interval.as_secs()),
+            generation_hours: replication.policy.generation_age.as_secs() / 3600,
+            retained_generations: u64::try_from(replication.policy.retained_generations.get())
+                .unwrap_or(u64::MAX),
             remote: replication.remote.map(|remote| RemoteStatusBody {
                 location: remote.location,
                 acknowledged_txid: remote.acknowledged_txid,
@@ -457,6 +475,7 @@ async fn capture(
         transactions: report.transactions,
         wal_frames: report.wal_frames,
         snapshot_created: report.snapshot_created,
+        generation_started: report.generation_started,
         remote: report.remote.map(|remote| match remote {
             crate::replication::RemoteSync::Synced {
                 txid,

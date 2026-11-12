@@ -7,6 +7,10 @@
     txid: string | undefined;
     sameFilesystem: boolean;
     remote: Remote | undefined;
+    generationStartedAt: string | undefined;
+    captureIntervalSeconds: number | undefined;
+    generationHours: number;
+    retainedGenerations: number;
   };
 
   type Remote = {
@@ -187,6 +191,10 @@
       !record(overview.replication) ||
       typeof overview.replication.snapshot !== 'boolean' ||
       typeof overview.replication.same_filesystem !== 'boolean' ||
+      typeof overview.replication.generation_hours !== 'number' ||
+      typeof overview.replication.retained_generations !== 'number' ||
+      (overview.replication.capture_interval_seconds !== undefined &&
+        typeof overview.replication.capture_interval_seconds !== 'number') ||
       (overview.replication.remote !== undefined &&
         (!record(overview.replication.remote) ||
           typeof overview.replication.remote.location !== 'string')) ||
@@ -238,6 +246,13 @@
         snapshot: overview.replication.snapshot,
         txid: text(overview.replication.txid),
         sameFilesystem: overview.replication.same_filesystem,
+        generationStartedAt: text(overview.replication.generation_started_at),
+        captureIntervalSeconds:
+          typeof overview.replication.capture_interval_seconds === 'number'
+            ? overview.replication.capture_interval_seconds
+            : undefined,
+        generationHours: overview.replication.generation_hours,
+        retainedGenerations: overview.replication.retained_generations,
         remote: record(overview.replication.remote)
           ? {
               location: String(overview.replication.remote.location),
@@ -440,6 +455,9 @@
         typeof payload.txid === 'string'
       ) {
         notice = `Captura gravada no ponto ${payload.txid}.`;
+        if (payload.generation_started === true) {
+          notice += ' Uma nova geração começou com um snapshot novo.';
+        }
         if (record(payload.remote) && payload.remote.status === 'synced') {
           notice += ' Enviada ao S3.';
         } else if (
@@ -462,6 +480,16 @@
         };
       }
     }
+  }
+
+  function intervalLabel(seconds: number): string {
+    if (seconds % 3600 === 0) {
+      return `${seconds / 3600} h`;
+    }
+    if (seconds % 60 === 0) {
+      return `${seconds / 60} min`;
+    }
+    return `${seconds} s`;
   }
 
   async function failureMessage(
@@ -613,6 +641,21 @@
         {:else}
           ainda sem snapshot
         {/if}
+      </p>
+      <p>
+        Captura automática:
+        {panel.replication.captureIntervalSeconds === undefined
+          ? 'desligada; capture pelo botão abaixo'
+          : `a cada ${intervalLabel(panel.replication.captureIntervalSeconds)}`}
+      </p>
+      <p>
+        Gerações: nova a cada {panel.replication.generationHours} h{panel
+          .replication.generationStartedAt === undefined
+          ? ''
+          : `, atual desde ${new Date(panel.replication.generationStartedAt).toLocaleString('pt-BR')}`}.
+        Aqui fica só a atual{panel.replication.remote === undefined
+          ? '.'
+          : `; no S3 ficam as ${panel.replication.retainedGenerations} mais recentes.`}
       </p>
       {#if panel.replication.remote === undefined}
         <p>S3: não configurado</p>

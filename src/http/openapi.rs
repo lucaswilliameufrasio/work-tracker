@@ -588,8 +588,8 @@ pub fn browser_document() -> Value {
         schemas.insert(
             "ReplicationStatus".into(),
             object(
-                json!({"snapshot": {"type": "boolean"}, "txid": {"type": "string", "minLength": 1}, "same_filesystem": {"type": "boolean"}, "remote": {"$ref": "#/components/schemas/ReplicationRemoteStatus"}}),
-                &["snapshot", "same_filesystem"],
+                json!({"snapshot": {"type": "boolean"}, "txid": {"type": "string", "minLength": 1}, "same_filesystem": {"type": "boolean"}, "generation_started_at": {"type": "string", "format": "date-time", "description": "When the current generation began from a fresh snapshot. Omitted before the first capture."}, "capture_interval_seconds": {"type": "integer", "minimum": 1, "description": "Seconds between automatic captures. Omitted when capture is left to an administrator."}, "generation_hours": {"type": "integer", "minimum": 1}, "retained_generations": {"type": "integer", "minimum": 1, "description": "Generations kept at the S3 destination, the current one included. Locally only the current generation is kept."}, "remote": {"$ref": "#/components/schemas/ReplicationRemoteStatus"}}),
+                &["snapshot", "same_filesystem", "generation_hours", "retained_generations"],
             ),
         );
         schemas.insert(
@@ -647,8 +647,8 @@ pub fn browser_document() -> Value {
         schemas.insert(
             "ReplicationCapture".into(),
             object(
-                json!({"txid": {"type": "string", "minLength": 1}, "transactions": {"type": "integer", "minimum": 0}, "wal_frames": {"type": "integer", "minimum": 0}, "snapshot_created": {"type": "boolean"}, "remote": {"$ref": "#/components/schemas/ReplicationRemoteSync"}}),
-                &["txid", "transactions", "wal_frames", "snapshot_created"],
+                json!({"txid": {"type": "string", "minLength": 1}, "transactions": {"type": "integer", "minimum": 0}, "wal_frames": {"type": "integer", "minimum": 0}, "snapshot_created": {"type": "boolean"}, "generation_started": {"type": "boolean"}, "remote": {"$ref": "#/components/schemas/ReplicationRemoteSync"}}),
+                &["txid", "transactions", "wal_frames", "snapshot_created", "generation_started"],
             ),
         );
         schemas.insert(
@@ -915,7 +915,7 @@ fn insert_admin_contract(paths: &mut serde_json::Map<String, Value>) {
             "captureReplication",
             "ReplicationCapture",
             "200",
-            "Create the initial snapshot when needed, then capture the WAL through sqlite-replication while application writers are paused. When an S3-compatible destination is configured, the local chain is then uploaded with immutable keys and remote is reported; an upload failure leaves the local capture in place and the next capture retries it. Only a local RustFS endpoint has been tested; AWS S3, R2, and other providers are not certified. This does not promise survival of power loss.",
+            "Create the initial snapshot when needed, then capture the WAL through sqlite-replication while application writers are paused. When the current generation is older than the configured age, the capture starts a new generation from a fresh snapshot and removes the previous local one. When an S3-compatible destination is configured, the generation is then uploaded with immutable keys and remote is reported; an upload failure leaves the local capture in place and the next capture retries it. After an acknowledged upload, remote generations beyond the retention count are deleted; the current one never is. 409 replication_busy while a scheduled capture or a restore is running. Only a local RustFS endpoint has been tested; AWS S3, R2, and other providers are not certified. This does not promise survival of power loss.",
             object(json!({}), &[]),
             headers.clone(),
         )}),
@@ -937,7 +937,7 @@ fn insert_admin_contract(paths: &mut serde_json::Map<String, Value>) {
             "restoreRemoteReplication",
             "ReplicationRestore",
             "200",
-            "Download and verify the chain from the configured S3-compatible destination in temporary space, then restore its newest point into a new file under the data directory. 409 replication_remote_not_configured when no destination is configured; 503 replication_remote_unavailable when the destination cannot be read. The live database is not replaced.",
+            "Download and verify the newest complete generation from the configured S3-compatible destination in temporary space, then restore its newest point into a new file under the data directory. 409 replication_remote_not_configured when no destination is configured; 503 replication_remote_unavailable when the destination cannot be read. The live database is not replaced.",
             object(json!({}), &[]),
             headers,
         )}),

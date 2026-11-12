@@ -30,12 +30,56 @@ pub enum Command {
         replication_dir: Option<PathBuf>,
         #[command(flatten)]
         replication_s3: Box<ReplicationS3Args>,
+        #[command(flatten)]
+        replication_schedule: ReplicationScheduleArgs,
     },
     /// Issue and display a one-time installation setup token to a local terminal.
     SetupToken {
         #[arg(long, env = "PUXIRI_DATA_DIR", default_value = "data")]
         data_dir: PathBuf,
     },
+}
+
+/// Scheduled capture and how much replication history is kept.
+#[derive(Debug, Clone, Copy, clap::Args)]
+pub struct ReplicationScheduleArgs {
+    /// Seconds between automatic captures. 0 leaves capture to an administrator.
+    #[arg(
+        long = "replication-interval-seconds",
+        env = "PUXIRI_REPLICATION_INTERVAL_SECONDS",
+        default_value_t = 300
+    )]
+    pub interval_seconds: u64,
+    /// Hours after which the next capture starts a new generation from a fresh snapshot.
+    #[arg(
+        long = "replication-generation-hours",
+        env = "PUXIRI_REPLICATION_GENERATION_HOURS",
+        default_value_t = 24,
+        value_parser = clap::value_parser!(u64).range(1..=8760)
+    )]
+    pub generation_hours: u64,
+    /// Generations kept at the S3 destination, the current one included.
+    #[arg(
+        long = "replication-retain-generations",
+        env = "PUXIRI_REPLICATION_RETAIN_GENERATIONS",
+        default_value_t = 7,
+        value_parser = clap::value_parser!(u64).range(1..=1000)
+    )]
+    pub retained_generations: u64,
+}
+
+impl ReplicationScheduleArgs {
+    pub fn policy(self) -> crate::replication::ReplicationPolicy {
+        crate::replication::ReplicationPolicy {
+            capture_interval: (self.interval_seconds > 0)
+                .then(|| std::time::Duration::from_secs(self.interval_seconds)),
+            generation_age: std::time::Duration::from_secs(self.generation_hours * 60 * 60),
+            retained_generations: std::num::NonZeroUsize::new(
+                usize::try_from(self.retained_generations).unwrap_or(usize::MAX),
+            )
+            .unwrap_or(std::num::NonZeroUsize::MIN),
+        }
+    }
 }
 
 /// Optional S3-compatible destination for each replication capture.
@@ -96,6 +140,7 @@ mod tests {
             browser_origin,
             replication_dir,
             replication_s3,
+            replication_schedule,
         } = cli.command
         else {
             panic!("expected serve command");
@@ -109,6 +154,42 @@ mod tests {
         assert_eq!(replication_s3.bucket, None);
         assert_eq!(replication_s3.prefix, "puxiri");
         assert!(!replication_s3.path_style);
+        assert_eq!(
+            replication_schedule.policy(),
+            crate::replication::ReplicationPolicy::default()
+        );
+    }
+
+    #[test]
+    fn replication_schedule_can_be_disabled_and_rejects_zero_retention() {
+        let cli = Cli::try_parse_from([
+            "puxiri",
+            "serve",
+            "--replication-interval-seconds",
+            "0",
+            "--replication-generation-hours",
+            "6",
+            "--replication-retain-generations",
+            "2",
+        ])
+        .unwrap();
+        let Command::Serve {
+            replication_schedule,
+            ..
+        } = cli.command
+        else {
+            panic!("expected serve command");
+        };
+        let policy = replication_schedule.policy();
+        assert_eq!(policy.capture_interval, None);
+        assert_eq!(policy.generation_age.as_secs(), 6 * 60 * 60);
+        assert_eq!(policy.retained_generations.get(), 2);
+        for (flag, value) in [
+            ("--replication-retain-generations", "0"),
+            ("--replication-generation-hours", "0"),
+        ] {
+            assert!(Cli::try_parse_from(["puxiri", "serve", flag, value]).is_err());
+        }
     }
 
     #[test]

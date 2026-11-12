@@ -34,6 +34,8 @@ pub struct Database {
     database_file: PathBuf,
     replication_dir: PathBuf,
     remote_replica: Option<Arc<crate::replication::RemoteReplica>>,
+    replication_policy: crate::replication::ReplicationPolicy,
+    replication_lock: tokio::sync::Mutex<()>,
     admission: Arc<WriteAdmission>,
     _directory_lock: File,
 }
@@ -105,6 +107,8 @@ impl Database {
             database_file: PathBuf::from(file),
             replication_dir: replication_dir.to_path_buf(),
             remote_replica: None,
+            replication_policy: crate::replication::ReplicationPolicy::default(),
+            replication_lock: tokio::sync::Mutex::new(()),
             admission,
             _directory_lock: directory_lock,
         })
@@ -134,6 +138,24 @@ impl Database {
 
     pub fn remote_replica(&self) -> Option<Arc<crate::replication::RemoteReplica>> {
         self.remote_replica.clone()
+    }
+
+    /// Scheduled capture and generation retention for this installation.
+    pub fn with_replication_policy(
+        mut self,
+        policy: crate::replication::ReplicationPolicy,
+    ) -> Self {
+        self.replication_policy = policy;
+        self
+    }
+
+    pub fn replication_policy(&self) -> crate::replication::ReplicationPolicy {
+        self.replication_policy
+    }
+
+    /// Held by one capture or restore at a time; the others report busy.
+    pub(crate) fn replication_lock(&self) -> &tokio::sync::Mutex<()> {
+        &self.replication_lock
     }
 
     pub fn admission(&self) -> Arc<WriteAdmission> {
