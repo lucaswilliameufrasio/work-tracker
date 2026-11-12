@@ -29,6 +29,21 @@ Opções de bootstrap implementadas: `--bind`/`PUXIRI_BIND` e `--data-dir`/`PUXI
 
 `--browser-origin`/`PUXIRI_BROWSER_ORIGIN` permite optar explicitamente pelas consultas `/api/v1/auth/session`, `/api/v1/projects` e `/api/v1/admin/projects`, além de logout por DELETE na sessão atual com Origin/CSRF. Exige origem HTTPS canônica, Host correspondente e sessão atual no cookie Secure/HttpOnly host-only; sem a opção, essas rotas retornam 404. O binário não termina TLS, não cria contas/sessões por HTTP e não deve ser exposto publicamente: os testes usam contas/sessões sintéticas em SQLite temporário. Login/signup, mutações de projeto/conta, onboarding e frontend autenticado continuam fechados. Não usar esse flag para contornar setup. Contrato e limites: [API browser de projetos](docs/browser-project-api-design.md).
 
+## Produção com Docker Compose
+
+`compose.yaml` sobe só o Puxiri: SQLite fica embutido, e Muira, email e S3 são serviços externos. Não há proxy nem TLS; o Puxiri publica HTTP em `PUXIRI_PUBLISH` (padrão `127.0.0.1:3000`) e espera um front end HTTPS seu na origem `PUXIRI_BROWSER_ORIGIN`. O build usa o checkout de `sqlite-replication` em `SQLITE_REPLICATION_DIR` (padrão `../sqlite-replication`).
+
+```sh
+cp .env.example .env                              # preencha a origem e, se quiser, o S3
+docker compose build
+docker compose run --rm -it puxiri setup-token    # só na primeira instalação, com o serviço parado
+docker compose up -d
+```
+
+O container roda como não root, com raiz somente leitura e sem capabilities. Banco, master key, geração local da replicação e restaurações ficam no volume `puxiri-data`; a restauração do S3 usa o volume `puxiri-tmp` como espaço temporário. Para trocar o banco por uma cópia restaurada, pare o serviço (`docker compose stop`) antes. A master key fica no mesmo volume do banco: guarde uma cópia fora do servidor, porque o S3 recupera o banco, não a chave.
+
+Replicação: captura automática a cada `PUXIRI_REPLICATION_INTERVAL_SECONDS` (padrão 300; `0` desliga), geração nova a cada `PUXIRI_REPLICATION_GENERATION_HOURS` (padrão 24) e `PUXIRI_REPLICATION_RETAIN_GENERATIONS` gerações no S3 (padrão 7). Veja o [ADR 0008](docs/adr/0008-replication-to-s3-compatible-storage.md).
+
 ## Validação
 
 ```sh

@@ -1,0 +1,47 @@
+# Runs Puxiri for production. It does not terminate TLS or proxy traffic:
+# put your own HTTPS front end on the published port.
+#
+#   cp .env.example .env            # then fill it in
+#   docker compose build
+#   docker compose run --rm -it puxiri setup-token   # first install, before `up`
+#   docker compose up -d
+name: puxiri
+
+services:
+  puxiri:
+    build:
+      context: .
+      additional_contexts:
+        sqlite-replication: ${SQLITE_REPLICATION_DIR:-../sqlite-replication}
+    image: puxiri:local
+    restart: unless-stopped
+    init: true
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    # Leaves time for the HTTP drain and a capture already in progress.
+    stop_grace_period: 60s
+    environment:
+      PUXIRI_BROWSER_ORIGIN: ${PUXIRI_BROWSER_ORIGIN:?set the public HTTPS origin in .env}
+      PUXIRI_REPLICATION_INTERVAL_SECONDS: ${PUXIRI_REPLICATION_INTERVAL_SECONDS:-300}
+      PUXIRI_REPLICATION_GENERATION_HOURS: ${PUXIRI_REPLICATION_GENERATION_HOURS:-24}
+      PUXIRI_REPLICATION_RETAIN_GENERATIONS: ${PUXIRI_REPLICATION_RETAIN_GENERATIONS:-7}
+      PUXIRI_REPLICATION_S3_BUCKET: ${PUXIRI_REPLICATION_S3_BUCKET:-}
+      PUXIRI_REPLICATION_S3_PREFIX: ${PUXIRI_REPLICATION_S3_PREFIX:-puxiri}
+      PUXIRI_REPLICATION_S3_REGION: ${PUXIRI_REPLICATION_S3_REGION:-us-east-1}
+      PUXIRI_REPLICATION_S3_ENDPOINT: ${PUXIRI_REPLICATION_S3_ENDPOINT:-}
+      PUXIRI_REPLICATION_S3_PATH_STYLE: ${PUXIRI_REPLICATION_S3_PATH_STYLE:-false}
+      PUXIRI_REPLICATION_S3_ACCESS_KEY_ID: ${PUXIRI_REPLICATION_S3_ACCESS_KEY_ID:-}
+      PUXIRI_REPLICATION_S3_SECRET_ACCESS_KEY: ${PUXIRI_REPLICATION_S3_SECRET_ACCESS_KEY:-}
+      RUST_LOG: ${RUST_LOG:-info}
+    ports:
+      - "${PUXIRI_PUBLISH:-127.0.0.1:3000}:3000"
+    volumes:
+      # Database, master key, local replication generation, and restores.
+      - puxiri-data:/data
+      # Remote restore stages the downloaded generation here.
+      - puxiri-tmp:/var/tmp
+
+volumes:
+  puxiri-data:
+  puxiri-tmp:
