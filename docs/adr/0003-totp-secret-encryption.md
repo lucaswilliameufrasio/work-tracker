@@ -1,6 +1,7 @@
 # ADR 0003: TOTP secret encryption profile
 
 - **Status:** Accepted for the internal TOTP envelope; slices 191–193 implement internal encryption, enrollment, session-bound assurance, and rotation; transport and broader privileged enforcement remain open
+- **Amended on 2026-11-12 by [ADR 0009](0009-secrets-from-the-environment-and-uirapuru-deploy.md):** the master key can also come from `PUXIRI_MASTER_KEY_BASE64` instead of the key file.
 - **Date:** 2026-10-12 (implementation status updated 2026-10-13)
 - **Context:** `docs/development-plan.md`, sections 7.1–7.2 and 8; ADR 0002 remains separate and deferred
 

@@ -42,7 +42,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 None => database,
             });
             let master_key_path = master_key_path.unwrap_or_else(|| data_dir.join("master.key"));
-            let master_key = MasterKeyStore::load_or_create(&master_key_path)?;
+            // A secret manager can supply the key so it does not live only beside the database.
+            let master_key = match std::env::var("PUXIRI_MASTER_KEY_BASE64")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+            {
+                Some(encoded) => MasterKeyStore::from_base64(&encoded, &master_key_path)?,
+                None => MasterKeyStore::load_or_create(&master_key_path)?,
+            };
             let browser_entry = browser_origin.is_some();
             let router = match browser_origin {
                 Some(origin) => http::router_with_entry(

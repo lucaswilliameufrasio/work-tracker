@@ -1,0 +1,37 @@
+# Compose for deploying Puxiri through Uirapuru. Uirapuru supplies the
+# environment (plain values from the hub, secure values from Ciphera) and adds
+# the shared network when the route is approved, so nothing is published here.
+#
+# Puxiri is a single instance: SQLite and an exclusive lock on /data. Use the
+# `recreate` deploy strategy and one replica. blue-green or rolling would
+# start a second container on the same volume, and it cannot take the lock.
+services:
+  puxiri:
+    image: ${PUXIRI_IMAGE:?set PUXIRI_IMAGE, for example ghcr.io/OWNER/puxiri:0.1.0}
+    restart: unless-stopped
+    init: true
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    stop_grace_period: 60s
+    environment:
+      PUXIRI_BROWSER_ORIGIN: ${PUXIRI_BROWSER_ORIGIN:?set the public HTTPS origin}
+      PUXIRI_MASTER_KEY_BASE64: ${PUXIRI_MASTER_KEY_BASE64:-}
+      PUXIRI_REPLICATION_INTERVAL_SECONDS: ${PUXIRI_REPLICATION_INTERVAL_SECONDS:-300}
+      PUXIRI_REPLICATION_GENERATION_HOURS: ${PUXIRI_REPLICATION_GENERATION_HOURS:-24}
+      PUXIRI_REPLICATION_RETAIN_GENERATIONS: ${PUXIRI_REPLICATION_RETAIN_GENERATIONS:-7}
+      PUXIRI_REPLICATION_S3_BUCKET: ${PUXIRI_REPLICATION_S3_BUCKET:-}
+      PUXIRI_REPLICATION_S3_PREFIX: ${PUXIRI_REPLICATION_S3_PREFIX:-puxiri}
+      PUXIRI_REPLICATION_S3_REGION: ${PUXIRI_REPLICATION_S3_REGION:-us-east-1}
+      PUXIRI_REPLICATION_S3_ENDPOINT: ${PUXIRI_REPLICATION_S3_ENDPOINT:-}
+      PUXIRI_REPLICATION_S3_PATH_STYLE: ${PUXIRI_REPLICATION_S3_PATH_STYLE:-false}
+      PUXIRI_REPLICATION_S3_ACCESS_KEY_ID: ${PUXIRI_REPLICATION_S3_ACCESS_KEY_ID:-}
+      PUXIRI_REPLICATION_S3_SECRET_ACCESS_KEY: ${PUXIRI_REPLICATION_S3_SECRET_ACCESS_KEY:-}
+      RUST_LOG: ${RUST_LOG:-info}
+    volumes:
+      - puxiri-data:/data
+      - puxiri-tmp:/var/tmp
+
+volumes:
+  puxiri-data:
+  puxiri-tmp:

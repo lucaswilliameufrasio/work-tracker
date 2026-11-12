@@ -19,6 +19,12 @@ pub enum MasterKeyError {
     SubkeyDerivationFailed,
     #[error("master key file operations are not supported on this platform")]
     UnsupportedPlatform,
+    #[error("the provided master key is not base64 for exactly 32 bytes")]
+    InvalidEncodedKey,
+    #[error(
+        "the provided master key differs from the master key file already in the data directory"
+    )]
+    KeyMismatch,
 }
 
 #[derive(Clone)]
@@ -100,6 +106,39 @@ impl MasterKey {
 pub struct MasterKeyStore;
 
 impl MasterKeyStore {
+    /// Uses a master key supplied from outside the data directory, for example
+    /// by a secret manager through the environment, so a lost disk does not
+    /// take the key with it. Nothing is written. If a key file already exists
+    /// at `path` it must hold the same key: starting with another key would
+    /// leave every encrypted secret unreadable.
+    #[cfg(unix)]
+    pub fn from_base64(encoded: &str, path: &Path) -> Result<MasterKey, MasterKeyError> {
+        use base64::{Engine, engine::general_purpose::STANDARD};
+        use subtle::ConstantTimeEq;
+
+        let decoded = Zeroizing::new(
+            STANDARD
+                .decode(encoded.trim())
+                .map_err(|_| MasterKeyError::InvalidEncodedKey)?,
+        );
+        let key: [u8; 32] = decoded
+            .as_slice()
+            .try_into()
+            .map_err(|_| MasterKeyError::InvalidEncodedKey)?;
+        let key = MasterKey(Arc::new(Zeroizing::new(key)));
+        if let Some(existing) = load_existing(path)?
+            && !bool::from(existing.0.as_slice().ct_eq(key.0.as_slice()))
+        {
+            return Err(MasterKeyError::KeyMismatch);
+        }
+        Ok(key)
+    }
+
+    #[cfg(not(unix))]
+    pub fn from_base64(_encoded: &str, _path: &Path) -> Result<MasterKey, MasterKeyError> {
+        Err(MasterKeyError::UnsupportedPlatform)
+    }
+
     #[cfg(unix)]
     pub fn load_or_create(path: &Path) -> Result<MasterKey, MasterKeyError> {
         use std::{
@@ -250,6 +289,38 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+
+    #[test]
+    fn an_external_key_matches_its_file_and_writes_nothing() {
+        use base64::{Engine, engine::general_purpose::STANDARD};
+        let directory = TempDir::new().unwrap();
+        let path = directory.path().join("master.key");
+        let encoded = STANDARD.encode([7_u8; 32]);
+
+        let external = MasterKeyStore::from_base64(&format!(" {encoded}\n"), &path).unwrap();
+        assert!(
+            !path.exists(),
+            "an external key must not be written to disk"
+        );
+
+        fs::write(&path, [7_u8; 32]).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        let from_file = MasterKeyStore::load_or_create(&path).unwrap();
+        assert!(external.key_id() == from_file.key_id());
+        assert!(MasterKeyStore::from_base64(&encoded, &path).is_ok());
+
+        let other = STANDARD.encode([8_u8; 32]);
+        assert!(matches!(
+            MasterKeyStore::from_base64(&other, &path),
+            Err(MasterKeyError::KeyMismatch)
+        ));
+        for invalid in ["", "not base64!", &STANDARD.encode([1_u8; 31])] {
+            assert!(matches!(
+                MasterKeyStore::from_base64(invalid, &path),
+                Err(MasterKeyError::InvalidEncodedKey)
+            ));
+        }
+    }
 
     #[test]
     fn creates_private_key_once_and_reuses_identical_material() {

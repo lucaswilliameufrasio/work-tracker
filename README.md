@@ -40,7 +40,17 @@ docker compose run --rm -it puxiri setup-token    # só na primeira instalação
 docker compose up -d
 ```
 
-O container roda como não root, com raiz somente leitura e sem capabilities. Banco, master key, geração local da replicação e restaurações ficam no volume `puxiri-data`; a restauração do S3 usa o volume `puxiri-tmp` como espaço temporário. Para trocar o banco por uma cópia restaurada, pare o serviço (`docker compose stop`) antes. A master key fica no mesmo volume do banco: guarde uma cópia fora do servidor, porque o S3 recupera o banco, não a chave.
+O container roda como não root, com raiz somente leitura e sem capabilities. Banco, geração local da replicação e restaurações ficam no volume `puxiri-data`; a restauração do S3 usa o volume `puxiri-tmp` como espaço temporário. Para trocar o banco por uma cópia restaurada, pare o serviço (`docker compose stop`) antes.
+
+Master key: sem `PUXIRI_MASTER_KEY_BASE64`, ela é criada em `master.key` no mesmo volume do banco, e o S3 recupera o banco, não a chave. Prefira guardá-la num gerenciador de segredos e passar por essa variável (base64 de 32 bytes; `openssl rand -base64 32` para uma nova). Para levar a chave de uma instalação existente: `docker compose cp puxiri:/data/master.key - | tar -xO | base64 -w0`. Se o arquivo continuar no volume, ele precisa ser igual à variável, senão o Puxiri não sobe. Segredos vêm sempre do ambiente: Ciphera pelo Uirapuru ou `ciphera run`, Infisical por `infisical run`, Vault pelo Vault Agent ([ADR 0009](docs/adr/0009-secrets-from-the-environment-and-uirapuru-deploy.md)).
+
+### Deploy pelo Uirapuru
+
+1. Publique a imagem: crie uma tag `v*`; `.github/workflows/publish-image.yml` gera `ghcr.io/<dono>/puxiri:<versão>` para `linux/amd64`. O pacote GHCR nasce privado: dê credenciais do registry ao servidor ou torne-o público.
+2. No Uirapuru, crie o serviço `puxiri` com `compose_path = deploy/uirapuru/compose.yaml`, estratégia `recreate` e uma réplica. O Puxiri é instância única (SQLite com lock exclusivo no volume); blue-green ou rolling subiriam um segundo container que não consegue o lock.
+3. Rode a descoberta de variáveis em `deploy/uirapuru/.env.example`. `PUXIRI_MASTER_KEY_BASE64` e as credenciais do S3 são `secure` (ficam no Ciphera); o resto é `plain`.
+4. Crie a rota para a porta `3000`; `PUXIRI_BROWSER_ORIGIN` é a origem HTTPS dessa rota.
+5. Primeira instalação: o token de setup só aparece num terminal interativo, com o serviço parado. No servidor: `docker compose -p <projeto> -f deploy/uirapuru/compose.yaml run --rm -it puxiri setup-token`, com as mesmas variáveis do deploy.
 
 Replicação: captura automática a cada `PUXIRI_REPLICATION_INTERVAL_SECONDS` (padrão 300; `0` desliga), geração nova a cada `PUXIRI_REPLICATION_GENERATION_HOURS` (padrão 24) e `PUXIRI_REPLICATION_RETAIN_GENERATIONS` gerações no S3 (padrão 7). Veja o [ADR 0008](docs/adr/0008-replication-to-s3-compatible-storage.md).
 
