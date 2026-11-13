@@ -1,136 +1,72 @@
 # Puxiri
 
-Gestor de trabalho self hosted em desenvolvimento. Uma instalação, uma organização, SQLite local e frontend embutido no executável Rust.
+Gestor de trabalho self-hosted: uma instalação, uma organização, SQLite local e a interface embutida num único executável Rust.
 
-**Esta versão é um spike da Fase 0, não um produto pronto.** Por padrão serve apenas saúde mínima e SPA, com migrations e lock do diretório. Serviços internos e uma API read-only opt-in de projetos/sessão têm testes locais, mas login HTTP, wizard de setup protegido, Kanban, integrações e backup ainda não estão implementados. Não exponha na internet nem use dados reais.
+> **Estado:** primeira versão utilizável, ainda em desenvolvimento. Mantenha a replicação ligada. O que falta está no [plano de desenvolvimento](docs/development-plan.md).
 
-## Desenvolvimento local
+## O que já funciona
 
-As versões locais são fixadas em `.mise.toml`: Rust/Cargo 1.99.0, Node 24.21.0 e pnpm 11.21.0. Instale mise, rode `mise install` na raiz e use `mise exec -- ...` para que comandos diretos e `make` usem os pins do projeto. Node é necessário para construir/testar a SPA, não para executar o binário pronto.
+- **Projetos e issues:** quadro Kanban, título e descrição, prioridade, prazo, responsável, busca com filtros, comentários e a vista "meus itens".
+- **Entrada:** setup com token de uso único, login por um provedor OIDC (Muira) ou pela autenticação própria (incompleta), convites por email (Sabiá, MillionSend ou Resend) e sessões com MFA.
+- **MCP** em `/mcp`, autorizado pelo Puxiri.
+- **Administração** em `/gestao`: pessoas, banimento, projetos, remetente de email, auditoria e replicação.
+- **Recuperação de desastres** com [`sqlite-replication`](https://github.com/lucaswilliameufrasio/sqlite-replication): captura automática, envio opcional para S3 e restauração em arquivo novo.
 
-```sh
-mise install
-mise exec -- make install
-mise exec -- make serve
-```
+Ainda não tem labels, campos customizados, atualização ao vivo, anexos nem automações.
 
-Abra `http://127.0.0.1:3000`. Dados de desenvolvimento ficam em `./data`, ignorado pelo Git. Uma segunda instância no mesmo diretório é rejeitada.
+## Rodar com Docker Compose
 
-Para reconstruir e gerar o executável:
-
-```sh
-mise exec -- make build
-./target/release/puxiri serve --bind 127.0.0.1:3000 --data-dir ./data
-```
-
-O binário contém HTML, JS, CSS, fontes e migrations. Pode ser executado fora do repositório, sem Node nem `web/dist`. SQLite/WAL/SHM devem permanecer em disco local, nunca NFS/S3. O binário deste spike ainda depende de bibliotecas do sistema; distribuição portátil será validada posteriormente.
-
-Opções de bootstrap implementadas: `--bind`/`PUXIRI_BIND` e `--data-dir`/`PUXIRI_DATA_DIR`. `RUST_LOG` controla os logs estruturados. Não passar segredos em URLs/argumentos. Encerre com Ctrl+C ou SIGTERM para fechar conexões graciosamente.
-
-`--browser-origin`/`PUXIRI_BROWSER_ORIGIN` permite optar explicitamente pelas consultas `/api/v1/auth/session`, `/api/v1/projects` e `/api/v1/admin/projects`, além de logout por DELETE na sessão atual com Origin/CSRF. Exige origem HTTPS canônica, Host correspondente e sessão atual no cookie Secure/HttpOnly host-only; sem a opção, essas rotas retornam 404. O binário não termina TLS, não cria contas/sessões por HTTP e não deve ser exposto publicamente: os testes usam contas/sessões sintéticas em SQLite temporário. Login/signup, mutações de projeto/conta, onboarding e frontend autenticado continuam fechados. Não usar esse flag para contornar setup. Contrato e limites: [API browser de projetos](docs/browser-project-api-design.md).
-
-## Produção com Docker Compose
-
-`compose.yaml` sobe só o Puxiri: SQLite fica embutido, e Muira, email e S3 são serviços externos. Não há proxy nem TLS; o Puxiri publica HTTP em `PUXIRI_PUBLISH` (padrão `127.0.0.1:3000`) e espera um front end HTTPS seu na origem `PUXIRI_BROWSER_ORIGIN`. O build usa o checkout de `sqlite-replication` em `SQLITE_REPLICATION_DIR` (padrão `../sqlite-replication`).
+`compose.yaml` sobe só o Puxiri. Não há TLS: coloque um HTTPS seu na frente da porta publicada.
 
 ```sh
-cp .env.example .env                              # preencha a origem e, se quiser, o S3
-docker compose build
-docker compose run --rm -it puxiri setup-token    # só na primeira instalação, com o serviço parado
+cp .env.example .env                              # preencha PUXIRI_BROWSER_ORIGIN
+docker compose build                              # precisa de ../sqlite-replication
+docker compose run --rm -it puxiri setup-token    # primeira instalação, com o serviço parado
 docker compose up -d
 ```
 
-O container roda como não root, com raiz somente leitura e sem capabilities. Banco, geração local da replicação e restaurações ficam no volume `puxiri-data`; a restauração do S3 usa o volume `puxiri-tmp` como espaço temporário. Para trocar o banco por uma cópia restaurada, pare o serviço (`docker compose stop`) antes.
+Imagem publicada, para não compilar: `ghcr.io/lucaswilliameufrasio/puxiri:<versão>` (só `linux/amd64`). Para deploy pelo Uirapuru, use `deploy/uirapuru/compose.yaml` com estratégia `recreate` e uma réplica: o SQLite aceita uma instância só. Detalhes no [ADR 0009](docs/adr/0009-secrets-from-the-environment-and-uirapuru-deploy.md).
 
-Master key: sem `PUXIRI_MASTER_KEY_BASE64`, ela é criada em `master.key` no mesmo volume do banco, e o S3 recupera o banco, não a chave. Prefira guardá-la num gerenciador de segredos e passar por essa variável (base64 de 32 bytes; `openssl rand -base64 32` para uma nova). Para levar a chave de uma instalação existente: `docker compose cp puxiri:/data/master.key - | tar -xO | base64 -w0`. Se o arquivo continuar no volume, ele precisa ser igual à variável, senão o Puxiri não sobe. Segredos vêm sempre do ambiente: Ciphera pelo Uirapuru ou `ciphera run`, Infisical por `infisical run`, Vault pelo Vault Agent ([ADR 0009](docs/adr/0009-secrets-from-the-environment-and-uirapuru-deploy.md)).
+## Configuração
 
-### Deploy pelo Uirapuru
+Tudo vem do ambiente, segredos inclusive. Ciphera, Infisical e Vault entram pelo `run` ou pelo agente de cada um.
 
-1. Publique a imagem: crie uma tag `v*`; `.github/workflows/publish-image.yml` gera `ghcr.io/<dono>/puxiri:<versão>` para `linux/amd64`. O pacote GHCR nasce privado: dê credenciais do registry ao servidor ou torne-o público.
-2. No Uirapuru, crie o serviço `puxiri` com `compose_path = deploy/uirapuru/compose.yaml`, estratégia `recreate` e uma réplica. O Puxiri é instância única (SQLite com lock exclusivo no volume); blue-green ou rolling subiriam um segundo container que não consegue o lock.
-3. Rode a descoberta de variáveis em `deploy/uirapuru/.env.example`. `PUXIRI_MASTER_KEY_BASE64` e as credenciais do S3 são `secure` (ficam no Ciphera); o resto é `plain`.
-4. Crie a rota para a porta `3000`; `PUXIRI_BROWSER_ORIGIN` é a origem HTTPS dessa rota.
-5. Primeira instalação: o token de setup só aparece num terminal interativo, com o serviço parado. No servidor: `docker compose -p <projeto> -f deploy/uirapuru/compose.yaml run --rm -it puxiri setup-token`, com as mesmas variáveis do deploy.
+| Variável | Padrão | Para quê |
+| --- | --- | --- |
+| `PUXIRI_BROWSER_ORIGIN` | — | Origem HTTPS pública. Sem ela, a interface autenticada fica desligada. |
+| `PUXIRI_BIND` | `127.0.0.1:3000` | Endereço de escuta (`0.0.0.0:3000` na imagem). |
+| `PUXIRI_DATA_DIR` | `data` | Banco, réplica local e restaurações. |
+| `PUXIRI_MASTER_KEY_BASE64` | — | Master key (32 bytes em base64). Sem ela, é criada em `master.key` no diretório de dados. |
+| `PUXIRI_REPLICATION_INTERVAL_SECONDS` | `300` | Intervalo da captura automática; `0` desliga. |
+| `PUXIRI_REPLICATION_GENERATION_HOURS` | `24` | Idade em que começa uma geração nova, a partir de um snapshot. |
+| `PUXIRI_REPLICATION_RETAIN_GENERATIONS` | `7` | Gerações mantidas no S3. |
+| `PUXIRI_REPLICATION_S3_BUCKET` | — | Liga o envio para S3. Também: `_PREFIX`, `_REGION`, `_ENDPOINT`, `_PATH_STYLE`. |
+| `PUXIRI_REPLICATION_S3_ACCESS_KEY_ID`, `_SECRET_ACCESS_KEY` | — | Credenciais do S3, só por ambiente. |
+| `RUST_LOG` | `info` | Nível dos logs (JSON). |
 
-Replicação: captura automática a cada `PUXIRI_REPLICATION_INTERVAL_SECONDS` (padrão 300; `0` desliga), geração nova a cada `PUXIRI_REPLICATION_GENERATION_HOURS` (padrão 24) e `PUXIRI_REPLICATION_RETAIN_GENERATIONS` gerações no S3 (padrão 7). Veja o [ADR 0008](docs/adr/0008-replication-to-s3-compatible-storage.md).
+**Guarde a master key fora do servidor.** O S3 recupera o banco, mas os segredos dentro dele (TOTP, chaves de email) só abrem com a mesma chave. Para exportar a de uma instalação existente: `docker compose cp puxiri:/data/master.key - | tar -xO | base64 -w0`.
 
-## Validação
+Saúde: `GET /health/live` e `GET /health/ready`.
+
+## Desenvolvimento
+
+Versões fixadas em `.mise.toml`: Rust 1.99.1, Node 24.21.0, pnpm 11.21.0. Clone o `sqlite-replication` ao lado deste repositório.
 
 ```sh
-mise exec -- sh -c 'cd web && pnpm exec playwright install chromium'
-mise exec -- make check
+mise install
+mise exec -- make install    # dependências da interface
+mise exec -- make serve      # http://127.0.0.1:3000, dados em ./data
+mise exec -- make check      # formatação, lint, testes Rust e web, E2E e contratos S3 (precisa de Docker)
+make test-replication-s3     # replicação contra um RustFS descartável
 ```
 
-Integrações usam SQLite em arquivos temporários reais. E2E inicia o executável em um diretório isolado e verifica a SPA embutida no desktop e mobile escuro, sem servidor Node/Vite de produção. O gate também exige Docker para o spike S3: inicia Floci descartável com dados em tmpfs e porta aleatória só no loopback, e remove apenas seu próprio container ao terminar. Nenhum endpoint, bucket ou credencial de outro ambiente é utilizado. O registry pode ser acessado para obter a imagem fixada.
+## Documentação
 
-`make test-s3` roda apenas os contratos de armazenamento/URLs/CORS em Floci e Chromium, com SDK S3 oficial usado só no harness Node de desenvolvimento. Arquivos e uploads ainda não têm adaptador S3 no produto. A replicação do SQLite pode enviar cada captura a um destino S3-compatible ([ADR 0008](docs/adr/0008-replication-to-s3-compatible-storage.md)); `make test-replication-s3` exercita isso contra um RustFS descartável no loopback, sem homologar AWS S3, R2 ou outros provedores. A imagem multiarch Floci 2.3.0 está fixada pelo digest OCI `sha256:e0b292df4dc9559b7b1bf4f51bdda4bb8e269276236438cd03cae661260ea8a9` em `web/scripts/s3-spike.test.mjs`. O teste habilita validação SigV4 e autorização S3 com as credenciais fictícias documentadas `test/test`, configura CORS no bucket e falha — sem pular ou substituir por mock — se Docker/imagem/Chromium não estiverem disponíveis.
+- [Plano de desenvolvimento](docs/development-plan.md): fases, decisões e o que falta.
+- [Decisões (ADRs)](docs/adr/): v1 utilizável com Muira (0006), recuperação e administração (0007), S3 e gerações (0008), segredos e Uirapuru (0009).
+- [Spikes e validações da Fase 0](docs/validation-spikes.md): o que cada harness de teste cobre e o que deixa de fora.
+- Desenho de cada área em [`docs/`](docs/).
 
-O mesmo spike usa SQLite em arquivo temporário via `node:sqlite` somente no harness para exercitar claims, fencing, rollback e pins remotos. Um processo filho exclusivo é interrompido por SIGKILL após PUT e antes do commit, verificando recuperação por readback sem staging. Isso não muda SQLx/Rust do servidor nem implementa o fluxo autenticado de uploads. Estado temporário fica em `.test-data` e é removido pelo teste.
+## Licença
 
-O harness também valida bundle TAR/AES-GCM experimental (limite de fixture: 8 MiB), snapshot com pins, inventário/checksums e restore local isolado após apagar o bucket de origem. Usa chave efêmera de teste, sem gestão de chaves, retenção ou ativação de instalação restaurada. Spools plaintext ficam em diretórios privados de teste; não é formato público nem backup/restore de produção.
-
-Jobs experimentais de bundle persistem estado/leases e pins. Testes interrompem um filho por SIGKILL em quatro fronteiras; recuperação só libera pins depois de o supervisor confirmar que o worker parou, nunca apenas por expiração de lease. Limpeza de spool/partial é recuperável e preserva bundles completos e diagnósticos incompletos. Ainda não há supervisor Rust, retomada automática nem política de retenção de diagnósticos.
-
-`make measure-snapshot` mede localmente uma fixture Rust de 100 mil registros/10 mil objetos. `make measure-resources` repete em containers limitados a 1 CPU/1 GiB e 2 CPU/2 GiB, verifica cotas efetivas e guarda JSON em `.test-data/reports`. Mede freeze, Online Backup com espera de escritas, WAL/checkpoint, transações sintéticas, RSS e pico do cgroup; não mede HTTP/Argon2/capacidade real. Usa runtime Rust fixado por digest em `web/scripts/measure-resources.mjs` e bind volume privado (não tmpfs). Docker rootless mantém volume 0700 com UID mapeado do host.
-
-`make check` também exige a imagem Node fixada em `web/scripts/s3-spool-budget-contracts.mjs` para testar preflight de disco em tmpfs real de 4 MiB. Bundle experimental recusa excesso de inventário/bytes ou espaço insuficiente antes de copiar banco/inserir pins. Preflight não é reserva global de espaço e não elimina ENOSPC durante execução. Pull/arquiteturas das imagens fixadas ainda precisam de validação em CI.
-
-`tests/email_provider_spike.rs` valida Cloudflare/Resend REST com client Rust de teste e fakes SaaS em HTTP loopback: paths/payload/auth, resultados por destinatário, erros e resultado ambíguo após timeout. Sem retry/fallback automático ou envio externo. Não prova TLS, entrega real, domínio/entitlement ou fila de produto; reqwest é somente dev-dependency. Eventos Cloudflare via Queues/HTTP pull seguem pendentes.
-
-O spike agora cobre também SendGrid v3 (202/headers/mailboxes) e SES v2 pelo SDK oficial, com credenciais artificiais explícitas e retries desabilitados. `tests/email_webhook_spike.rs` valida assinatura compatível Svix/Standard Webhooks sobre raw body e inbox SQLite deduplicada; ainda não aplica supressão nem expõe callback no servidor do produto. Retornos SES/Cloudflare, rotação e smoke real continuam pendentes. Dependências novas são só de desenvolvimento; testes do SDK AWS exigem CMake/toolchain C. Não subir o mínimo Rust para usar o SDK mais recente: versão SES compatível foi fixada.
-
-`tests/sendgrid_webhook_spike.rs` adiciona retorno SendGrid ECDSA P-256/SPKI DER, vetor oficial e inbox SQLite por evento/config, com lotes atômicos, replay concorrente/rebatched e reopen. Ainda não correlaciona envios nem aplica supressões. Limites/freshness são experimentais; validação com conta real, rotação, SNS/SES e Queues Cloudflare seguem pendentes. Nenhuma rota de produto ou serviço remoto foi criado.
-
-`tests/ses_sns_spike.rs` valida canonicalização SNS/RSA, trust chain/validade/hostname com certificados artificiais, TopicArn/origem estritos e inbox SQLite. Resolver mapeia origem AWS validada para HTTP loopback fixo: não prova fetch TLS/certificados AWS reais. Confirmações não seguem URLs nem ativam subscriptions. OpenSSL nativo/headers/pkg-config são necessários nos testes; supressão, conta real e Queues Cloudflare continuam pendentes.
-
-`tests/cloudflare_queue_spike.rs` valida HTTP pull/ack com fake loopback: Base64/json e text, scope de eventos, inbox SQLite antes do ack, conflito/rollback e reentrega após reopen. Falha/timeout/ack parcial conserva evento persistido e retorna resultado desconhecido, sem retry oculto. Nenhum Worker/token/queue real foi criado; jobs internos continuam SQLite. Consumer de produto, TLS/permissões/conta real, poison/DLQ, scheduler e supressão seguem pendentes.
-
-O spike Resend agora testa correlação config/message/destinatário e projeção atômica de supressão por endereço/auditoria/pendências. Callback precoce espera receipt/reconcile; mismatch não gera efeito; reclamação não bane conta nem remove sino. Envio já autorizado pode estar em trânsito e não é desfeito. Esses efeitos existem somente nas fixtures SQLite/HTTP locais, não no produto; demais providers, sender/outbox e contas reais continuam pendentes.
-
-O ingester SendGrid experimental também projeta supressão/audit na mesma transação autenticada: tentativa opaca em custom_args + config/recipient registrados, sem inferir prefixos de IDs do provider. Blocked/Content/Reputation não suprimem endereço; reclamação ou bounce permanente Invalid Address correlacionados sim. Replay/reopen e rollback de todo lote são testados. Enforcement no sender do produto continua pendente.
-
-O spike SES/SNS correlaciona topic/conta/SES messageId/destinatário antes de supressão atômica e audit. Candidatos múltiplos a reclamante, falhas temporárias e bounces sem evidência explícita de endereço inválido ficam sem efeito. Replay/reopen, colisão de feedbackId e rollback são testados; política conservadora ainda não cobre todo hard bounce SES. Certificados continuam artificiais; TLS AWS, contas reais, Cloudflare e unificação/enforcement no produto seguem pendentes.
-
-O consumer Cloudflare experimental correlaciona configuração/messageId/recipient antes de confirmar inbox+supressão+audit e só depois faz ack. Terminal soft bounce não vira endereço inválido; eventos precoces já acked reconciliam pela inbox local. Concorrência, reopen, rollback e ack ambíguo são testados. Metadata não autentica produtor: TLS e controle de escrita na queue real precisam de validação antes do produto. Enforcement no sender do produto permanece pendente.
-
-As quatro projeções agora alimentam uma política **comum nas fixtures** por endereço, com cancelamento de pendências ready e gate SQLite de autorização independente de provider. Troca de provider, concorrência, rollback e persistência são testados; envios já autorizados não são desfeitos. Unificação de fixtures não é integração no sender/outbox do produto, nem backfill/migração dos dados anteriores.
-
-`tests/apple_callback_spike.rs` valida POST form-urlencoded, state/cookie de tentativa única, concorrência, expiry e rollback no SQLite real. Cookie restrito ao callback não enfraquece a sessão global. É só correlação: não valida identidade Apple nem cria login; token exchange/JWT/nonce, GitLab e browser HTTPS real continuam pendentes. Loopback não é return URL aceito pela Apple.
-
-`tests/oidc_identity_spike.rs` usa openidconnect 4.0.1 como dependência de teste para validar JWT RS256 com issuer/client/nonce/clock fixos e JWKS artificial servido via HTTP. Claims/chaves inválidas são recusadas; email não é identidade e pode faltar. Perfil GitLab local, não login real nem compatibilidade Apple comprovada. Token exchange/PKCE integrado, discovery seguro, TLS e sessões/vínculos do produto seguem pendentes.
-
-`tests/gitlab_exchange_spike.rs` exercita Authorization Code/PKCE S256 e token exchange via oauth2 5.0.0 sobre HTTP local. Confere state, redirect, verifier e Basic auth; erro/timeout/redirect não gera retry oculto. Neste contrato isolado, tokens são descartados e resposta OAuth não é identidade. Integração de produto com state durável/verificador OIDC/sessão ainda não existe.
-
-`tests/oidc_flow_spike.rs` une esses contratos em uma fixture: claim SQLite antes da rede, exchange CoreClient e validação de nonce/ID token antes de registrar identidade atomicamente. Concorrência/replay, timeout, rollback e reopen após claim são testados. Não reusa code após resultado ambíguo e não cria sessão/conta/vínculo. Browser HTTPS, SaaS real, proteção/limpeza de nonce/verifier e produto seguem pendentes.
-
-`tests/apple_client_secret_spike.rs` valida assinatura ES256 de client credentials com chave PKCS#8 artificial, verificação independente OpenSSL, teto de validade e limite de renovação/rotação. Não verifica ID tokens Apple, não troca code no SaaS e não implementa armazenamento ou renovação operacional de segredos.
-
-`tests/oidc_identity_spike.rs` também valida um perfil Apple RS256 artificial com issuer/Services ID/nonce configurados, booleanos ou strings de email_verified e is_private_email. Email ausente/vazio/alterado não muda subject. Discovery pública confirma RS256/client_secret_post, mas troca de code e browser Apple reais continuam pendentes.
-
-`tests/oidc_flow_spike.rs` também integra o perfil Apple local: claim SQLite, client_secret ES256 em POST body, CoreClient e ID token RS256/nonce antes de identidade. Confere ausência de Basic/PKCE inferido, concorrência e falhas sem retry. Credenciais artificiais, cookie inserido por reqwest e nenhum login/SaaS real.
-
-`tests/mcp_http_spike.rs` usa rmcp 3.5.1 dev-only em Streamable HTTP loopback: metadata/challenge, grants opacos inseridos pelo teste, recurso/scope/expiração/revogação/banimento e initialize/list/call de ferramenta diagnóstica. Não emite OAuth, não serve conteúdo real e não comprova OpenCode/Claude Code/Claude Desktop/Codex remotos.
-
-`tests/mcp_oauth_spike.rs` exercita cliente oauth2 mantido contra AS artificial com metadata/S256/resource, consentimento pré-inserido, código de uso único e token opaco em SQLite. O token emitido agora autoriza initialize/list/call no rmcp da mesma fixture; consentimento atual e revogação são revalidados por request. Não é AS de produto ou consent UI; renovação de produto e quatro clientes reais continuam pendentes.
-
-A mesma fixture agora exercita refresh rotation com digests, prazo absoluto da família e detecção estrita de reutilização. Reuse revoga a família inclusive credenciais recém-emitidas em corrida; rollback/reopen e consentimento são testados. Não implementa renovação automática do cliente, política operacional de recuperação ou aceite dos quatro clientes.
-
-Registro de clientes nessa fixture é opcional/desabilitado por padrão, com redirect HTTPS exato ou loopback aprovado (`localhost`/`127.0.0.1`, `/callback`, porta variável) e quota transacional; não concede consentimento. A troca de código exige o redirect exato usado na autorização. Clientes desativados e troca do client ID do consentimento bloqueiam tokens/codes/refresh. Não é DCR de produto, CIMD ou compatibilidade comprovada com os quatro clientes.
-
-A fixture também admite o path explícito `/callback/fixture-server-id`, sem wildcard, e exercita respostas vinculadas ao issuer: metadata/`iss` coincidentes e validação local de issuer/state/destino antes de exchange. O helper não é callback de produto nem validação fornecida pelo SDK oauth2; fetch CIMD, TLS/browser e clientes reais permanecem pendentes.
-
-Snapshots locais de metadata CIMD pré-aprovada são validados por URL/client ID e pelo mesmo perfil público de redirects/grants. Importação create-only persiste cliente e digest atomicamente, sem consentimento implícito, sobrescrita ou reativação. Isso é pré-registro experimental a partir de bytes locais, não fetch HTTPS ou suporte CIMD dinâmico anunciado.
-
-`tests/support/metadata_fetch.rs` exercita reqwest com TLS verificado, destino pinado, sem proxy/redirect/retry e corpo/tempo limitados. CA e servidor são artificiais em loopback; o caminho de política exige URL/IP aprovados e rejeita respostas de resolução mistas/especiais. Não é resolvedor DNS/SSRF de produto, cache remoto ou aceite de documentos/clientes reais.
-
-O fake MCP testa TTL de metadata controlado por `Cache-Control` e capped em 300s: expirado/no-cache/no-store não permite novo authorize, exchange, refresh ou chamadas MCP. Mudança do body invalida cliente, consentimentos, famílias e codes atomicamente; revalidação idêntica pode renovar o cache sem alterar identidade. Continua sendo fixture SQLite, não cache compartilhado ou manutenção de autorização em produção.
-
-A fixture separa também trust review administrativo do snapshot e do consentimento: sem review não há code; metadata/nome/domínio continuam dados não confiáveis, callback loopback recebe warning e projetos não são escolhidos implicitamente. É só um view-model de teste, sem UI/admin real ou encoder HTML.
-
-Endpoints públicos de saúde deste spike: `/health/live` e `/health/ready`. Readiness retorna apenas `ready`/`not_ready`; não expõe caminhos, versão, usuários ou conteúdo. As três rotas browser opt-in acima exigem cookie válido e continuam sem login/issuance HTTP.
-
-## Plano e distribuição
-
-[Plano de desenvolvimento](docs/development-plan.md). O restante da Fase 0 precisa validar backup online, OAuth/MCP nos quatro clientes, providers de email e S3 privado. Nada disso é considerado pronto pelo esqueleto.
-
-Direitos reservados. Repositório privado, sem licença pública; não anunciado como open source. Licença e condições serão decididas antes da distribuição pública.
+Sem licença por enquanto: o código está público para leitura, mas todos os direitos são reservados.
