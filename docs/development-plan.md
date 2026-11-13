@@ -1,6 +1,6 @@
 # Puxiri — Plano completo de desenvolvimento
 
-Versão: 1.1 · Atualizado: 07/11/2026 · Status: decisões de produto consolidadas; validação técnica pela Fase 0 ainda pendente.
+Versão: 1.2 · Atualizado: 13/11/2026 · Status: primeira versão utilizável entregue (ADRs 0006–0009); validação técnica da Fase 0 e fases seguintes ainda abertas.
 
 Esta revisão incorpora as decisões da sessão de definição de produto nas seções correspondentes, substituindo regras anteriores incompatíveis. Recursos acordados não estão implementados nem tecnicamente comprovados apenas por constarem neste plano.
 
@@ -600,6 +600,8 @@ Container não root, filesystem raiz read only quando possível, volume `/data`,
 Docker Compose simples com um serviço Puxiri; reverse proxy opcional. Para MinIO de desenvolvimento, perfil separado, sem torná-lo dependência de produção. systemd com usuário dedicado e acesso restrito ao diretório de dados.
 
 Uma imagem contém assets e executável. CI compila Linux amd64/arm64, roda testes, lint e build web; outros alvos depois. SQLite incluído no build quando necessário; “binário único” não significa ausência de bibliotecas de sistema sem validar o target.
+
+Entregue em 12–13/11/2026 ([ADR 0009](adr/0009-secrets-from-the-environment-and-uirapuru-deploy.md)): `Dockerfile` (distroless, não root, raiz read-only, volumes `/data` e `/var/tmp`), `compose.yaml` só com o Puxiri, `deploy/uirapuru/compose.yaml` para o Uirapuru (estratégia `recreate`, uma réplica) e o workflow `publish-image`, que publica `ghcr.io/lucaswilliameufrasio/puxiri` só para `linux/amd64` em tags `v*` (`v0.1.0` publicada). Segredos vêm do ambiente; a master key pode vir de `PUXIRI_MASTER_KEY_BASE64`. Ainda faltam: healthcheck no container (fica de fora para o Uirapuru não escolher blue-green), arm64, systemd e os comandos `doctor`/`backup`/`admin recover`/`mcp stdio`.
 
 Upgrade: ler notas → backup verificado → parar processo → instalar binário → migrations → readiness. Não assumir que trocar para binário antigo desfaz migration. Downgrade via restore compatível. Sem atualização automática de binário pela UI no v1.
 
@@ -2298,6 +2300,8 @@ Saída: arquivos e exportações privados, com ciclo de vida/cota/autorização 
 - [ ] Testar restauração pela UI, manual/agendado e isolado, completo sem depender da origem.
 - [ ] Ensaio de desastre e documentação de RPO/RTO medidos.
 
+Parcial em 09–13/11/2026, fora destes itens ([ADRs 0007](adr/0007-disaster-recovery-and-administration.md) e [0008](adr/0008-replication-to-s3-compatible-storage.md)): recuperação do SQLite pelo `sqlite-replication`, com captura agendada, gerações com retenção no S3 e restauração local ou do S3 em arquivo novo pelo `/gestao`. Isso não é o backup cifrado nem o bundle completo acima, e o ADR 0002 continua Deferred. Ensaio de desastre e RPO/RTO medidos seguem pendentes.
+
 Saída: dados recuperáveis em outra instância com procedimento testado.
 
 ### Fase 6 — Integrações MCP
@@ -2326,7 +2330,9 @@ Saída: automações sobrevivem a restart e não bypassam permissões.
 - [ ] Docker, systemd, binários e CI por arquitetura.
 - [ ] Documentação de instalação, operação, providers e atualização.
 - [ ] Release candidate com backup e restore aprovados.
-- [ ] Antes de distribuição pública, decidir licença e condições de publicação; não anunciar open source sem essa decisão.
+- [ ] Antes de distribuição pública, decidir licença e condições de publicação; não anunciar open source sem essa decisão. Em 13/11/2026 o repositório ficou público sem licença (todos os direitos reservados, como diz o README); a decisão de licença continua aberta.
+
+Parcial em 12–13/11/2026: Docker, Compose e imagem GHCR `linux/amd64` por tag; documentação de instalação no README e no ADR 0009. Faltam arm64, systemd, binários e CI de testes.
 
 Não fixar prazo antes dos spikes: OAuth MCP, Apple e restauração concentram risco técnico. Kanban sozinho é significativamente menor que o escopo completo acordado.
 
@@ -2392,9 +2398,19 @@ Esta matriz impede que fixtures/scratch sejam confundidos com capacidade do prod
 | Kanban (Fase 2) | Migrations/comandos internos criam projeto, manager, catálogos e issue com contador/rank/histórico; queries internas autorizadas listam e leem detalhes/histórico num snapshot SQLite. Ainda não há rotas HTTP/MCP, UI, busca ou board utilizável. | Idempotency-Key, outbox/jobs, due dates, mutações/listagem por transporte, labels, API/UI, busca/facetas, acessibilidade e testes de jornada conforme seção 5. |
 | Providers e OAuth | Probes com HTTP fakes, fixtures locais e artefatos sintéticos para alguns contratos; ADR 0001 mantém autorização MCP deferred. | Adaptadores e configuração de produto, testes com provedores/contas controladas autorizados, segurança operacional; decisão e revisão independente para AS/OAuth antes de exposição. |
 | S3/arquivos (Fase 4) | Harness Node contra MinIO descartável e contratos sintéticos de URL, claims/pins e falha. | Adaptador S3 do produto, destinos aprovados, credenciais/segredos, uploads privados, migração, cotas, imagens/avatares, export e compatibilidade externa. |
-| Backup/restore (Fase 5) | Fixtures/harness e scratch demonstram mecanismos isolados; SQLite WAL snapshot/pins SQLx fixture e probes de staging/activation têm limites registrados nas fatias 133–158. | ADR 0002/formato e security review; implementação de produto end-to-end, retenção, download/MFA, restauração operacional e isolada, crash/durabilidade, capacidade real, ensaio de desastre e RPO/RTO. |
+| Backup/restore (Fase 5) | Fixtures/harness e scratch demonstram mecanismos isolados; SQLite WAL snapshot/pins SQLx fixture e probes de staging/activation têm limites registrados nas fatias 133–158. No produto (ADRs 0007–0008): captura gated, agendada a cada 300 s, gerações de 24 h, envio ao S3 com ACK, retenção de 7 gerações que só apaga chaves próprias, restauração local e do S3 em arquivo novo; `tests/replication.rs` (12 testes) e `make test-replication-s3` contra RustFS 1.0.4. | ADR 0002/formato e security review; implementação de produto end-to-end, retenção, download/MFA, restauração operacional e isolada, crash/durabilidade, capacidade real, ensaio de desastre e RPO/RTO. |
 | MCP/automações (Fases 6–7) | Probes de protocolo/state machine, sem aceitação de cliente real nem aplicação de domínio de produto. | API tokens, tools/jobs/outbox/scheduler e autorização comum; quatro clientes aprovados em HTTP/stdio, revogação/perda de acesso e fluxos duráveis. |
-| Release (Fase 8) | `make check` passou nas fatias 155, 161–162, 164–190 e 199–209 com Rust/Cargo 1.99.0 e Docker rootless. ARM64 cross-build foi tentado e bloqueado por toolchain ausente. | CI por arquitetura, benchmarks no hardware suportado, revisão de segurança/acessibilidade/desastre, pacotes/deploy/runbooks e release candidate com backup/restore aprovados. |
+| Release (Fase 8) | `make check` passou nas fatias 155, 161–162, 164–190 e 199–209 com Rust/Cargo 1.99.0 e Docker rootless. ARM64 cross-build foi tentado e bloqueado por toolchain ausente. Em 12–13/11/2026: imagem distroless de 86 MB, smoke do `compose.yaml` e do compose do Uirapuru (readiness, SPA, captura agendada, setup-token, SIGTERM com saída 0) e workflow `publish-image` com `v0.1.0` publicada no GHCR. | CI por arquitetura, benchmarks no hardware suportado, revisão de segurança/acessibilidade/desastre, pacotes/deploy/runbooks e release candidate com backup/restore aprovados. |
+
+#### Registro de 09–13/11/2026 — replicação S3, gerações, segredos e deploy
+
+- S3 no `sqlite-replication` (ADR 0008): cada captura vai ao destino S3-compatible; falha no envio mantém a captura local. Restauração do S3 pelo `/gestao`.
+- Captura agendada e retenção por gerações (ADR 0008, emenda de 12/11): uma operação de replicação por vez (409 `replication_busy`), shutdown sem captura nova, envio pulado quando o destino já confirmou o ponto.
+- Segredos (ADR 0009): tudo pelo ambiente, sem cliente próprio para Ciphera, Infisical ou Vault; `PUXIRI_MASTER_KEY_BASE64` com recusa de chave divergente ou inválida.
+- Deploy: `Dockerfile`, `compose.yaml`, `deploy/uirapuru/`, workflow `publish-image` e `v0.1.0` no GHCR.
+- Repositório público desde 13/11/2026: gitleaks no histórico só aponta 2 valores de teste; caminhos absolutos locais saíram dos arquivos atuais (o histórico ainda os tem); README reescrito, com os relatos de spike movidos para `docs/validation-spikes.md`.
+- Evidência: `cargo test --all-targets` (72 binários), clippy `-D warnings`, Vitest 166, svelte-check e lint limpos, `make test-replication-s3` contra RustFS, actionlint do workflow.
+- Desatualizado nesta matriz e não revisado nesta sessão: as linhas de identidade, autorização, Kanban e MCP ainda descrevem o estado anterior ao corte utilizável do ADR 0006 (por exemplo, "sem UI ou board").
 
 Atualização após a fatia 183: auditoria auth agora cobre também `auth.password.changed`, usa resultado tipado/validado no schema e reverte senha/sessões junto com a operação quando o append falha. O gate integral `RUSTUP_TOOLCHAIN=1.99.0 PUXIRI_E2E_PORT=18474 make check` passou nesta revisão (Vitest14, Playwright6, MinIO/S3 38 e todos os targets Rust). A matriz acima registra a última consolidação anterior; esta evidência não altera os checkboxes de saída.
 
